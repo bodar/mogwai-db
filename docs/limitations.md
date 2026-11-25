@@ -53,6 +53,7 @@ There are three kinds of limitation:
 | NUL character | Stored whole, but `length`, `substring`, `like` and `tinker.search` stop at it. A NUL in the query text is not supported. |
 | Invalid characters | A lone surrogate in a parameter or JSON becomes U+FFFD (`'a\ud800b'` → `'a�b'`). In the query text it is not supported. |
 | Full-text search | `tinker.search` is case-insensitive. Java's is case-sensitive. |
+| Full-text search values | `tinker.search` matches string values only. TinkerGraph matches the text of every value, so `search:'35'` finds `age=35` and a list's `[a, b]` text (`vendor/tinkerpop/tinkergraph-gremlin/src/main/java/org/apache/tinkerpop/gremlin/tinkergraph/structure/TinkerHelper.java:240`). |
 
 ### Numbers
 

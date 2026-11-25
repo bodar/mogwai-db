@@ -1,68 +1,39 @@
-Feature: mogwai addendum — tinker.search over collection + nested-JSON property values
+Feature: mogwai addendum — tinker.search matches string property values only
 
-  # The official Call.feature only searches SCALAR string properties on the modern graph. These
-  # scenarios prove the ValueNode-aware write-path indexer (Step 6) handles COLLECTION and
-  # NESTED-JSON values end-to-end: each property indexes as ONE row, its logical toString
-  # (`[a, b]`, `{k=v}`), so a list value is searchable by any element's text and a nested map
-  # value by its keys and leaf values — each a substring of that toString. Matching is
-  # case-insensitive (a documented divergence — what lets the trigram index serve LIKE). We walk
-  # each matched property to its owner and read a stable scalar ("title") so results compare.
+  # The official Call.feature only searches SCALAR string properties on the modern graph.
+  # `tinker.search` reads the `property_fts` index, which holds string values only (every other
+  # reader of it, TextP and regex, is `P<String>`). TinkerGraph also matches the toString() of a
+  # list or map value (`[a, b]`, `{k=v}`); we do not. That is a docs/limitations.md §3 row.
+  # Matching is case-insensitive (a documented divergence — what lets the trigram index serve LIKE).
+  # We walk each matched property to its owner and read a stable scalar ("title") so results compare.
   # @gap:search marks the family for an upstream gremlin-test give-back (no official coverage).
 
   @gap:search
-  Scenario: search a list-valued property by one of its elements
+  Scenario: a list-valued property is not matched by one of its elements
     Given the search graph
     And the traversal of
       """
       g.call("tinker.search", ["search": "brave"]).element().values("title")
       """
     When iterated to list
-    Then the result should be unordered
-      | result |
-      | chapter one |
+    Then the result should be empty
 
   @gap:search
-  Scenario: search a list-valued property by a case-insensitive element substring
-    Given the search graph
-    And the traversal of
-      """
-      g.call("tinker.search").with("search", "BRAV").element().values("title")
-      """
-    When iterated to list
-    Then the result should be unordered
-      | result |
-      | chapter one |
-
-  @gap:search
-  Scenario: search a nested map property by a KEY
-    Given the search graph
-    And the traversal of
-      """
-      g.call("tinker.search", ["search": "zone"]).element().values("title")
-      """
-    When iterated to list
-    Then the result should be unordered
-      | result |
-      | chapter two |
-
-  @gap:search
-  Scenario: search a nested map property by a leaf VALUE
+  Scenario: a nested map property is not matched by a leaf VALUE
     Given the search graph
     And the traversal of
       """
       g.call("tinker.search", ["search": "london"]).element().values("title")
       """
     When iterated to list
-    Then the result should be unordered
-      | result |
-      | chapter two |
+    Then the result should be empty
 
   @gap:search
-  Scenario: a scalar title is still searchable alongside the collections
+  Scenario: a scalar string title is searchable case-insensitively
     Given the search graph
     And the traversal of
       """
-      g.call("tinker.search", ["search": "chapter"]).element().values("title")
+      g.call("tinker.search").with("search", "CHAPTER").element().values("title")
       """
     When iterated to list
     Then the result should be unordered

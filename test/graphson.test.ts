@@ -115,10 +115,9 @@ describe('the reference graphs load from their own GraphSON files', () => {
     // The plan measured the write-traversal seed at 98,198 statements (11.1 per element) and 5,918 ms.
     // Statement count is the deterministic half of that win, so it is what gets asserted.
     expect(stats.statements).toBeLessThan(2000);
-    // 8,936 property_fts rows — the figure the REAL write path produces (plan doc §1a). A loader with
-    // its own FTS walk produced 9,023 in the probe that motivated propertyFtsRows; this is the number
-    // that says both paths share the walk.
-    expect(store.query<{ n: number }>('SELECT count(*) AS n FROM property_fts')[0].n).toBe(8936);
+    // 1,305 property_fts rows — one per STRING property, the figure the REAL write path produces too;
+    // this is the number that says both paths share the one FTS rendering (`propertyFtsRows`).
+    expect(store.query<{ n: number }>('SELECT count(*) AS n FROM property_fts')[0].n).toBe(1305);
     expect(store.query<{ n: number }>('SELECT count(*) AS n FROM vertex_properties')[0].n).toBe(1976);
     expect(store.query<{ n: number }>('SELECT count(*) AS n FROM edge_properties')[0].n).toBe(7047);
     expect(executeQuery(store, "g.V().has('name','HEY BO DIDDLEY').out('followedBy').count()", {}).length).toBe(1);

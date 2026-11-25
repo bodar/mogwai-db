@@ -142,9 +142,8 @@ describe('the bulk loader lands what the write path lands', () => {
       [{ t: 'int', v: 1 }, { t: 'string', v: 'one' }],
       [{ t: 'long', v: 2 }, { t: 'string', v: 'two' }],
     ]);
-    // And the FTS text carries both keys, so a search over a typed key still matches.
-    expect(store.query<{ text: string }>("SELECT text FROM property_fts WHERE pk='scores'").map((r) => r.text))
-      .toEqual(['{1=one, 2=two}']);
+    // A map is not a string, so it has no FTS row (docs/limitations.md §3).
+    expect(store.query<{ text: string }>("SELECT text FROM property_fts WHERE pk='scores'")).toEqual([]);
   });
 });
 
@@ -305,7 +304,7 @@ describe("idPolicy: 'remap' — loading into a graph that already has these ids"
     expect(store.query<{ n: number }>(
       `SELECT count(*) AS n FROM edges e JOIN vertex_properties p ON p.node = e.src
        WHERE p.key='name' AND p.value='marko'`)[0].n).toBe(6);
-    expect(store.query<{ n: number }>('SELECT count(*) AS n FROM property_fts')[0].n).toBe(36);
+    expect(store.query<{ n: number }>('SELECT count(*) AS n FROM property_fts')[0].n).toBe(16);
   });
 
   test("'remap' twice over the same source fails closed, naming 'renumber'", () => {

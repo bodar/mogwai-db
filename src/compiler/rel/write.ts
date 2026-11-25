@@ -327,11 +327,9 @@ export function propertyDrop(target: Rel, elem: Elem, fresh: Minter): Effects {
  * A LITERAL scalar value is: its stored form, its `vtype` and the FTS text it indexes as are all
  * decided at compile time, so the index rows are an `INSERT … SELECT` over the property insert's own
  * `RETURNING` — the text it indexes as is `propertyFtsText`, the one authority for it,
- * because a re-derived index is a SILENT divergence (`fts-index.ts` measured 9,023 rows against
- * 8,936). A COLLECTION value is expressible too and by the same route — it stores as a
- * self-describing typed `{t,v}` tree, so the only difference is that its JSON text crosses as
- * `jsonb(<text>)` and its index walk emits one row per nested leaf, both of which the shared waists
- * already do. A traversal value, a meta-property and a `T` token key each need something the
+ * because a re-derived index is a SILENT divergence. A COLLECTION value is expressible too and by the
+ * same route — it stores as a self-describing typed `{t,v}` tree whose JSON text crosses as
+ * `jsonb(<text>)`, and like every non-string value it has no index row. A traversal value, a meta-property and a `T` token key each need something the
  * compile-time value does not have, so each raises `UnsupportedTraversal` rather than answering a
  * different question — the failure mode a fail-closed compiler must never fall into.
  *
@@ -536,15 +534,11 @@ function cardinalityOf(owner: Expr, key: Expr, declared: VertexCardinality | nul
  * value the client deliberately sent as a parameter. Bound, the statement's text is the same whatever
  * the value, which is also the statement the user's GValue asked to be cacheable.
  *
- * Where the text IS the stored value (a string) it is the SAME parameter under its wire name, so every
- * use within one statement dedups to one bind. Otherwise (a number's text, a collection's `[a, b]`) it
- * is a different value derived from that parameter, under its own reuse key — one a Gremlin variable
- * name cannot spell, so it never collides with a second parameter (the kernel keeps the FIRST value a
- * key is seen with, `q.ts` `renderStatement`, so a shared key with a different value would be wrong).
+ * Only a string value has an index text (`propertyFtsText`), and that text IS the stored value, so it
+ * is the SAME parameter under its wire name: every use within one statement dedups to one bind.
  */
 function ftsTextExpr(write: PropertySet, ftsText: string): Expr {
-  if (write.valueName === null) return text(ftsText);
-  return param(ftsText, ftsText === write.stored ? write.valueName : `${write.valueName}#fts`, 'text');
+  return write.valueName === null ? text(ftsText) : param(ftsText, write.valueName, 'text');
 }
 
 /** `INSERT INTO property_fts … SELECT … FROM <the rows just written>` — one index row per written

@@ -8,11 +8,12 @@
 // that encoding. A SQL trigger over the raw JSONB blob would index tag noise
 // ("t"/"v"/"map"/"str") and an indirected shape.
 //
-// The indexer is therefore ValueNode-aware: it renders the IN-MEMORY {t,v} tree (a plain JS
-// object at write time, before serialization — no json_tree, no tag noise) as ONE row per
-// property: the value's LOGICAL toString() (faithful to p.value().toString(), so a collection
-// ["a","brave"] matches search "brave" via its "[a, brave]" toString — exactly what
-// tinker.search matches on). An empty text indexes as no row (nothing to match).
+// The indexer is therefore ValueNode-aware: it reads the IN-MEMORY {t,v} tree (a plain JS
+// object at write time, before serialization — no json_tree, no tag noise) and indexes ONE row per
+// STRING property: its text. A non-string value (a number, a date, a uuid, a collection) indexes as
+// no row. Every reader is `P<String>`: TextP and regex reject a non-string subject (`textSubject` in
+// `compiler/rel/predicate.ts`), and `tinker.search` matches string values only — a `docs/limitations.md`
+// §3 row, since TinkerGraph matches any value's toString(). An empty string indexes as no row too.
 //
 // The FTS5 ROWID is the property row's id, SIGNED by owner kind (`ftsRowid`): +vertex_properties.id,
 // -edge_properties.id. One row per property is what makes that a key, and it turns every delete and
@@ -29,28 +30,10 @@ export type OwnerElem = 'node' | 'edge';
  *  property and an edge property may share an id; the sign keeps the two apart). */
 export const ftsRowid = (ownerElem: OwnerElem, pid: number): number => (ownerElem === 'edge' ? -pid : pid);
 
-/** A ValueNode leaf's logical string form — what p.value().toString() yields for that
- *  scalar. Numbers/booleans stringify directly; a stored datetime leaf is epoch-ms
- *  (leafStore) so it stringifies as the number, which is acceptable for substring search
- *  (search over a datetime property is not a corpus case). null → empty string. */
-const leafText = (v: unknown): string => (v == null ? '' : String(v));
-
-/** The LOGICAL toString() of a whole ValueNode, mirroring Java's collection toString:
- *  a scalar is its value; a list/set is `[a, b, c]`; a map is `{k=v, k2=v2}`. This is the
- *  text a `.*(term).*` search matches. */
-function valueToString(node: ValueNode): string {
-  if (node == null) return '';
-  if (node.t === 'list' || node.t === 'set')
-    return `[${(node.v as ValueNode[]).map(valueToString).join(', ')}]`;
-  if (node.t === 'map')
-    return `{${(node.v as [ValueNode, ValueNode][]).map(([k, v]) => `${valueToString(k)}=${valueToString(v)}`).join(', ')}}`;
-  return leafText(node.v);
-}
-
-/** The text ONE property indexes as, or `null` when it is empty (nothing to match, so no row). */
+/** The text ONE property indexes as: a non-empty STRING value's own text, else `null` (no row). A
+ *  stored string leaf carries `t: 'string'`; an untagged leaf (`t: null`) is a string when its value is. */
 function ftsTextOf(node: ValueNode): string | null {
-  const text = valueToString(node);
-  return text.length ? text : null;
+  return (node.t === 'string' || node.t == null) && typeof node.v === 'string' && node.v.length ? node.v : null;
 }
 
 /** `property_fts`'s columns, in the order `propertyFtsRows` emits cells. */

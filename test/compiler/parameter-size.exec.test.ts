@@ -87,11 +87,11 @@ describe('a parameterised property write of a value past every statement cap run
 
   // The DERIVED text: not the parameter's own value, so it binds under its own key rather than sharing
   // the parameter's (the kernel keeps the first value a key is seen with).
-  test('a number and a list index as their text', () => {
+  test('a number and a list index as no row: only a string has a text', () => {
     const store = doStore();
     executeQuery(store, "g.addV('p').property('n', k).property('l', l)", { k: 3.5, l: ['a', 'brave'] });
-    expect(ftsTexts(store, 'n')).toEqual(['3.5']);
-    expect(ftsTexts(store, 'l')).toEqual(['[a, brave]']);
+    expect(ftsTexts(store, 'n')).toEqual([]);
+    expect(ftsTexts(store, 'l')).toEqual([]);
   });
 
   test('one parameter written under two keys indexes both', () => {

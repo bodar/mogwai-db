@@ -13,11 +13,11 @@ import { UnsupportedTraversal } from '../../compiler/unsupported.ts';
 // g.call("tinker.search", {search: "term"}).element() finds every property whose VALUE
 // contains `term` (case-insensitively) and yields it as a PropertyStream — .element()
 // then walks each match to its owner element (reusing the existing propertyElement tail).
-// Backed by the property_fts trigram index (Step 6): one row per property holding its logical
-// toString(), which is exactly what TinkerPop's `.*(term).*` matches (a collection ["a","brave"]
-// matches "brave" via its "[a, brave]" toString).
+// Backed by the property_fts trigram index (Step 6): one row per STRING property holding its text.
 //
-// Divergences, both documented + consistent with the TextP predicates:
+// Divergences, all documented + consistent with the TextP predicates:
+//   - STRING VALUES ONLY. TinkerGraph matches any value's toString() (a number, a list); the index
+//     holds strings only, as TextP reads them (`docs/limitations.md` §3).
 //   - CASE-INSENSITIVE (TinkerPop's is case-sensitive) — that is what lets the trigram
 //     index serve LIKE '%term%'. The reference graphs are single-case, so conformance holds.
 //   - INDEX-ONLY, fail closed: a term < 3 chars is below the trigram floor and a `regex`

@@ -43,9 +43,10 @@ describe('scalar property indexing', () => {
     expect(rows[0]!.rowid).toBe(rows[0]!.pid);
   });
 
-  test('a numeric property stringifies its value', () => {
+  // Only a string value is indexed: every reader is `P<String>` (docs/limitations.md §3).
+  test('a numeric property indexes as no row', () => {
     const store = freshStore(["g.addV('person').property('age', 29)"]);
-    expect(fts(store).map((r) => r.text)).toEqual(['29']);
+    expect(fts(store)).toEqual([]);
   });
 
   test('an empty string indexes as no row', () => {
@@ -54,18 +55,15 @@ describe('scalar property indexing', () => {
   });
 });
 
-describe('collection property indexing (ValueNode-aware)', () => {
-  test('a list property is ONE row: the [a, b] toString', () => {
+describe('collection property indexing', () => {
+  test('a list property indexes as no row', () => {
     const store = freshStore(["g.addV('t').property('tags', ['abrave', 'coward'])"]);
-    expect(fts(store).map((r) => r.text)).toEqual(['[abrave, coward]']);
-    // A "brave" substring search hits the toString.
-    const brave = store.query<{ n: number }>("SELECT count(*) AS n FROM property_fts WHERE text LIKE '%brave%'");
-    expect(brave[0].n).toBe(1);
+    expect(fts(store)).toEqual([]);
   });
 
-  test('a map property is ONE row: the {k=v} toString', () => {
+  test('a map property indexes as no row', () => {
     const store = freshStore(["g.addV('t').property('addr', [city: 'london', zone: 'central'])"]);
-    expect(fts(store).map((r) => r.text)).toEqual(['{city=london, zone=central}']);
+    expect(fts(store)).toEqual([]);
   });
 });
 
