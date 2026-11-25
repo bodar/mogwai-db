@@ -1,5 +1,5 @@
 import { PlanCache, planCacheKey } from './plan-cache.ts';
-import { isVolatileQuery, parseGremlin, stepChain, unansweredTerminalMethod, extractStrategies, extractSack, extractSideEffects, extractSourceOptions, sideEffectPolicies as extractSideEffectPolicies } from '../gremlin/frontend.ts';
+import { isVolatileQuery, parseGremlin, type ParsedQuery, stepChain, unansweredTerminalMethod, extractStrategies, extractSack, extractSideEffects, extractSourceOptions, sideEffectPolicies as extractSideEffectPolicies } from '../gremlin/frontend.ts';
 import { type TypeNode } from '../gremlin/types.ts';
 import { paramEnv, type ParamEnv } from '../gremlin/param-env.ts';
 import { runPasses } from './ir/passes.ts';
@@ -58,12 +58,15 @@ export function compilePlan(gremlin: string, wireParams: Record<string, any>, op
   if (cached !== undefined) return cached;
   // The compile's ONE work meter, made here rather than inside so the boundary below reads what it recorded.
   const budget = options?.budget ?? new CompileBudget();
+  // The text is parsed ONCE per request: the compile and the volatility test below read one tree, so a
+  // text the parse cache does not hold (`parseGremlin`) is never parsed twice.
+  let tree: ParsedQuery;
   let plan: Plan;
-  try { plan = compileUnguarded(gremlin, params, options, budget); }
+  try { tree = parseGremlin(gremlin); plan = compileUnguarded(gremlin, tree, params, options, budget); }
   catch (error) { throw tooDeep(error) ?? expansionNamed(error, budget) ?? error; }
   // Only a single-statement plan is reusable: a segment plan's resume compiles against landed rows, and
   // a plan whose TEXT reads the clock holds the instant it was compiled at (`isVolatileQuery`).
-  if (cache && plan.kind === 'sql' && plan.compiled.cleanup === undefined && !isVolatileQuery(parseGremlin(gremlin)))
+  if (cache && plan.kind === 'sql' && plan.compiled.cleanup === undefined && !isVolatileQuery(tree))
     cache.plans.set(cache.key, plan);
   return plan;
 }
@@ -135,8 +138,7 @@ function tooDeep(error: unknown): UnsupportedTraversal | null {
   return UnsupportedTraversal.because('this traversal nests deeper than the compiler can follow — a repeat() unrolled to a large times() or loops() count, or child traversals nested hundreds deep, is the usual cause');
 }
 
-function compileUnguarded(gremlin: string, params: ParamEnv, options: CompileOptions | undefined, budget: CompileBudget): Plan {
-  const tree = parseGremlin(gremlin);
+function compileUnguarded(gremlin: string, tree: ParsedQuery, params: ParamEnv, options: CompileOptions | undefined, budget: CompileBudget): Plan {
   // A terminal method the step walk cannot see (`next()`, `toSet()`, …) asks a different question than
   // the stream does — decline rather than answer the stream for it (`unansweredTerminalMethod`).
   if (unansweredTerminalMethod(tree) !== null) throw new UnsupportedTraversal(gremlin);

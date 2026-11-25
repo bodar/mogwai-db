@@ -9,6 +9,7 @@ import { binaryOfBase64, fitsSafeInteger, BigDecimal, Duration, mapSlot, type Ty
 import { floatCanonical } from './float.ts';
 import { UnsupportedTraversal } from '../compiler/unsupported.ts';
 import { ValueParseError } from './coerce.ts';
+import { BoundedLru, type BoundedLruStats } from '../bounded-lru.ts';
 
 // ---------- parsing ----------
 //
@@ -93,22 +94,31 @@ function checked<T>(tree: T, errs: Errors): T {
 // Behaviour-preserving: the returned tree is identical to a fresh parse, proven by the census/L5 gates.
 // A PARSE ERROR is never cached — `parseGremlinUncached` throws before the wrapper reaches its `set`.
 //
-// Bounded LRU so a long-lived Durable Object isolate cannot grow the cache without limit: distinct
-// query strings per graph are bounded in practice, and the cap evicts the least-recently-used beyond it.
-const PARSE_CACHE_MAX = 512;
-const parseCache = new Map<string, ReturnType<typeof parseGremlinUncached>>();
+// A bounded LRU (`BoundedLru`) so a long-lived Durable Object isolate cannot grow the cache without
+// limit. A tree is weighed by its query's length in UTF-16 code units — the text as the proxy for the
+// tree's size (measured on Bun: a tree costs about 100–300 bytes per unit, the short texts the dearer).
+// So the bounds: 512 entries, 256K units in all (some tens of MB of trees), and one text past 64K units
+// is parsed but not held. That per-entry limit is at least the plan cache's
+// (`PLAN_CACHE_MAX_ENTRY_TEXT_UNITS`), whose weight includes the text: a text whose plan can be held keeps
+// its parse. A refused text costs one parse per compile, never a decline (`compilePlan` parses once).
+export const PARSE_CACHE_MAX_ENTRY_TEXT_UNITS = 64 * 1024;
+/** A parsed query text: the tree every extractor below walks. */
+export type ParsedQuery = ReturnType<typeof parseGremlinUncached>;
 
-export function parseGremlin(query: string): ReturnType<typeof parseGremlinUncached> {
+const parseCache = new BoundedLru<string, ParsedQuery>({
+  maxEntries: 512, maxWeight: 256 * 1024, maxEntryWeight: PARSE_CACHE_MAX_ENTRY_TEXT_UNITS, weigh: (query) => query.length,
+});
+
+export function parseGremlin(query: string): ParsedQuery {
   const hit = parseCache.get(query);
-  if (hit !== undefined) {
-    parseCache.delete(query); parseCache.set(query, hit);   // LRU: move to most-recently-used
-    return hit;
-  }
+  if (hit !== undefined) return hit;
   const tree = parseGremlinUncached(query);
   parseCache.set(query, tree);
-  if (parseCache.size > PARSE_CACHE_MAX) parseCache.delete(parseCache.keys().next().value!);
   return tree;
 }
+
+/** The parse cache's hit, miss, entry and weight (code units of held text) counts. */
+export function parseCacheStats(): BoundedLruStats { return parseCache.stats(); }
 
 // A query is VOLATILE when its TEXT reads the clock: a no-argument `datetime()` is "now", captured as a
 // literal when the step chain is built (`emitArg`, `DateLiteralContext`). Its compiled plan holds that
@@ -116,7 +126,7 @@ export function parseGremlin(query: string): ReturnType<typeof parseGremlinUncac
 // tree and memoised beside the tree, which the parse cache keeps alive for as long as the text is hot.
 const volatileTrees = new WeakMap<object, boolean>();
 
-export function isVolatileQuery(tree: ReturnType<typeof parseGremlinUncached>): boolean {
+export function isVolatileQuery(tree: ParsedQuery): boolean {
   let known = volatileTrees.get(tree);
   if (known === undefined) { known = readsClock(tree); volatileTrees.set(tree, known); }
   return known;

@@ -1,5 +1,6 @@
 import type { Plan } from './segment.ts';
 import type { ParamEnv } from '../gremlin/param-env.ts';
+import { BoundedLru } from '../bounded-lru.ts';
 
 // ---------- the compiled-plan cache ----------
 //
@@ -18,6 +19,7 @@ import type { ParamEnv } from '../gremlin/param-env.ts';
 //  - a compile without an app scope (there is no scope to hold the entry);
 //  - a params value this module cannot spell canonically, or whose spelling is large (a bulk-upsert
 //    list parameter) — simply not cached, never a decline;
+//  - a plan whose held text passes `PLAN_CACHE_MAX_ENTRY_TEXT_UNITS` (a large batch write) — the same;
 //  - a VOLATILE query: one whose text reads the clock (`datetime()`, `isVolatileQuery`).
 //
 // SCOPE OF v1: the key holds every parameter VALUE, so it serves a repeated IDENTICAL request (a
@@ -26,66 +28,53 @@ import type { ParamEnv } from '../gremlin/param-env.ts';
 
 /** The most entries one app scope holds. The same bound as the parse cache (`parseGremlin`). */
 export const PLAN_CACHE_MAX_ENTRIES = 512;
-/** The most rendered text one app scope holds — a Durable Object isolate has about 128 MB. */
-export const PLAN_CACHE_MAX_BYTES = 8 * 1024 * 1024;
+/** The most text one app scope holds, in UTF-16 CODE UNITS of held text (`freezeAndMeasure`; about two
+ *  bytes each) — a Durable Object isolate has about 128 MB. */
+export const PLAN_CACHE_MAX_TEXT_UNITS = 8 * 1024 * 1024;
+/** One plan past this many code units of held text (its key and SQL) is not cached: a large batch write
+ *  (measured: 100 `addV()`s render about 280K units) would otherwise evict every hot read for no likely
+ *  hit. The same idea as `PLAN_CACHE_MAX_PARAM_KEY`; never a decline. The parse cache's per-entry limit is
+ *  at least this, so a text whose plan can be held keeps its parse (`PARSE_CACHE_MAX_ENTRY_TEXT_UNITS`). */
+export const PLAN_CACHE_MAX_ENTRY_TEXT_UNITS = 64 * 1024;
 /** A parameter spelling past this is not cached: it would pin its size in the key for no likely hit. */
 export const PLAN_CACHE_MAX_PARAM_KEY = 4096;
 
-export interface PlanCacheStats { readonly hits: number; readonly misses: number; readonly size: number; readonly bytes: number }
+export interface PlanCacheStats { readonly hits: number; readonly misses: number; readonly size: number; readonly textUnits: number }
 
-interface Entry { readonly plan: Plan; readonly bytes: number }
-
-/** A bounded LRU of compiled plans, by entry count AND by total text size. A JS `Map` iterates in
- *  insertion order, so delete-then-set moves an entry to the most-recently-used end. */
+/** A bounded LRU of compiled plans (`BoundedLru`), by entry count, by total held text and by the text of
+ *  one plan. Each plan is weighed as its key's length plus the text it holds. */
 export class PlanCache {
-  private readonly entries = new Map<string, Entry>();
-  private hitCount = 0;
-  private missCount = 0;
-  private totalBytes = 0;
+  private readonly lru: BoundedLru<string, Plan>;
 
-  constructor(readonly maxEntries = PLAN_CACHE_MAX_ENTRIES, readonly maxBytes = PLAN_CACHE_MAX_BYTES) {}
-
-  get(key: string): Plan | undefined {
-    const hit = this.entries.get(key);
-    if (hit === undefined) { this.missCount++; return undefined; }
-    this.hitCount++;
-    this.entries.delete(key); this.entries.set(key, hit);
-    return hit.plan;
+  constructor(maxEntries = PLAN_CACHE_MAX_ENTRIES, maxTextUnits = PLAN_CACHE_MAX_TEXT_UNITS, maxEntryTextUnits = PLAN_CACHE_MAX_ENTRY_TEXT_UNITS) {
+    this.lru = new BoundedLru({ maxEntries, maxWeight: maxTextUnits, maxEntryWeight: maxEntryTextUnits, weigh: (key, plan) => key.length + freezeAndMeasure(plan) });
   }
 
-  /** Insert a plan, deep-frozen so a caller that mutates a shared plan fails at once. A plan larger
-   *  than the whole byte budget is not held. */
-  set(key: string, plan: Plan): void {
-    const bytes = key.length + freezeAndMeasure(plan);
-    const old = this.entries.get(key);
-    if (old !== undefined) { this.entries.delete(key); this.totalBytes -= old.bytes; }
-    if (bytes > this.maxBytes) return;
-    this.entries.set(key, { plan, bytes });
-    this.totalBytes += bytes;
-    for (const [k, e] of this.entries) {
-      if (this.entries.size <= this.maxEntries && this.totalBytes <= this.maxBytes) break;
-      this.entries.delete(k); this.totalBytes -= e.bytes;
-    }
-  }
+  get(key: string): Plan | undefined { return this.lru.get(key); }
+
+  /** Insert a plan, deep-frozen so a caller that mutates a shared plan fails at once. A plan past the
+   *  per-entry limit is not held, and an older plan under its key goes. */
+  set(key: string, plan: Plan): void { this.lru.set(key, plan); }
 
   stats(): PlanCacheStats {
-    return { hits: this.hitCount, misses: this.missCount, size: this.entries.size, bytes: this.totalBytes };
+    const { hits, misses, size, weight } = this.lru.stats();
+    return { hits, misses, size, textUnits: weight };
   }
 }
 
-/** Deep-freeze a plan's plain data and return the length of the text it holds (its SQL and string
- *  binds — the part that grows). A typed array cannot be frozen and is counted by its byte length. */
+/** Deep-freeze a plan's plain data and return the UTF-16 code units of the text it holds (its SQL and
+ *  string binds — the part that grows). A typed array cannot be frozen and counts one unit per byte. A
+ *  plan frozen before (one held, then set again) still weighs its whole text. */
 function freezeAndMeasure(value: unknown): number {
   if (typeof value === 'string') return value.length;
   if (value === null || typeof value !== 'object') return 0;
   if (ArrayBuffer.isView(value)) return value.byteLength;
-  if (Object.isFrozen(value)) return 0;
-  let bytes = 0;
-  if (value instanceof Map) for (const [k, v] of value) bytes += freezeAndMeasure(k) + freezeAndMeasure(v);
-  else if (value instanceof Set) for (const v of value) bytes += freezeAndMeasure(v);
-  else for (const v of Object.values(value)) bytes += freezeAndMeasure(v);
+  let units = 0;
+  if (value instanceof Map) for (const [k, v] of value) units += freezeAndMeasure(k) + freezeAndMeasure(v);
+  else if (value instanceof Set) for (const v of value) units += freezeAndMeasure(v);
+  else for (const v of Object.values(value)) units += freezeAndMeasure(v);
   Object.freeze(value);
-  return bytes;
+  return units;
 }
 
 /**

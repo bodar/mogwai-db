@@ -4,7 +4,8 @@
 // is in the key, and each request the key cannot make safe is never cached.
 import { describe, expect, test } from 'bun:test';
 import { compilePlan } from '../../src/compiler/compiler.ts';
-import { PlanCache, planCacheKey } from '../../src/compiler/plan-cache.ts';
+import { PlanCache, planCacheKey, PLAN_CACHE_MAX_ENTRY_TEXT_UNITS } from '../../src/compiler/plan-cache.ts';
+import { parseCacheStats, PARSE_CACHE_MAX_ENTRY_TEXT_UNITS } from '../../src/gremlin/frontend.ts';
 import { createAppScope, type AppScope } from '../../src/scopes.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
 import { frameResolved } from '../../src/execute.ts';
@@ -192,16 +193,75 @@ describe('the LRU bound', () => {
     expect(app.planCache.stats().misses).toBe(misses + 1);
   });
 
-  test('past max bytes, the least-recently-used entries go', () => {
+  test('past max text, the least-recently-used entries go', () => {
     const probe = scope();
     compilePlan('g.V().count()', {}, { app: probe });
-    const one = probe.planCache.stats().bytes;
+    const one = probe.planCache.stats().textUnits;
     const app = scope(undefined, new PlanCache(512, Math.floor(one * 2.5)));
     compilePlan('g.V().count()', {}, { app });
     compilePlan('g.V().count().is(1)', {}, { app });
     compilePlan('g.V().count().is(2)', {}, { app });
     const stats = app.planCache.stats();
-    expect(stats.bytes).toBeLessThanOrEqual(Math.floor(one * 2.5));
+    expect(stats.textUnits).toBeLessThanOrEqual(Math.floor(one * 2.5));
     expect(stats.size).toBeLessThan(3);
+  });
+});
+
+/** One traversal of `n` vertex inserts: a batch write whose plan is large. */
+const batch = (n: number, tag = ''): string =>
+  'g' + Array.from({ length: n }, (_, i) => `.addV('person').property('name','${tag}n${i}')`).join('');
+
+describe('the per-entry limit', () => {
+  test('a plan past the per-entry limit is not held, and an older plan under its key goes', () => {
+    const plans = new PlanCache(512, 1 << 20, 1000);
+    const small = compilePlan('g.V().count()', {}, { app: scope() });
+    const large = compilePlan(batch(10), {}, { app: scope() });
+    plans.set('k', small);
+    expect(plans.stats().size).toBe(1);
+    plans.set('k', large);
+    expect(plans.stats()).toMatchObject({ size: 0, textUnits: 0 });
+    expect(plans.get('k')).toBeUndefined();
+  });
+
+  test('a large batch write compiled again and again is never held, and hot reads stay', async () => {
+    const store = seededStore();
+    const app = scope(store);
+    const hot = ["g.V().hasLabel('person').count()", "g.V().has('name','marko').out().values('name')"];
+    for (const q of hot) await answer(store, app, q);
+    const q = batch(100);
+    for (let i = 0; i < 10; i++) compilePlan(q, {}, { app });
+    expect(app.planCache.stats().size).toBe(hot.length);
+    const { misses } = app.planCache.stats();
+    expect(await answer(store, app, hot[0]!)).toEqual([4]);
+    await answer(store, app, hot[1]!);
+    expect(app.planCache.stats().misses).toBe(misses);
+  });
+});
+
+describe('the parse cache', () => {
+  test("its per-entry limit is at least the plan cache's, so a text whose plan is held keeps its parse", () => {
+    expect(PARSE_CACHE_MAX_ENTRY_TEXT_UNITS).toBeGreaterThanOrEqual(PLAN_CACHE_MAX_ENTRY_TEXT_UNITS);
+  });
+
+  test('a repeated text is a hit', () => {
+    const q = "g.V().has('name','parse-cache-hit').count()";
+    const before = parseCacheStats();
+    compilePlan(q, {}, {});
+    compilePlan(q, {}, {});
+    const after = parseCacheStats();
+    expect(after.misses - before.misses).toBe(1);
+    expect(after.hits - before.hits).toBe(1);
+  });
+
+  test('a text past its per-entry limit is parsed once per compile and not held', () => {
+    const q = `g.inject('${'x'.repeat(PARSE_CACHE_MAX_ENTRY_TEXT_UNITS)}')`;
+    const before = parseCacheStats();
+    compilePlan(q, {}, { app: scope() });
+    compilePlan(q, {}, { app: scope() });
+    const after = parseCacheStats();
+    // One miss is one parse: a compile parses the text once, not again for the volatility test.
+    expect(after.misses - before.misses).toBe(2);
+    expect(after.hits - before.hits).toBe(0);
+    expect(after.weight).toBeLessThanOrEqual(before.weight);
   });
 });
