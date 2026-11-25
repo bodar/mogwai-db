@@ -1,6 +1,6 @@
 # LDBC findings — fix the three measured defects
 
-**Status: PROPOSED (2026-11-25).**
+**Status: L1–L3 LANDED (2026-11-25). Open: the follow-ups and the next-round items below.**
 
 **Source.** A head-to-head run against Relate 1.2.0 (Neo4j's embedded in-memory Cypher engine) on
 LDBC SNB sf0.1: 327,588 vertices, 1,477,965 edges, Relate's own 30-query latency lane
@@ -130,3 +130,67 @@ value), and fix it where every Boolean passes, not per step.
   (`#fts`) is recomputed or treated as pinned.
 - **L2 — segment-plan heads under the cache.** v1 never caches a segment plan (LDBC q17, q19). A
   segment's head can be cached. Its resume compiles against landed rows and must never be cached.
+
+## Follow-ups from review (round 1)
+
+All findings were minor. They are ordered: wrong answers first, then cheap fixes, then design notes.
+
+- **`within()` with a LIST parameter misses a stored BigDecimal (pre-existing wrong answer).** Stored
+  `age=29m`: `g.V().has('age', within(xs))` with `xs=[29,30]` returns `[marko]`. `within(29,30)` and
+  `has('age', x)` return `[dec, marko]`. The `json_each` path gets no `decimalTextArm`
+  (`src/compiler/rel/predicate.ts`). The correlated form
+  `has('age', select('a').values('age'))` also leaves it out. Same answer and SQL before L1. Fix the
+  json_each and correlated arms through the one decimal-arm rule, not per site.
+- **GraphBinary does not use `booleanOfStored` (from L3, cheap).** `frameValue`
+  (`src/execute.ts`, around line 333) decodes a `boolean` tag with `Boolean(v)`. Use
+  `booleanOfStored` there, so the comment "the one decode every external form uses" is true. No
+  answer changes for stored 1/0/true/false.
+- **Volatility has two authorities (from L2).** `readsClock` (`src/gremlin/frontend.ts`) finds a
+  no-argument `datetime()` again. The clock is read at `emitArg` (`Date.now()`). Make the emit site
+  record "volatile" in a per-compile sink, and make `compilePlan` read that sink. Then a new volatile
+  literal (for example a random `UUID()`) cannot be cached by mistake.
+- **Per-entry size limit for the plan cache (from L2).** A batch-insert text of 500 inline `addV`s
+  holds about 330 KB per entry. Measured: 20 entries filled 6.7 MB of the 8 MB budget. Do not hold a
+  plan whose key plus SQL is over about 64–256 KB, the same idea as `PLAN_CACHE_MAX_PARAM_KEY`.
+  Also: the byte bound counts string `.length` (UTF-16 units) and no object overhead, so "8 MB" is
+  about 16 MB of heap. Rename or reword the bound.
+- **One-off write plans evict hot reads (from L2).** Distinct-parameter `addV` writes all miss and
+  fill the LRU. No wrong answer, miss cost is in the noise. Do this with L2 v2 (pin-on-read): an
+  admission rule for write programs. Not v1 work.
+- **Index build on first open after deploy (from L1).** `vp_decimal`/`ep_decimal` are built by
+  `CREATE INDEX IF NOT EXISTS` in the DO constructor (`src/cloudflare/graph-store-do.ts`). A partial
+  index still scans the whole property table once. On a large existing graph, the first open pays a
+  cost that grows with the graph. `e_label`/`e_pair` already do this. Add one line on index-build
+  migration on a big DO to the deploy notes or `docs/outstanding-work.md`.
+- **Already recorded under L3:** an error response is GraphBinary even when the request asks for
+  JSON (`src/untyped.ts`).
+
+## Next round
+
+The reuse sweep proposed these. Each one changes no answer.
+
+1. **Serve the BigDecimal tail of the write-side seek through `vp_decimal`/`ep_decimal`.** This
+   replaces the Deferred item "Check if `write.ts` `decimalTextSeeks` can seek `vp_decimal`".
+   `decimalTextSeeks` (`src/compiler/rel/write.ts`, called from `propertySeeks`) does 6 prefix probes
+   per NUMERIC driver. A safe-range long is never stored as TEXT (`storedScalar`,
+   `src/gremlin/types.ts`), so the `prefixed` arm (|c| < 2^52) finds only `bigdecimal` rows. Replace
+   it with one seek: `vtype = 'bigdecimal' AND key = k AND CAST(value AS REAL) = c`. Put the `vtype`
+   term on the scan, because SQLite uses a partial index only when the WHERE implies it. Narrow the
+   `spanned` arm to the long/bigint TEXT tail (|c| >= 2^53). The residual still decides. Test:
+   mergeV/mergeE matching `1m`, `2^60` as a long, and a string key, in the style of
+   `test/compiler/numeric-eq-seek.exec.test.ts`. About 25 lines removed.
+2. **One bounded LRU for the parse cache and the plan cache.** `parseGremlin`
+   (`src/gremlin/frontend.ts`, `parseCache`, count limit only) and `PlanCache`
+   (`src/compiler/plan-cache.ts`, count + bytes) use the same delete-then-set `Map` idiom. Extract a
+   `BoundedLru<K,V>` with an optional size function. The parse cache then gets a byte limit (today 512
+   texts of 100 KB can outgrow the plan cache's whole budget) and hit/miss stats. Do the per-entry
+   size limit above in the same primitive.
+3. **Move `disjuncts` beside `conjuncts` in `src/rel/expr.ts`.** It is a private copy in
+   `src/rel/passes/semijoin.ts` with `or` in place of `and`. The Deferred `eq().or(eq())` case and the
+   rowid/uid disjunction in `src/compiler/rel/source.ts` (a private `disjunction` builder) will need
+   it there. Move only.
+
+## Needs a human
+
+None from round 1. Item 4 of the source report (store size) stays the owner's decision; see the top
+of this file.
