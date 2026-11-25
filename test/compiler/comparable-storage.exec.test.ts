@@ -163,6 +163,29 @@ describe('a nested operand meets a stored BigDecimal or wide long', () => {
     // `1.5m` equals the Double `1.5` and never the String '1.5'.
     expect(await sorted(s, "g.V().has('k', 'x').as('a').V().has('d', __.select('a').values('d')).values('k')")).toEqual(['"x"', '"y"']);
   });
+  // A scale-0 BigDecimal past 2^53 is stored as its rounded REAL; the operand must convert by the SAME CAST
+  // (`comparableOf`), not by `+ 0`, which makes it an exact INTEGER that never equals that REAL.
+  describe('a scale-0 BigDecimal past 2^53', () => {
+    const wide = (): GraphStore => store(
+      "g.addV('p').property('k', 'a').property('n', 12345678901234567m)",
+      "g.addV('p').property('k', 'b').property('n', 1m)",
+      "g.addV('p').property('k', 'c').property('n', 12345678901234567.5m)",
+      "g.addV('p').property('k', 'd').property('n', 99999999999999999999m)",
+      "g.addV('p').property('k', 'e').property('n', 12345678901234567m)");
+    for (const [q, want] of [
+      ["g.V().has('n', __.values('n')).values('k')", ['a', 'b', 'c', 'd', 'e']],
+      ["g.V().has('n', P.lte(__.values('n'))).values('k')", ['a', 'b', 'c', 'd', 'e']],
+      ["g.V().has('n', P.within(__.V().has('k', 'a').values('n').fold())).values('k')", ['a', 'c', 'e']],
+      ["g.V().has('k', 'a').values('n').as('x').V().has('n', P.eq(__.select('x'))).values('k')", ['a', 'c', 'e']],
+      ["g.V().has('k', 'a').values('n').as('x').V().has('n', select('x')).values('k')", ['a', 'c', 'e']],
+      ["g.V().has('k', 'a').as('x').V().has('n', P.gt(__.select('x').values('n'))).values('k')", ['d']],
+      ["g.V().where(has('n', P.eq(__.V().has('k', 'e').values('n')))).values('k')", ['a', 'c', 'e']],
+    ] as const) {
+      test(q, async () => {
+        expect(await sorted(wide(), q)).toEqual(want.map((k) => JSON.stringify(k)));
+      });
+    }
+  });
 });
 
 describe('a merge by a BigDecimal key upserts one element', () => {

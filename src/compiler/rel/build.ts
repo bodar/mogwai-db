@@ -323,18 +323,22 @@ export function storedForm(payload: Expr, vtype: Expr): { readonly value: Expr; 
 }
 
 /**
- * A PAYLOAD as the number `storedForm` would store for it, spelled with ONE read of the payload — for a value
- * that is compared against a stored row's `value` and must stay an expression of the outer row (a correlated
- * `has(k, select('e'))` seeks `(key, value = ?)` on it; a scalar subquery there would lose the seek). `+ 0` is
- * SQLite's own text-to-number conversion — the same `sqlite3AtoF` a CAST uses — so a decimal TEXT becomes the
- * same double and a long's digits the same INTEGER; a number is itself. Only an exact-tail tag converts: a
- * String spelling a number stays TEXT and never equals one.
+ * A PAYLOAD as the number `storedForm` would store for it, spelled with ONE read of the payload per evaluated
+ * arm — for a value that is compared against a stored row's `value` and must stay an expression of the outer
+ * row (a correlated `has(k, select('e'))` seeks `(key, value = ?)` on it; a scalar subquery there would lose
+ * the seek). Each tag converts EXACTLY as `storedForm` stores it, or one number meets two different values:
+ * a BigDecimal by `CAST(… AS REAL)` — a bare `+ 0` makes a scale-0 decimal past 2^53 an exact INTEGER, which
+ * never equals the stored, rounded REAL; a long/bigint by `+ 0` — its INTEGER inside int64, its REAL past it,
+ * the same `sqlite3AtoF` a CAST uses. A number is itself. Only an exact-tail tag converts: a String spelling a
+ * number stays TEXT and never equals one.
  */
 export function comparableOf(payload: Expr, vtype: Expr): Expr {
   const staticVtype = vtype.kind === 'lit' && vtype.source === 'compiler-text' ? String(vtype.value) : undefined;
-  const plus: Expr = { kind: 'binary', op: '+', left: payload, right: compilerInt(0) };
-  if (staticVtype !== undefined) return EXACT_TAIL_VTYPES.includes(staticVtype) ? plus : payload;
-  return { kind: 'case', whens: [[{ kind: 'in-list', expr: vtype, values: EXACT_TAIL_VTYPES.map(compilerText) }, plus]], else: payload };
+  const decimal: Expr = { kind: 'cast', arg: payload, to: 'real' };
+  const whole: Expr = { kind: 'binary', op: '+', left: payload, right: compilerInt(0) };
+  if (staticVtype !== undefined) return staticVtype === 'bigdecimal' ? decimal : EXACT_TAIL_VTYPES.includes(staticVtype) ? whole : payload;
+  const tagIn = (names: readonly string[]): Expr => ({ kind: 'in-list', expr: vtype, values: names.map(compilerText) });
+  return { kind: 'case', whens: [[tagIn(['bigdecimal']), decimal], [tagIn(['long', 'bigint']), whole]], else: payload };
 }
 
 /** A property row's PAYLOAD — its exact digits where it has them, else its comparable `value`
