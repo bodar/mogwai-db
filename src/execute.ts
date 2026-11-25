@@ -5,7 +5,7 @@ import { compilePlan, UnsupportedTraversal, hasTypedMembers, perRowColumn, perRo
 import { dateOfMillis } from './gremlin/coerce.ts';
 import type { FederationSource } from './compiler/segment.ts';
 import type { Elem } from './compiler/elem.ts';
-import { binaryBytes, hasSerializer, isCollectionType, leafTag, propertyTag, treeBranches, valueNodeFromStored, type FrameNode, type TreeBranch, type TypeNode, type ValueNode } from './gremlin/types.ts';
+import { binaryBytes, booleanOfStored, hasSerializer, isCollectionType, leafTag, propertyTag, treeBranches, valueNodeFromStored, type FrameNode, type TreeBranch, type TypeNode, type ValueNode } from './gremlin/types.ts';
 import { direction, ioc, Property, t } from './io.ts';
 import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
 import type { IoStore } from './iostore.ts';
@@ -296,8 +296,9 @@ function sumBuffer(v: number | string | null, storageClass: string): Buffer {
 
 // A scalar value(), framed by its compile-time type tag (Shape `as`) when set — the
 // GraphBinary type comes from the producing step, not the SQLite storage class. No
-// tag → infer from the JS value (anySerializer). 'bool': SQLite carries the boolean
-// as 0/1, so frame Boolean(v) explicitly (anySerializer would otherwise emit Int).
+// tag → infer from the JS value (anySerializer). 'boolean': SQLite carries the boolean
+// as 0/1, so decode it through booleanOfStored — the one decode every external form
+// uses — and frame it explicitly (anySerializer would otherwise emit Int).
 // A stored canonical vtype IS the framing tag (one vocabulary). uuid frames via
 // uuidSerializer (storage-ambiguous with string, so the stored vtype disambiguates);
 // string via stringSerializer. list/map/set are deliberately absent: a stored
@@ -330,7 +331,7 @@ function frameValue(v: any, as: ValueType | undefined): Buffer {
   if (v === null || v === undefined) return ioc.anySerializer.serialize(null);
   switch (as) {
     case undefined: return ioc.anySerializer.serialize(v);
-    case 'boolean': return ioc.booleanSerializer.serialize(Boolean(v), true);
+    case 'boolean': return ioc.booleanSerializer.serialize(booleanOfStored(v), true);
     case 'byte': return ioc.byteSerializer.serialize(Number(v), true);
     case 'short': return ioc.shortSerializer.serialize(Number(v), true);
     case 'int': return ioc.intSerializer.serialize(Number(v), true);
