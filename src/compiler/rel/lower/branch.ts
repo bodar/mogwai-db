@@ -1,6 +1,6 @@
 import type { ParamEnv } from '../../../gremlin/param-env.ts';
 import * as make from '../../../rel/factory.ts';
-import { col, compilerInt, compilerNull, disjoin, type Expr } from '../../../rel/expr.ts';
+import { col, compilerInt, compilerNull, conjoin, disjoin, type Expr } from '../../../rel/expr.ts';
 import { and, carriedCols, eq, meta, notProduced, payloadCols, typeOf, withMergedVtype, type Minter } from '../build.ts';
 import { groupableChannels, mergePeerArms, sameChannels, withChannel, type Channel, type Channels } from '../../../channels.ts';
 import type { Rel } from '../../../rel/rel.ts';
@@ -1263,11 +1263,9 @@ function routedReduction(arm: Tail, routedTo: Rel, fresh: Minter): Tail {
   // re-streams after its reduction (`id().fold().unfold()`) mints its own `encounter`, which names a row of
   // the ARM, not the start it came from, and correlating on it would drop every row.
   const scope = arm.rel.channels.filter((channel) => channel.role === 'origin' && routedTo.channels.some((carried) => carried.col === channel.col));
-  const probe = scope.length
-    ? make.filter({
-      id: fresh('crs'), input: routedTo, channels: routedTo.channels, type: routedTo.type,
-      pred: scope.map((channel) => eq(col(routedTo.id, channel.col), col(arm.rel.id, channel.col))).reduce((all, one) => and(all, one)),
-    })
+  const keyed = conjoin(scope.map((channel) => eq(col(routedTo.id, channel.col), col(arm.rel.id, channel.col))));
+  const probe = keyed
+    ? make.filter({ id: fresh('crs'), input: routedTo, channels: routedTo.channels, type: routedTo.type, pred: keyed })
     : routedTo;
   return {
     ...arm, rel: make.filter({

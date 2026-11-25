@@ -2,7 +2,7 @@
 // (sliceOp/slice/bulkSlice), the barrier row ops order/dedup (rowOp), and the keyed-dedup builders
 // (dedupBy/dedupOn/dedupByLabels). Each returns a `Rel`; extracted from lower.ts.
 import * as make from '../../../rel/factory.ts';
-import { col, compilerInt, or, type Expr } from '../../../rel/expr.ts';
+import { col, compilerInt, conjoin, or, type Expr } from '../../../rel/expr.ts';
 import { and, carriedCols, eq, firstArrival, keptBy, typedEquality, typeOf, meta, rowNumberWindow, withSubqueryColumns, type Minter } from '../build.ts';
 import type { ColMeta } from '../../../rel/types.ts';
 import { type Channel } from '../../../channels.ts';
@@ -722,6 +722,6 @@ export function dedupByLabels(
       keyTerms.push(...scoped.terms, ...labelTerms);
     }
   }
-  const keep = productive.length ? productive.reduce((a, b) => and(a, b)) : undefined;
+  const keep = conjoin(productive);
   return keptDedup(keep, keyTerms, rel, (domain) => rel.type.cols.map((c) => col(domain.id, c.name)), fresh);
 }

@@ -1,5 +1,5 @@
 import type { ParamEnv } from '../../gremlin/param-env.ts';
-import { col, compilerInt, compilerNull, compilerText, isNot, param, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, conjoin, disjoin, isNot, param, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
 import type { Binding, Guard } from '../../rel/plan.ts';
@@ -1409,7 +1409,8 @@ export function withPreChecks<T extends { readonly effects?: readonly Binding[] 
     const row = make.values({ id: fresh('pv'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
     const node = make.filter({
       id: fresh('pf'), input: row, channels: [], type: row.type,
-      pred: absent.reduce((left, right) => ({ kind: 'binary', op: 'or', left, right })),
+      // Non-empty: both `freshIdsAtStart` callers register only a non-empty id set.
+      pred: disjoin(absent)!,
     });
     return { name, node, snapshot: true };
   });
@@ -3704,9 +3705,9 @@ function searchKeying(fixed: readonly MergeKey[], map: { readonly excluded: read
       ({ kind: 'call', fn: 'json_extract', args: [pairSide(col(rel, 'g_pv'), which), compilerText(path)] });
     const searched = make.filter({
       id: fresh('f'), input: pairs, channels: [], type: pairs.type,
-      pred: [eq(at(pairs.id, 'keys', '$.t'), compilerText('string')),
-        ...(map!.excluded.length ? [{ kind: 'unary', op: 'not', arg: { kind: 'in-list', expr: at(pairs.id, 'keys', '$.v'), values: map!.excluded.map(compilerText) } } as Expr] : [])]
-        .reduce((a, b) => and(a, b)),
+      // Non-empty: the list has a literal first term.
+      pred: conjoin([eq(at(pairs.id, 'keys', '$.t'), compilerText('string')),
+        ...(map!.excluded.length ? [{ kind: 'unary', op: 'not', arg: { kind: 'in-list', expr: at(pairs.id, 'keys', '$.v'), values: map!.excluded.map(compilerText) } } as Expr] : [])])!,
     });
     const key = at(searched.id, 'keys', '$.v'), value = at(searched.id, 'values', '$.v'), vtype = at(searched.id, 'values', '$.t');
     const numeric: Expr = { kind: 'in-list', expr: vtype, values: NUMERIC_VTYPES.map(compilerText) };
@@ -3863,12 +3864,13 @@ function searchKeying(fixed: readonly MergeKey[], map: { readonly excluded: read
         // Spooled, so the pair join meets two materialized relations by an equi key — SQLite's automatic index.
         left = spool(make.union({ id: fresh('u'), all: true, channels: [], type: own.type, inputs: [own, restricted] }), fresh, bind);
       }
-      const on = [
+      // Non-empty: the early return above leaves `maskCols` or `map`, and each adds a term.
+      const on = conjoin([
         ...maskCols.map((name) => eq(col(left.id, `m_${name}`), col(right.id, name))),
         ...arity.flatMap((n, i) => Array.from({ length: n }, (_, j): Expr =>
           ({ kind: 'binary', op: 'is', left: col(left.id, pairKeyCol(i, j)), right: col(right.id, keyCol(i, j)) }))),
         ...(map ? [eq(col(left.id, SUB), col(right.id, KEYS)), eq(col(left.id, SUB_SIG), col(right.id, SIG))] : []),
-      ].reduce((a, b) => and(a, b));
+      ])!;
       return { left, right, on };
     },
   };
@@ -4020,10 +4022,10 @@ function computedMatch(
   };
   // Key `i` drives where it is productive and no other productive key is more selective (ties to the lower
   // index) — a total choice, so the arms still partition the drivers.
+  // Non-empty: this arm runs only for two or more keys.
   const drives = (i: number) => (rel: RelId): Expr => cKeys.length < 2 ? productive(rel, i, true)
-    : cKeys.map((_, j): Expr => j === i ? productive(rel, i, true)
-      : or(productive(rel, j, false), { kind: 'binary', op: j < i ? '>' : '>=', left: col(rel, countCol(j)), right: col(rel, countCol(i)) }))
-      .reduce((a, b) => and(a, b));
+    : conjoin(cKeys.map((_, j): Expr => j === i ? productive(rel, i, true)
+      : or(productive(rel, j, false), { kind: 'binary', op: j < i ? '>' : '>=', left: col(rel, countCol(j)), right: col(rel, countCol(i)) })))!;
   // The residual: every key's `has(k, v)`, as a correlated EXISTS over the candidate's stored property.
   const residual = (driver: RelId, candidate: RelId): Expr => cKeys.map((key, i) => {
     const scan = make.scan({ id: fresh('vp'), table: spec.table, alias: fresh('rp'), channels: [], type: typeOf(...spec.cols) });
@@ -4146,8 +4148,8 @@ function endpointSeek(driving: Rel, sides: readonly ('src' | 'tgt')[], label: bo
     const named = make.filter({ id: fresh('f'), input: names, channels: [], type: names.type, pred: eq(col(names.id, 'name'), col(driving.id, 'lbl')) });
     return { kind: 'scalar', plan: make.project({ id: fresh('p'), input: named, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(named.id, 'id')]] }) };
   };
-  const on = [...sides.map((side) => eq(col(edges.id, `se_${side}`), col(driving.id, side))), ...(label ? [eq(col(edges.id, 'se_label'), labelId())] : [])]
-    .reduce((a, b) => and(a, b));
+  // Non-empty: every caller names at least one side.
+  const on = conjoin([...sides.map((side) => eq(col(edges.id, `se_${side}`), col(driving.id, side))), ...(label ? [eq(col(edges.id, 'se_label'), labelId())] : [])])!;
   return seekOwners(driving, edges, on, 'se_id', fresh);
 }
 
@@ -6257,7 +6259,7 @@ export function elementMergeE(
     rel: unmatched,
     createKey: createSides.length ? (rel) => ({ kind: 'call', fn: 'json_array', args: createSides.map((side) => col(rel, side)) }) : null,
     couldMatch: searchSides.length
-      ? (earlier, later) => searchSides.map((side) => eq(col(earlier, side), col(later, side))).reduce((a, b) => and(a, b))
+      ? (earlier, later) => conjoin(searchSides.map((side) => eq(col(earlier, side), col(later, side))))!
       : null,
     sharesOnMatch,
   } : null, { ...facts, perDriverSearch: false }, bind, guard, fresh);

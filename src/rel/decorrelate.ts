@@ -2,7 +2,7 @@ import { atMostOneRow, rowBounds, rowBoundsWith } from './bounds.ts';
 import { ownDraws } from './copies.ts';
 import { columnAt } from './lineage.ts';
 import type { Expr } from './expr.ts';
-import { and, col, compilerInt, compilerNull, compilerText, conjuncts, eq } from './expr.ts';
+import { col, compilerInt, compilerNull, compilerText, conjoin, conjuncts, eq } from './expr.ts';
 import * as make from './factory.ts';
 import type { Rel } from './rel.ts';
 import type { ColMeta, RelId, SortTerm } from './types.ts';
@@ -107,10 +107,12 @@ export interface KeyProjection {
   readonly covers: boolean;
 }
 
+/** TRUE: what an empty key match is (every row pairs with every row). */
+const MATCH_ALL: Expr = eq(compilerInt(1), compilerInt(1));
+
 /** The predicate pairing a key with another relation's copy of it — null-safe where a key column may be NULL. */
 export function keyMatch(key: readonly KeyColumn[], left: (k: KeyColumn) => Expr, right: (k: KeyColumn) => Expr): Expr {
-  return key.map((k): Expr => (k.nullable ? { kind: 'binary', op: 'is', left: left(k), right: right(k) } : eq(left(k), right(k))))
-    .reduce((a, b) => and(a, b));
+  return conjoin(key.map((k): Expr => (k.nullable ? { kind: 'binary', op: 'is', left: left(k), right: right(k) } : eq(left(k), right(k))))) ?? MATCH_ALL;
 }
 
 type Minter = (hint: string) => RelId;
@@ -143,7 +145,7 @@ export function semiJoinPerDistinct(
   });
   return make.join({
     id: fresh(`${hint}j`), left: rows, right: passing, join, channels: rows.channels, type: rows.type,
-    on: keys.type.cols.map((column) => eq(col(rows.id, column.name), col(passing.id, column.name))).reduce((all, one) => and(all, one)),
+    on: conjoin(keys.type.cols.map((column) => eq(col(rows.id, column.name), col(passing.id, column.name)))) ?? MATCH_ALL,
   });
 }
 
@@ -312,8 +314,9 @@ export function decorrelateAll(
       return false;
     });
     if (matched.size !== projection.cols.size || rest.some(exprTouches)) return null;
-    const base = rest.length
-      ? make.filter({ id: fresh('dkf'), input: r.input, channels: r.channels, type: r.input.type, pred: rest.reduce((a, b) => and(a, b)) })
+    const restPred = conjoin(rest);
+    const base = restPred
+      ? make.filter({ id: fresh('dkf'), input: r.input, channels: r.channels, type: r.input.type, pred: restPred })
       : r.input;
     if (projection.covers && !rest.length) coveringFilters.add(r);
     return {

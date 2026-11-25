@@ -1,5 +1,5 @@
 import { isNested, isPred } from '../../../gremlin/frontend.ts';
-import { and, col, compilerInt, compilerNull, conjuncts, eq, isNot, or, type Expr } from '../../../rel/expr.ts';
+import { col, compilerInt, compilerNull, conjoin, conjuncts, disjoin, eq, isNot, or, type Expr } from '../../../rel/expr.ts';
 import * as make from '../../../rel/factory.ts';
 import { decorrelateAll, keyMatch, type Decorrelated, type KeyProjection } from '../../../rel/decorrelate.ts';
 import { commitScope, dropRefusals, forkCollections, isScopedFork, pendingLabels, pendingSites, refusalMark, refusedSites, refuseSite, restoreCollections, type Collections, type PoolRecipe, type Site } from '../collection.ts';
@@ -1182,7 +1182,8 @@ function seedValues(inline: SeedExpressions): ReadonlyMap<string, Expr> {
   return new Map([...inline.values].map(([name, e]) => {
     const kept = inline.pred ? conjuncts(inline.pred).filter((p) => !(p.kind === 'binary' && p.op === 'is not'
       && p.right.kind === 'lit' && p.right.value === null && same(p.left, e))) : [];
-    return [name, kept.length ? { kind: 'case', whens: [[kept.reduce((a, b) => and(a, b)), e]] } as Expr : e] as const;
+    const guard = conjoin(kept);
+    return [name, guard ? { kind: 'case', whens: [[guard, e]] } as Expr : e] as const;
   }));
 }
 
@@ -1269,7 +1270,8 @@ function seedExpressions(rel: Rel, names: readonly string[], host: Rel): SeedExp
     if (!hostOnly) return null;
     out.set(name, e);
   }
-  return { values: out, ...(preds.length ? { pred: preds.reduce((a, b) => and(a, b)) } : {}) };
+  const pred = conjoin(preds);
+  return { values: out, ...(pred ? { pred } : {}) };
 }
 
 /** An operator that keeps a ONE-row input as it is: a sort, or a limit of at least one row from the start. */
@@ -1539,9 +1541,9 @@ const existence = (negated: boolean): Connector => (site) => {
   const correlated = (bodies as (readonly IRStep[])[]).map((body) => correlatedBody(body, rel, framing, ctx, fresh, labels, 'free', 'first'));
   const probes = correlated.map((tail) => tail && existenceProbe(tail, fresh));
   if (probes.every((probe) => probe && spellsStored(probe, ['one'], rel))) {
-    const pred = (probes as Rel[]).map((plan): Expr => ({ kind: 'exists', plan, negated }))
-      // `and` a conjunction of the bodies' EXISTS, `or` a disjunction (`OrStep`: some child has a next).
-      .reduce((all, one) => (step.name === 'or' ? or(all, one) : and(all, one)));
+    // `and` a conjunction of the bodies' EXISTS, `or` a disjunction (`OrStep`: some child has a next).
+    // Non-empty: `and()`/`or()` always carry at least one body.
+    const pred = (step.name === 'or' ? disjoin : conjoin)((probes as Rel[]).map((plan): Expr => ({ kind: 'exists', plan, negated })))!;
     return continueAs(make.filter({ id: fresh('sj'), input: rel, channels: rel.channels, type: rel.type, pred }), framing, steps, at + 1, bulked, ctx, fresh, labels);
   }
   // The host's COMPUTED columns kept a correlated body out (`spellsStored`): the host computed once (`fencedHost`),
@@ -2676,8 +2678,8 @@ function poolMembers(site: HostSite, bys: readonly (Modulation | undefined)[]): 
     const pooled = make.filter({
       id: fresh('pgs'), input: source, channels: source.channels, type: source.type,
       // NULL-safe (`IS`): a term may be NULL for every member of a key (a string key has no family tag).
-      pred: memberCols.map((column, i): Expr => ({ kind: 'binary', op: 'is', left: col(source.id, column.name), right: col(sc.scoped.id, termCols[i]!.name) }))
-        .reduce((a, b) => and(a, b)),
+      // Non-empty: `groupKeyTerms` always yields at least one term.
+      pred: conjoin(memberCols.map((column, i): Expr => ({ kind: 'binary', op: 'is', left: col(source.id, column.name), right: col(sc.scoped.id, termCols[i]!.name) })))!,
     });
     const termNames = new Set(memberCols.map((column) => column.name));
     const seedChannels = source === members ? rel.channels : source.channels.filter((channel) => !termNames.has(channel.col));

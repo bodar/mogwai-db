@@ -1,4 +1,4 @@
-import { compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
+import { and, compilerInt, compilerNull, compilerText, or, type Expr } from '../../rel/expr.ts';
 import { typeName, type ValueEvidence } from './tag.ts';
 import * as make from '../../rel/factory.ts';
 import { deferralExpr, raiseInRow as raise } from '../../rel/raise.ts';
@@ -76,8 +76,6 @@ export function receiverProvably(kind: ReceiverKind, evidence: ValueEvidence): b
 
 const text = compilerText;
 const isNull = (e: Expr): Expr => ({ kind: 'binary', op: 'is', left: e, right: compilerNull() });
-const and = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: 'and', left, right });
-const or = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: 'or', left, right });
 const inList = (expr: Expr, values: readonly string[]): Expr => ({ kind: 'in-list', expr, values: values.map(text) });
 const notIn = (expr: Expr, values: readonly string[]): Expr => ({ kind: 'unary', op: 'not', arg: inList(expr, values) });
 

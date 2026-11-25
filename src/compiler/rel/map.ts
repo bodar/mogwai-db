@@ -1,4 +1,4 @@
-import { col, compilerInt, compilerNull, compilerText, isNot, param, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, conjoin, isNot, param, type Expr } from '../../rel/expr.ts';
 import type { LabelRegime } from '../../api.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
@@ -1692,7 +1692,8 @@ export function mapSelect(
   });
   const kept = make.filter({
     id: fresh('sg'), input: rel, channels: rel.channels, type: rel.type,
-    pred: present.reduce((a, b) => and(a, b)),
+    // Non-empty: the one caller selects two or more keys.
+    pred: conjoin(present)!,
   });
   // THE SUB-MAP — the matched pair per key, in SELECT order. `firstOf` picks the one matching pair (a
   // key is unique within a map), read in the inner FILTER's scope for `firstOf`'s own reason.

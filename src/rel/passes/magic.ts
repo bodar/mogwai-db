@@ -1,4 +1,4 @@
-import { type Expr, and, col, conjuncts } from '../expr.ts';
+import { type Expr, col, conjoin, conjuncts } from '../expr.ts';
 import * as make from '../factory.ts';
 import type { Rel } from '../rel.ts';
 import { atMostOneRow, rowBounds } from '../bounds.ts';
@@ -163,9 +163,10 @@ function unchanged(mapped: Rel, original: Rel): boolean {
 function hostRows(r: Extract<Rel, { kind: 'filter' | 'project' }>, within: Hosts | null, mint: Minter, spool?: () => Rel): Rel | null {
   const input = r.input;
   const rest = r.kind === 'filter' ? conjuncts(r.pred).filter((e) => !exprHasSubquery(e)) : [];
-  const restricted = (base: Rel): Rel => (rest.length
-    ? make.filter({ id: mint.id('mgh'), input: base, channels: input.channels, type: input.type, pred: rest.map((e) => substRelId(e, input.id, base.id)).reduce(and) })
-    : base);
+  const restricted = (base: Rel): Rel => {
+    const pred = conjoin(rest.map((e) => substRelId(e, input.id, base.id)));
+    return pred ? make.filter({ id: mint.id('mgh'), input: base, channels: input.channels, type: input.type, pred }) : base;
+  };
   if (spool) return restricted(spool());
   // A pick in a nested host's input (`out().limit(5)` per enclosing row) is WIDENED away (`unpicked`): the domain
   // need only hold every row the host could have asked of, and a copy of the pick might hold others.
@@ -203,8 +204,9 @@ function atFilter(f: Extract<Rel, { kind: 'filter' }>, hosts: Hosts, mint: Minte
   const widened = unpicked(f.input);
   if (!widened) return f;
   const restricting = others.filter((e) => !exprHasSubquery(e));
-  const rows = withoutDistinct(restricting.length
-    ? make.filter({ id: mint.id('mgr'), input: widened, channels: f.input.channels, type: f.input.type, pred: restricting.reduce(and) })
+  const restriction = conjoin(restricting);
+  const rows = withoutDistinct(restriction
+    ? make.filter({ id: mint.id('mgr'), input: widened, channels: f.input.channels, type: f.input.type, pred: restriction })
     : widened);
   const free = freeRelIds(rows);
   // Rows that read no host row are one relation for every host: nothing to share.
@@ -222,10 +224,11 @@ function atFilter(f: Extract<Rel, { kind: 'filter' }>, hosts: Hosts, mint: Minte
   const joined = semiJoinPerDistinct(f.input, keys, (states) => substRelId(tested, f.input.id, states.id), mint.id, 'mg', test.negated ? 'anti' : 'semi');
   if (!joined) return f;
 
-  if (!others.length) {
+  const pred = conjoin(others.map((e) => substRelId(e, f.input.id, joined.id)));
+  if (!pred) {
     return make.project({ id: f.id, input: joined, channels: f.channels, type: f.type, exprs: f.type.cols.map((c) => [c.name, col(joined.id, c.name)] as const) });
   }
-  return make.filter({ id: f.id, input: joined, channels: f.channels, type: f.type, pred: others.map((e) => substRelId(e, f.input.id, joined.id)).reduce(and) });
+  return make.filter({ id: f.id, input: joined, channels: f.channels, type: f.type, pred });
 }
 
 /** `plan` (correlated to `outer`) for every row of `reached`, decorrelated: its own columns, self-contained, or

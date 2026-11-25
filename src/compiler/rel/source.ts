@@ -1,4 +1,4 @@
-import { col, compilerInt, compilerNull, compilerText, disjoin, isNot, param, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, conjoin, disjoin, isNot, param, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { relChildren } from '../../rel/walk.ts';
@@ -378,8 +378,8 @@ function idRange(idCol: Expr, uidCol: Expr, q: Extract<IdQuery, { kind: 'range' 
     if (v == null) return null;
     bounds.push({ kind: 'binary', op, left: idCol, right: v });
   }
-  const joined = bounds.reduce((left, right) => ({ kind: 'binary', op: q.join, left, right }));
-  return and(rowidOnly(uidCol), joined);
+  const joined = (q.join === 'and' ? conjoin : disjoin)(bounds);
+  return joined ? and(rowidOnly(uidCol), joined) : null;
 }
 
 /** The routed `T.id` question over a base element row's own `id`/`uid` columns, or `null` to fall back. */

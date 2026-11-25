@@ -2,7 +2,7 @@ import { NO_PARAMS, type ParamEnv } from '../../gremlin/param-env.ts';
 import { stringifyExact } from '../../json-exact.ts';
 import { groupableChannels, withChannel, type Channel, type Channels } from '../../channels.ts';
 import { entryValue, type TraverserObject } from './history.ts';
-import { col, compilerInt, compilerNull, compilerText, compilerParamName, conjoin, isNot, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, compilerParamName, conjoin, disjoin, isNot, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { BindBudgetExceeded, DO_BIND_CAP } from '../../rel/check.ts';
 import { renderLowered, type RenderedPlan } from '../../rel/emit.ts';
@@ -54,7 +54,7 @@ import { aliasElementHost, aliasGuard, aliasIdAt, aliasProjection, aliasOperandA
 import type { AliasMap } from '../alias.ts';
 import { byExpr, byProjection, isProductiveBy, modulations, producedMemberNode, productivityFilter, type Modulation } from './modulator.ts';
 import { freshTraverserRow, hostTag, presenceOf, type ChildHost, type ChildValue, type Subject } from './child.ts';
-import { asNumberFilter, asNumberParts, asNumberType, CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
+import { allNullGuard, asNumberFilter, asNumberParts, asNumberType, CONSTANT_FOLDED, REL_TRANSFORMS, transformExpr } from './transform.ts';
 import { projectorTail, REL_PROJECTORS } from './projector.ts';
 import { concatOperandOffence, raisingRows, raisingWhen, transformOffences } from './receiver.ts';
 import { evidenceOf, inferredVtype, type ValueEvidence } from './tag.ts';
@@ -1371,9 +1371,9 @@ function drainRaisingSite(step: IRStep, collections: Collections, fresh: Minter)
   // once rather than once to drain and again to read (`takeFinishedMap`).
   const taken = takeFinishedMap(label as string, collections, fresh);
   if (taken) return taken;
-  const never: Expr = rel.type.cols
-    .map((column): Expr => ({ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [col(rel.id, column.name)] }, right: compilerText('-') }))
-    .reduce((left, right) => ({ kind: 'binary', op: 'or', left, right }));
+  // Non-empty: `rel.type.cols.length` was checked above.
+  const never = disjoin(rel.type.cols
+    .map((column): Expr => ({ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [col(rel.id, column.name)] }, right: compilerText('-') })))!;
   const read = make.filter({ id: fresh('drf'), input: rel, channels: rel.channels, type: rel.type, pred: never });
   const one = make.project({ id: fresh('drp'), input: read, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
   const node = make.limit({ id: fresh('drl'), input: one, channels: [], type: one.type, count: compilerInt(1) });
@@ -1801,8 +1801,8 @@ function perRowCollectionStep(
   // fenced, and a raise filtered beside the base would be dropped by every arm's tag test before it ran).
   const scalars = reader === 'reduce'
     ? raisingRows(base, [[tagIs(base, 'map'), reduceMapMessage(step.name)]], fresh,
-      (['list', 'set'] as const).map((name) => tagIsNot(base, name)).reduce(and))
-    : where(base, COLLECTION_TAGS.map((name) => tagIsNot(base, name)).reduce(and));
+      conjoin((['list', 'set'] as const).map((name) => tagIsNot(base, name)))!)
+    : where(base, conjoin(COLLECTION_TAGS.map((name) => tagIsNot(base, name)))!);
   const arms = [...(maps ? [maps] : []), listArm('list'), listArm('set'),
     selfAnswer(reader, step, scalars, framing, tagCol, bulked, ctx, fresh, labels)];
   if (arms.some((arm) => !arm || arm.effects?.length)) return null;
@@ -2318,14 +2318,9 @@ function scalarTail(
       }
       // `concat_ws('', v, part…)` SKIPS nulls exactly as the string form does; with no non-null string
       // literal to force it, an all-null concatenation must be NULL rather than `''`, so the guard tests
-      // every part (the traverser's own value included) IS NULL. Mirrors `VALUE_TX.concat`.
+      // every part (the traverser's own value included) IS NULL — `allNullGuard`, shared with `VALUE_TX.concat`.
       const all = [col(rel.id, 'v'), ...parts];
-      const value: Expr = {
-        kind: 'case',
-        whens: [[all.map((p) => ({ kind: 'binary', op: 'is', left: p, right: compilerNull() }) as Expr)
-          .reduce((left, right) => ({ kind: 'binary', op: 'and', left, right })), compilerNull()]],
-        else: { kind: 'call', fn: 'concat_ws', args: [compilerText(''), ...all] },
-      };
+      const value = allNullGuard(all, { kind: 'call', fn: 'concat_ws', args: [compilerText(''), ...all] });
       rel = projectRaising(rel, value, offences, fresh, 'cc');
       out = { kind: 'scalar', type: UNKNOWN };
       continue;
@@ -6406,7 +6401,7 @@ function aliasPred(pred: unknown, leaf: AliasLeaf, negated = false): Expr | null
   if (op === 'and' || op === 'or') {
     const parts = operands.map((o) => aliasPred(o.value, leaf, negated));
     const joint: 'and' | 'or' = negated ? (op === 'and' ? 'or' : 'and') : op;
-    return parts.every((p): p is Expr => !!p) ? parts.reduce((a, b) => ({ kind: 'binary', op: joint, left: a, right: b })) : null;
+    return parts.every((p): p is Expr => !!p) ? (joint === 'and' ? conjoin : disjoin)(parts) ?? null : null;
   }
   if (operands.length !== 1 || typeof operands[0]!.value !== 'string') return null;
   const actual = negated ? NEGATED_CMP[op] : op;
@@ -6618,7 +6613,7 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
         const cmp = aliasCompare(pred.op, aVal.value, bVal.value);
         if (!cmp) return 'decline';
         const kept = [prodA.keep, prodB.keep].filter((e): e is Expr => !!e);
-        const guard = kept.length ? and(kept.reduce((a, b) => and(a, b)), cmp) : cmp;
+        const guard = and(conjoin(kept), cmp);
         return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: guard });
       }
       // A SCALAR-alias theta (`where('b', P.eq('c'))` with a VALUE start label, no `by()`) — the start

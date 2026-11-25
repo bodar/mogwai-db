@@ -1,4 +1,4 @@
-import { type Expr, and, col, compilerInt, compilerNull, conjuncts, eq, isNot } from '../expr.ts';
+import { type Expr, col, compilerInt, compilerNull, conjoin, conjuncts, eq, isNot } from '../expr.ts';
 import * as make from '../factory.ts';
 import { brandRel, type Rel } from '../rel.ts';
 import { freshCopy, minter, type Minter } from '../mint.ts';
@@ -217,15 +217,16 @@ function leadingRead(base: Rel, mint: Minter): LeadingRead | null {
   // A test of the HOST alone is asked ONCE per read, over one unit row ahead of the scan: SQLite places a WHERE
   // term that reads none of the scan's tables inside the scan's loop all the same, so as a candidate filter it
   // would be asked per element — and a host it rejects (no age to compare) would still scan the graph.
-  const guard = guards.length ? guards.reduce((a, b) => and(a, b)) : undefined;
+  const guard = conjoin(guards);
   const guarded = (value: Expr, type: ColMeta): Expr => {
     if (!guard) return value;
     const unit = make.values({ id: mint.id('clu'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
     const held = make.filter({ id: mint.id('clg'), input: unit, channels: [], type: unit.type, pred: guard });
     return { kind: 'scalar', plan: make.project({ id: mint.id('clq'), input: held, channels: [], type: typeOf({ ...type, nullable: true }), exprs: [[type.name, value]] }) };
   };
-  const candidates = narrowing.length
-    ? make.filter({ id: mint.id('clc'), input: source.plan, channels: source.plan.channels, type: source.plan.type, pred: narrowing.reduce((a, b) => and(a, b)) })
+  const narrowed = conjoin(narrowing);
+  const candidates = narrowed
+    ? make.filter({ id: mint.id('clc'), input: source.plan, channels: source.plan.channels, type: source.plan.type, pred: narrowed })
     : source.plan;
   const one = at(col(candidates.id, key));
   if (!one) return null;
@@ -294,7 +295,8 @@ function ownerScan(conjunct: Expr, input: Rel, spine: readonly Rel[], side: Rel,
  */
 function ownerProbe(group: readonly OwnerScan[], candidate: Expr, mint: Minter): Expr | null {
   const { props, owner, own } = group[0]!;
-  const pred = [eq(col(props.id, owner), candidate), ...own, ...group.map((scan) => scan.spelled)].reduce((a, b) => and(a, b));
+  // Non-empty: the list has a literal first term.
+  const pred = conjoin([eq(col(props.id, owner), candidate), ...own, ...group.map((scan) => scan.spelled)])!;
   const held = make.filter({ id: mint.id('clo'), input: props, channels: [], type: props.type, pred });
   const probe = make.project({ id: mint.id('clop'), input: held, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', col(held.id, owner)]] });
   // Fresh ids throughout (`freshCopy`): `B` stays in the body, and two relations never share an id.

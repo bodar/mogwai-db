@@ -221,9 +221,8 @@ export const MATH_NAN = 'math() producing NaN or an infinity SQLite does not com
 const nanDeferred = (value: Expr, variables: readonly Expr[]): Expr => {
   const present = variables.map((v): Expr => ({ kind: 'binary', op: 'is not', left: v, right: compilerNull() }));
   const raise = deferralExpr(MATH_NAN, { kind: 'call', fn: 'random', args: [] });
-  const nan: Expr = present.length
-    ? { kind: 'case', whens: [[present.reduce((acc, p) => ({ kind: 'binary', op: 'and', left: acc, right: p })), raise]] }
-    : raise;
+  const all = conjoin(present);
+  const nan: Expr = all ? { kind: 'case', whens: [[all, raise]] } : raise;
   return { kind: 'call', fn: 'COALESCE', args: [value, nan] };
 };
 

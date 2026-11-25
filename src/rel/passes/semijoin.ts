@@ -1,4 +1,4 @@
-import { type Expr, and, col, compilerText, conjoin, conjuncts, disjuncts, eq, isNot, or } from '../expr.ts';
+import { type Expr, col, compilerText, conjoin, conjuncts, disjuncts, eq, isNot, or } from '../expr.ts';
 import * as make from '../factory.ts';
 import type { Rel, Table } from '../rel.ts';
 import { freshCopy, minter, type Minter } from '../mint.ts';
@@ -336,7 +336,7 @@ function narrowed(node: Extract<Rel, { readonly kind: 'filter' }>, terms: readon
   facts.narrowed.add(element);
   return make.filter({
     id: node.id, input: node.input, channels: node.channels, type: node.type,
-    pred: andAll([{ kind: 'in-query', expr: col(target.rel, target.name), plan: ids, negated: false }, ...terms]),
+    pred: conjoin([{ kind: 'in-query', expr: col(target.rel, target.name), plan: ids, negated: false }, ...terms])!, // non-empty: a literal first term
   });
 }
 
@@ -404,17 +404,19 @@ function keyedJoin(
   const isValue = (x: Expr): boolean => x.kind === 'col' && x.rel === props.id && x.name === 'value';
   if (!outer.some((e) => e.kind === 'binary' && e.op === '=' && ((isValue(e.left) && !deepColsRead(e.right, props.id).size)
     || (isValue(e.right) && !deepColsRead(e.left, props.id).size)))) return null;
-  const outerPred = freshCopy(andAll(outer), mint);
-  const localPred = local.length ? freshCopy(andAll(local), mint) : null;
+  const outerPred = freshCopy(conjoin(outer)!, mint); // non-empty: `!outer.length` returned above
+  const localJoined = conjoin(local);
+  const localPred = localJoined ? freshCopy(localJoined, mint) : null;
   if (!outerPred || (local.length && !localPred)) return null;
 
   const scan = make.scan({ id: mint.id('kk'), table: props.table, alias: mint.alias('rkk'), channels: [], type: props.type });
   const rows = make.filter({
     id: mint.id('kf'), input: scan, channels: [], type: scan.type,
-    pred: andAll([
+    // Non-empty: the one caller passes non-empty `constants`.
+    pred: conjoin([
       ...(localPred ? [substRelId(localPred, props.id, scan.id)] : []),
       ...constants.map((c): Expr => ({ kind: 'in-query', expr: col(scan.id, properties.owner), plan: c.kind === 'distinct' ? c.input : c, negated: false })),
-    ]),
+    ])!,
   });
   const pairs = make.project({
     id: mint.id('kp'), input: rows, channels: [],
@@ -454,10 +456,10 @@ function keyedJoin(
   const input = below;
   const filtered = make.filter({
     id: mint.id('kn'), input, channels: node.channels, type: input.type,
-    pred: andAll([
+    pred: conjoin([
       mapColsDeep(substRelId(outerPred, node.input.id, input.id), props.id, () => col(input.id, kvCols[1]!.name)),
       substRelId(node.pred, node.input.id, input.id),
-    ]),
+    ])!,
   });
   return make.project({
     id: node.id, input: filtered, channels: node.channels, type: node.type,
@@ -482,7 +484,7 @@ function allOwners(owners: readonly Rel[], mint: Minter): Rel {
   if (rest.length === 0) return first!;
   return make.filter({
     id: mint.id('si'), input: first!, channels: [], type: first!.type,
-    pred: andAll(rest.map((plan): Expr => ({ kind: 'in-query', expr: col(first!.id, 'sid'), plan, negated: false }))),
+    pred: conjoin(rest.map((plan): Expr => ({ kind: 'in-query', expr: col(first!.id, 'sid'), plan, negated: false })))!, // non-empty: `rest.length === 0` returned above
   });
 }
 
@@ -566,8 +568,6 @@ function idsWithin(rel: Rel): ReadonlySet<RelId> {
 }
 
 // ---------- shared helpers ----------
-
-const andAll = (parts: readonly Expr[]): Expr => parts.reduce(and);
 
 /** `a = b` where one side is `col(left, leftName)` and the other `col(right, rightName)`. */
 function isCorrelation(expr: Expr, left: RelId, leftName: string, right: RelId, rightName: string): boolean {
@@ -805,10 +805,10 @@ function readsOnlyValue(e: Expr, rel: RelId): boolean {
  */
 function positiveOwners(properties: { readonly ownerElem: 'node' | 'edge' }, key: string, probe: Expr, mint: Minter): Rel {
   const scan = make.scan({ id: mint.id('fs'), table: 'property_fts', alias: mint.alias('rfs'), channels: [], type: FTS_TYPE });
-  const pred = andAll([
+  const pred = conjoin([
     eq(col(scan.id, 'owner_elem'), compilerText(properties.ownerElem)), eq(col(scan.id, 'pk'), compilerText(key)),
     trigramProbe(probe, col(scan.id, 'text')),
-  ]);
+  ])!;
   const filtered = make.filter({ id: mint.id('ff'), input: scan, channels: [], type: scan.type, pred });
   const owners = make.project({ id: mint.id('fp'), input: filtered, channels: [], type: { cols: [{ name: 'sid', type: 'int', nullable: false }] }, exprs: [['sid', col(filtered.id, 'owner')]] });
   return make.distinct({ id: mint.id('fd'), input: owners, channels: [], type: owners.type });
@@ -835,7 +835,7 @@ function negativeOwners(
   const rows = make.scan({ id: mint.id('ns'), table: props.table, alias: mint.alias('rns'), channels: [],
     type: { cols: [{ name: 'id', type: 'int', nullable: false }, ...props.type.cols] } });
   const fts = make.scan({ id: mint.id('nfs'), table: 'property_fts', alias: mint.alias('rnfs'), channels: [], type: FTS_TYPE });
-  const matchingFts = make.filter({ id: mint.id('nff'), input: fts, channels: [], type: fts.type, pred: andAll([
+  const matchingFts = make.filter({ id: mint.id('nff'), input: fts, channels: [], type: fts.type, pred: conjoin([
     eq(col(fts.id, 'rowid'), properties.ownerElem === 'edge' ? { kind: 'unary', op: 'neg', arg: col(rows.id, 'id') } : col(rows.id, 'id')),
     // The atom's OWN match body re-asked of the FTS text — its escaped LIKE AND its exact case test — so the
     // probe drops exactly the rows the negative TextP rejects. That LIKE stays the THREE-argument form, which
@@ -843,12 +843,12 @@ function negativeOwners(
     // (`INDEX 0:=`, one rowid seek per keyed property row). Offered the two-argument `trigramProbe`, SQLite plans
     // the trigram match with it instead (`INDEX 0:=L1`), measured super-linear: 18x over 8k -> 64k rows.
     rewriteExpr(matches, (n) => (n.kind === 'col' && n.rel === props.id && n.name === 'value' ? col(fts.id, 'text') : n)),
-  ]) });
+  ])! });
   const probe = make.project({ id: mint.id('nfp'), input: matchingFts, channels: [], type: { cols: [{ name: 'one', type: 'int', nullable: false }] }, exprs: [['one', compilerText('1')] ] });
-  const candidates = make.filter({ id: mint.id('nf'), input: rows, channels: [], type: rows.type, pred: andAll([
+  const candidates = make.filter({ id: mint.id('nf'), input: rows, channels: [], type: rows.type, pred: conjoin([
     eq(col(rows.id, 'key'), compilerText(key)),
     or(isNot(col(rows.id, 'vtype'), compilerText('string')), { kind: 'exists', plan: probe, negated: true }),
-  ]) });
+  ])! });
   const owners = make.project({ id: mint.id('np'), input: candidates, channels: [], type: { cols: [{ name: 'sid', type: 'int', nullable: false }] }, exprs: [['sid', col(candidates.id, properties.owner)]] });
   return make.distinct({ id: mint.id('nd'), input: owners, channels: [], type: owners.type });
 }

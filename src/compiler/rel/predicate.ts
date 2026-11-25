@@ -1,4 +1,4 @@
-import { and, col, compilerInt, compilerNull, compilerReal, compilerText, param, type Expr } from '../../rel/expr.ts';
+import { and, col, compilerInt, compilerNull, compilerReal, compilerText, disjoin, param, type Expr } from '../../rel/expr.ts';
 import { comparableOf, jsonEachSet, meta, storedForm, typeOf, type Minter } from './build.ts';
 import * as make from '../../rel/factory.ts';
 import { inferredVtype } from './tag.ts';
@@ -1275,8 +1275,8 @@ export function predicateExpr(
       : hoistedStringSet(subject, memberArgs.map((o) => o.value), members as Expr[], same as Expr[], memberArgs.map((o) => o.type), type);
     if (hoisted) return settle(withArm(hoisted), nullMember);
     if (spaces.size > 1 ||same.some((e, i) => JSON.stringify(e) !== JSON.stringify(binary('=', subject, members[i]!)))) {
-      const any = withArm(memberArgs.map((o, i) => isNested(o.value) ? same[i]! : typeSpaced(same[i]!, o.value, type, o.type))
-        .reduce((acc, e) => binary('or', acc, e)));
+      // Non-empty: an empty `memberArgs` returned above.
+      const any = withArm(disjoin(memberArgs.map((o, i) => isNested(o.value) ? same[i]! : typeSpaced(same[i]!, o.value, type, o.type)))!);
       return settle(any, nullMember);
     }
     const inList = withArm(typeSpaced({ kind: 'in-list', expr: subject, values: members as Expr[] }, memberArgs[0]!.value, type, memberArgs[0]!.type));
