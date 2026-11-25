@@ -386,17 +386,16 @@ export function coerceBindValue(value: unknown): unknown {
   return value;
 }
 
-/** Normalize a SCALAR property value to what actually BINDS into the `value` column,
- *  keyed on its canonical vtype. The exact tail is stored as canonical decimal TEXT so
- *  no precision is lost at the bind seam (string binds losslessly on both runtimes;
- *  a number bind truncates >2^53 and a bigint bind throws on the DO):
+/** Normalize a SCALAR value to its CARRIER — what crosses the bind seam for a property write, a
+ *  parameter, a literal — keyed on its canonical vtype. The exact tail rides as canonical decimal TEXT
+ *  so no precision is lost at the seam (string binds losslessly on both runtimes; a number bind
+ *  truncates >2^53 and a bigint bind throws on the DO):
  *    - bigdecimal/duration → their canonical decimal text (BigDecimal / total-nanos),
  *    - char                → the 1-codepoint string,
- *    - long/bigint         → a JS number while it fits ±2^53 exactly (keeps INTEGER/REAL
- *      storage class + native index usage for the common case), else decimal TEXT.
- *  Every read of these compares/frames through CAST (plan.ts uniform CAST ordering +
- *  execute.ts CAST-AS-TEXT framing), so a per-key mix of numeric- and TEXT-stored rows is
- *  compared correctly regardless of storage class. Collections never reach here (JSONB). */
+ *    - long/bigint         → a JS number while it fits ±2^53 exactly, else decimal TEXT.
+ *  A property ROW does not keep a number's TEXT carrier in `value`: the write converts it there, in SQL,
+ *  to the comparable number and keeps the digits in `exact` (`storedForm`, src/compiler/rel/build.ts).
+ *  A stream keeps the carrier, and its compares cast it. Collections never reach here (JSONB). */
 export function storedScalar(val: any, vtype: CanonicalType | null): any {
   switch (vtype) {
     case 'bigdecimal': return BigDecimal.from(val).toString();

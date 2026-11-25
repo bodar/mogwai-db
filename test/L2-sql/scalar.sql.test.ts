@@ -213,7 +213,7 @@ describe('scalar-parent / projection SQL', () => {
     expect(p.sql).toContain("json_array(json_object('t', 'string', 'v', 'n'), json_object('t'");
     expect(p.sql).toContain("json_array(json_object('t', 'string', 'v', 'a'), json_object('t'");
     expect(p.sql).toContain("rp3.key = 'name'");
-    expect(p.sql).toContain("rp17.key = 'age'");
+    expect(p.sql).toContain("rp18.key = 'age'");
     // BOTH fields are droppable (a property `by()` can be unproductive), so the array is ACCUMULATED
     // rather than spelled as one `json_array(pair, pair)` — an absent key is omitted, never null.
     expect(p.sql).toContain('json_insert');

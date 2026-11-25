@@ -27,10 +27,12 @@ import { inferredVtype } from './tag.ts';
 /** The physical property columns a `propertyRelation` carries, beside the input's channels. `meta` is
  *  VERTEX-ONLY — `edge_properties` has no such column, because an edge Property cannot have
  *  meta-properties in the first place (schema-storage: normalize where cardinality is 0..N, keep
- *  inline where it is exactly 1). The edge arm therefore projects a NULL rather than reading one. */
+ *  inline where it is exactly 1). The edge arm therefore projects a NULL rather than reading one.
+ *  `value` is the COMPARABLE form and `exact` the digits only the output reads (`storedForm`): a sort
+ *  reads `value`, everything that hands the value onward reads `propertyValueOf`. */
 const propCols = (owner: string, hasMeta: boolean): readonly ColMeta[] => [
   meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'),
-  meta('value', 'any', true), meta('vtype', 'text', true),
+  meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true),
   ...(hasMeta ? [meta('meta', 'json', true)] : []),
 ];
 
@@ -40,6 +42,9 @@ const propCols = (owner: string, hasMeta: boolean): readonly ColMeta[] => [
  *  letting one silently shadow the other. The SCAN keeps the real column names (it reads the table);
  *  only the join's declared outputs are renamed. */
 const PROP = (name: string): string => `p_${name}`;
+
+/** `storedValueOn` of a property relation's prefixed columns — its payload, a collection as JSON. */
+const propertyValueOf = (rel: RelId): Expr => storedValueOn(col(rel, PROP('value')), col(rel, PROP('vtype')), col(rel, PROP('exact')));
 
 /**
  * THE PROPERTY JOIN, with the match left to the caller — one traverser PER matching property, so a
@@ -137,6 +142,8 @@ export function boundPropertyRelation(input: Rel, cte: Rel, elem: Elem, keys: re
       [PROP('key'), col(nodes.id, B.key)],
       [PROP('value'), jsonExtract(node, '$.v')],
       [PROP('vtype'), jsonExtract(node, '$.t')],
+      // A landed `{t,v}` node already carries the payload (its digits) in `v`.
+      [PROP('exact'), compilerNull('text')],
       ...(elem === 'vertex' ? [[PROP('meta'), jsonExtract(node, '$.meta')] as const] : []),
       ...input.channels.map((channel) => [channel.col, col(nodes.id, channel.col)] as const),
     ],
@@ -164,7 +171,7 @@ export function propertyPayload(input: Rel, elem: Elem, fresh: Minter): Rel {
     [meta('vpid', 'int', true), isVertex ? col(ordered.id, PROP('id')) : compilerNull()],
     [meta('owner', 'int'), col(ordered.id, PROP(owner))],
     [meta('pk', 'text'), col(ordered.id, PROP('key'))],
-    [meta('pv', 'any', true), storedValueOn(col(ordered.id, PROP('value')), col(ordered.id, PROP('vtype')))],
+    [meta('pv', 'any', true), propertyValueOf(ordered.id)],
     [meta('pvtype', 'text', true), col(ordered.id, PROP('vtype'))],
     [meta('pmeta', 'json', true), isVertex ? jsonOf(col(ordered.id, PROP('meta'))) : compilerNull()],
   ];
@@ -193,7 +200,7 @@ export function propertyHasClause(
   const vtype = col(props.id, PROP('vtype'));
   return on === 'key'
     ? valueSet(col(props.id, PROP('key')), args, { kind: 'static', type: 'string' }, fresh)
-    : valueSet(storedValueOn(col(props.id, PROP('value')), vtype), args, { kind: 'perRow', vtype }, fresh);
+    : valueSet(propertyValueOf(props.id), args, { kind: 'perRow', vtype }, fresh);
 }
 
 // ---------- a property traverser's NATURAL ORDER and its IDENTITY ----------
@@ -236,7 +243,7 @@ export function propertyIdentityKey(props: Rel, ownerElem: Elem): readonly Expr[
   // properties upstream keeps apart. ⚠️ A row whose `vtype` is NULL (the raw-insert path documented in
   // `src/storage.ts`) therefore stands apart from a typed row holding the same value; that is the
   // fail-closed direction, and every property written through the write channel carries one.
-  return [own('key'), storedValueOn(own('value'), own('vtype')), own('vtype')];
+  return [own('key'), propertyValueOf(props.id), own('vtype')];
 }
 
 // ---------- re-entering a property stream: key() / value() / element() ----------
@@ -312,7 +319,7 @@ export function propertyValue(input: Rel, fresh: Minter): { rel: Rel; framing: R
       id: fresh('pv'), input, channels: input.channels,
       type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true), ...carriedCols(input.channels)),
       exprs: [
-        ['v', storedValueOn(col(input.id, PROP('value')), col(input.id, PROP('vtype')))],
+        ['v', propertyValueOf(input.id)],
         ['vtype', col(input.id, PROP('vtype'))],
         ...carryThrough(input),
       ],
@@ -333,7 +340,7 @@ export function propertyAsString(input: Rel, ownerElem: Elem, fresh: Minter): { 
     compilerText(ownerElem === 'vertex' ? 'vp[' : 'p['),
     col(input.id, PROP('key')),
     compilerText('->'),
-    storedValueOn(col(input.id, PROP('value')), col(input.id, PROP('vtype'))),
+    propertyValueOf(input.id),
     compilerText(']'),
   );
   return {
@@ -405,7 +412,7 @@ export function propertyNode(rowid: Expr, ownerElem: Elem, fresh: Minter): Expr 
       ['vpid', isVertex ? own('id') : compilerNull()],
       ['owner', own(owner)],
       ['pk', own('key')],
-      ['pv', storedValueOn(own('value'), own('vtype'))],
+      ['pv', storedValueOn(own('value'), own('vtype'), own('exact'))],
       ['pvtype', own('vtype')],
       ['pmeta', isVertex ? jsonOf(own('meta')) : compilerNull()],
     ],
@@ -433,7 +440,7 @@ export function propertyReadOf(rowid: Expr, ownerElem: Elem, read: PropertyRead,
   const { rel, owner } = propertyRow(rowid, ownerElem, fresh);
   if (read === 'meta' && ownerElem !== 'vertex') return compilerNull();
   const value = read === 'owner' ? col(rel.id, owner)
-    : read === 'value' ? storedValueOn(col(rel.id, 'value'), col(rel.id, 'vtype'))
+    : read === 'value' ? storedValueOn(col(rel.id, 'value'), col(rel.id, 'vtype'), col(rel.id, 'exact'))
       : col(rel.id, read);
   const only = make.project({
     id: fresh('prp'), input: rel, channels: [], type: typeOf(meta('v', 'any', true)),

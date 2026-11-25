@@ -41,6 +41,10 @@ export interface SetColumn {
    *  (a raw blob bind diverges across runtimes and cannot ride JSON — storage.ts / program.ts). The
    *  gid column (a 16-byte uuid_v7) is the one user. */
   readonly blob?: boolean;
+  /** The cell as a function of the row's landed cells, by column name — a STORED column derived in SQL
+   *  from the values that crossed (a property row's `value`/`exact` from its payload and tag, `storedForm`),
+   *  so one conversion serves every writer. Its own position still crosses (a null placeholder will do). */
+  readonly derive?: (cellOf: (name: string) => Expr) => Expr;
 }
 
 /** `json_extract(<row>, '$[i]')` — a landed row's cell by position, the path a compiler constant so the
@@ -80,9 +84,14 @@ export function insertSet(
   // The rows land as ONE json_each relation, its members the row-tuples; the project reads each
   // tuple's cells by position into the target's columns.
   const exploded = jsonEachSet('rows', rows as readonly unknown[], fresh);
+  const cellOf = (name: string): Expr => {
+    const at = columns.findIndex((c) => c.name === name);
+    if (at < 0) throw new Error(`insertSet(${table}): no column ${name}`);
+    return cellAt(col(exploded.id, 'sv'), at, columns[at]!);
+  };
   const source = make.project({
     id: fresh('sp'), input: exploded, channels: [], type: typeOf(...cols),
-    exprs: columns.map((c, at) => [c.name, cellAt(col(exploded.id, 'sv'), at, c)] as const),
+    exprs: columns.map((c, at) => [c.name, c.derive ? c.derive(cellOf) : cellAt(col(exploded.id, 'sv'), at, c)] as const),
   });
   const target = make.scan({ id: fresh('t'), table: table as never, alias: fresh('wt'), channels: [], type: typeOf(...cols) });
   const stmt = insert({

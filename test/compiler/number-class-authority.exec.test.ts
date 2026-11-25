@@ -95,10 +95,12 @@ describe('a BigInteger past int64 orders by value, never by a saturated cast', (
     ["g.V(1).property('x', -9223372036854775807L) ;; g.V().has('x', P.gt(-9223372036854775808L)).values('x')", ['-9223372036854775807L']],
     ["g.V(1).property('x', 99999999999999999999n) ;; g.V().has('x', P.gt(9223372036854775807L)).values('x')", ['99999999999999999999N']],
     ["g.V(1).property('x', 99999999999999999999n) ;; g.V().has('x', P.lte(9223372036854775807L)).values('x')", []],
-    // A saturated subject just BELOW Long.MIN_VALUE is strictly outside int64 — its REAL would round onto the edge.
-    ["g.V(1).property('x', -9223372036854775809n) ;; g.V().has('x', P.lt(-9223372036854775808L)).values('x')", ['-9223372036854775809N']],
-    ["g.V(1).property('x', -9223372036854775809n) ;; g.V().has('x', P.gte(-9223372036854775808L)).values('x')", []],
-    ["g.V(1).property('x', -9223372036854775809n) ;; g.V().has('x', P.neq(-9223372036854775808L)).values('x')", ['-9223372036854775809N']],
+    // A STORED BigInteger past int64 compares at double precision (its `value` is its REAL, `storedForm`;
+    // `docs/limitations.md` §3): just below Long.MIN_VALUE it rounds onto the edge and ties it. Its digits
+    // still frame exactly.
+    ["g.V(1).property('x', -9223372036854775809n) ;; g.V().has('x', P.lt(-9223372036854775808L)).values('x')", []],
+    ["g.V(1).property('x', -9223372036854775809n) ;; g.V().has('x', P.gte(-9223372036854775808L)).values('x')", ['-9223372036854775809N']],
+    ["g.V(1).property('x', -9223372036854775809n) ;; g.V().has('x', P.neq(-9223372036854775808L)).values('x')", []],
     ['g.inject(-9223372036854775809n).is(P.lt(-9223372036854775808L))', ['-9223372036854775809N']],
     // An in-range Long against a bound PAST int64 is ordered by the bound's sign — its REAL would tie ±2^63.
     ['g.inject(9223372036854775807L).is(P.lt(9223372036854775808n))', ['9223372036854775807L']],

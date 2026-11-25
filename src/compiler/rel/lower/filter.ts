@@ -498,8 +498,8 @@ function hasPropertyClause(key: string, val: unknown, subject: ElementSubject, s
   // source owns the physical property row and the EXISTS scaffold; it hands the comparison the graph's
   // own value + vtype expressions. `undefined` for a bare `has(key)` presence test.
   const valuePred = val === undefined ? undefined
-    : (value: Expr, vtype: Expr): Expr | null =>
-      predicateExpr(value, val, { kind: 'perRow', vtype }, valType, valParam, fresh, resolveListSet, resolveScalar);
+    : (value: Expr, vtype: Expr, stored: boolean): Expr | null =>
+      predicateExpr(value, val, stored ? { kind: 'perRow', vtype, stored } : { kind: 'perRow', vtype }, valType, valParam, fresh, resolveListSet, resolveScalar);
   return source.hasPropertyPredicate(subject.elem, subject.id, key, valuePred, fresh);
 }
 

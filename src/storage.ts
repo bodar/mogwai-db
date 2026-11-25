@@ -124,9 +124,14 @@ const SCHEMA = [
   // type tag, so list/set/map ELEMENTS + typed/non-string KEYS + arbitrary nesting round-trip
   // with each leaf's exact gremlin type (gremlin-types.ts valueNodeOf; framed via
   // execute.ts frameTypedNode). `meta` is a JSONB {metaKey: scalar} blob, nullable.
+  // `value` is always the COMPARABLE form: a number SQLite compares and indexes natively. A number
+  // whose exact digits a JS number cannot carry (a BigDecimal, a long/bigint past ±2^53) keeps those
+  // digits in `exact` (TEXT, else NULL), which only the output reads (`storedForm`/`storedPayload`,
+  // src/compiler/rel/build.ts). So every compare, seek and sort reads `value` with no decimal arm, and
+  // `(key, value)` serves a BigDecimal equality like any other.
   `CREATE TABLE IF NOT EXISTS vertex_properties(
      id INTEGER PRIMARY KEY, node INTEGER NOT NULL REFERENCES nodes(id),
-     key TEXT NOT NULL, value, vtype TEXT, meta BLOB)`,
+     key TEXT NOT NULL, value, vtype TEXT, meta BLOB, exact TEXT)`,
   // `gid`/`rev` mirror `nodes` (see that comment). An edge's `rev` content hash references its
   // endpoints by `gid` (§6·5), so a replicated edge converges across peers that preserved those gids.
   // `weak` marks a WEAK reference (filtered-replication-plan §5/F2): a placement-synthesized decoration
@@ -147,7 +152,7 @@ const SCHEMA = [
   // column keeps the storage class, so edge-prop numeric order/range now works too).
   `CREATE TABLE IF NOT EXISTS edge_properties(
      id INTEGER PRIMARY KEY, edge INTEGER NOT NULL REFERENCES edges(id),
-     key TEXT NOT NULL, value, vtype TEXT, UNIQUE(edge, key))`,
+     key TEXT NOT NULL, value, vtype TEXT, exact TEXT, UNIQUE(edge, key))`,
   // Deletes leave a TOMBSTONE (§6·4/§6·5): `drop()` hard-deletes, so a live-set diff cannot tell
   // "deleted on source" from "not yet created" — the tombstone is what makes a delete propagate,
   // appearing in `_changes` exactly as CouchDB ships a `_deleted` rev. It carries the deleted element's
@@ -256,15 +261,6 @@ const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS vp_key_value ON vertex_properties(key, value)`,
   `CREATE INDEX IF NOT EXISTS vp_node_key  ON vertex_properties(node, key)`,
   `CREATE INDEX IF NOT EXISTS ep_key_value ON edge_properties(key, value)`,
-  // The decimal half of a numeric equality. A plain number compares a stored BigDecimal by its REAL
-  // (`decimalTextArm`, src/compiler/rel/predicate.ts), so `has(k, 1)` is `value = 1 OR (vtype =
-  // 'bigdecimal' AND CAST(value AS REAL) = 1)`. The owner seek reads each disjunct as its own arm
-  // (`seekArms`, src/rel/passes/semijoin.ts): the raw compare seeks (key, value) above, the decimal arm
-  // seeks here, and so does a merge search's BigDecimal arm (`decimalTextSeeks`, src/compiler/rel/write.ts).
-  // Without it that arm read every row of the key. SQLite's planner chooses it; no lowering
-  // names it. PARTIAL, so it holds zero rows on a graph that never writes a BigDecimal.
-  `CREATE INDEX IF NOT EXISTS vp_decimal ON vertex_properties(key, CAST(value AS REAL)) WHERE vtype = 'bigdecimal'`,
-  `CREATE INDEX IF NOT EXISTS ep_decimal ON edge_properties(key, CAST(value AS REAL)) WHERE vtype = 'bigdecimal'`,
   // A single FTS5 trigram index over property TEXT, maintained in the write path (see
   // services/fts-index.ts) — the shared substrate for tinker.search and the TextP substring
   // predicates. `text` is the ONLY tokenized column; the rest are UNINDEXED (stored, not tokenized).

@@ -122,7 +122,7 @@ export function decorateGraph(base: GraphSource, run: number, round: number, cha
       // score numerically and `has(componentKey, "lop")` the TEXT id as text. A predicate the caller
       // cannot build DECLINES the whole clause (`null`), never a silent presence-only fallback —
       // the `GraphSource` contract (`source.ts`), and fail-closed per the root CLAUDE.md.
-      const matches = valuePred(col(row.id, 'cval'), compilerText(vtype));
+      const matches = valuePred(col(row.id, 'cval'), compilerText(vtype), false);
       if (!matches) return null;
       return existsOf(make.filter({ id: fresh('dhf'), input: row, channels: [], type: row.type, pred: matches }), fresh);
     },

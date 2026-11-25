@@ -1,5 +1,5 @@
 import { and, col, compilerInt, compilerNull, compilerReal, compilerText, param, type Expr } from '../../rel/expr.ts';
-import { jsonEachSet, meta, typeOf, type Minter } from './build.ts';
+import { jsonEachSet, meta, storedForm, typeOf, type Minter } from './build.ts';
 import * as make from '../../rel/factory.ts';
 import { inferredVtype } from './tag.ts';
 import type { RelId, SqlType } from '../../rel/types.ts';
@@ -75,21 +75,40 @@ const STATIC_ORDERING_DECLINE = new Set(['datetime', 'duration']);
  * compares an INTEGER `2` and a REAL `2.0` numerically alike — so a nested operand with no declared
  * type inlines by its value's own shape without changing any answer.
  *
- * The EXACT NUMERIC TAIL — bigint / BigDecimal / Duration — is stored as canonical decimal TEXT
- * (`storedScalar`), so it inlines as that TEXT literal (equality is TEXT=TEXT) or binds
- * as a parameter; the ordering CAST that lines it up with `compareKey` is `ordered`'s job (`isExactTail`
- * → `castBound`). This is why the lowering COVERS these operands.
+ * The EXACT NUMERIC TAIL — bigint / BigDecimal / Duration — rides as canonical decimal TEXT
+ * (`storedScalar`), so it inlines as that TEXT literal or binds as a parameter; against a STREAM the
+ * ordering CAST that lines it up with `compareKey` is `ordered`'s job (`isExactTail` → `castBound`), and
+ * against a STORED row it converts to the row's comparable form (`storedBound`). This is why the lowering
+ * COVERS these operands.
  */
-const operand = (value: unknown, type: TypeNode | null = null, paramName: string | null = null): Expr | null => {
+const operand = (value: unknown, type: TypeNode | null = null, paramName: string | null = null, subject: SubjectType = SUBJECT_UNKNOWN): Expr | null => {
   // A BOOLEAN is 1/0, which is how it is STORED — `storedValue` writes the same encoding
   // (`gremlin/types.ts`, and `GraphStore` coerces at the bind seam because DO SQLite refuses a
   // boolean bind outright). So `has('active', true)` is an ordinary integer comparison and needs no
   // vocabulary of its own; excluding it here was the whole of the gap.
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')
     return constLit(arg(value, type, paramName));
-  if (isExactTail(value)) return paramName != null ? param(value, paramName) : compilerText(String(value));
+  if (isExactTail(value)) {
+    const carried = paramName != null ? param(value, paramName) : compilerText(String(value));
+    return isStoredRow(subject) ? storedBound(carried, value) : carried;
+  }
   return null;
 };
+
+/** Is the subject a stored property row's comparable `value` column (`SubjectType`'s `stored`)? */
+const isStoredRow = (type: SubjectType): boolean => type.kind === 'perRow' && type.stored === true;
+
+/** A decimal-TEXT bound (`operand`) as the comparable form a stored row holds (`storedForm`, the same CAST):
+ *  a BigDecimal its REAL; a BigInteger its INTEGER inside int64, else its REAL. A Duration is no number and
+ *  rides as its total-nanos TEXT, as it is stored.
+ *
+ *  `+ 0` strips the CAST's AFFINITY, and that is load-bearing: a `CAST(… AS REAL)` operand has REAL affinity,
+ *  so SQLite would apply it to the untyped `value` column and a String row `'31'` would equal `31.0m`. A
+ *  sum has no affinity, so a TEXT row stays TEXT and never equals a number, as for a plain number bound. */
+function storedBound(carried: Expr, value: unknown): Expr {
+  const to: SqlType | null = value instanceof BigDecimal ? 'real' : typeof value === 'bigint' ? (pastInt64(value) ? 'real' : 'int') : null;
+  return to ? binary('+', { kind: 'cast', arg: carried, to }, compilerInt(0)) : carried;
+}
 
 /** The numeric tail stored as decimal TEXT — a bigint, a BigDecimal, or a Duration (total-nanos). Its
  *  comparison casts it to a numeric class (`compareBound`): the two integrals, and a BigDecimal holding a whole
@@ -153,8 +172,12 @@ export type SubjectType =
    *  decimal-TEXT-stored exact tail (`inject(9.99m)`, a bound big long/Duration) so an ordering compare
    *  casts the subject to its numeric class; unset means a native REAL/INT of the same tag. */
   | { readonly kind: 'static'; readonly type: string; readonly text?: boolean }
-  /** The subject came from a stored property, so its type is the row's own `vtype` column. */
-  | { readonly kind: 'perRow'; readonly vtype: Expr }
+  /** The subject's type is a per-row tag — a stored property's own `vtype` column, or a stream's tag.
+   *  `stored` marks a stored property row's `value` column: a number there is always its COMPARABLE form
+   *  (`storedForm` — a BigDecimal its REAL, a wide long its INTEGER), so it needs no decimal arm and no
+   *  cast, and a BigDecimal/BigInteger bound converts to the same form instead (`storedBound`). A stream
+   *  subject (unset) may carry a number as decimal TEXT and keeps both. */
+  | { readonly kind: 'perRow'; readonly vtype: Expr; readonly stored?: true }
   /** Nothing is known about the subject's NUMBER class — an untyped computed scalar. `tag`, where present,
    *  is a per-row tag in a MIXED vocabulary (a Gremlin type or a reducer's storage class — a coalesce
    *  framed `result: 'number'`), which cannot key a cast but CAN say a row sits in another type space
@@ -251,12 +274,12 @@ function byValue(
 
 /**
  * THE ONE ROW A RAW `=` MISSES against a plain NUMBER bound: a BigDecimal riding as decimal TEXT under a
- * per-row type (`inject(1m).is(1)`). It reads as its REAL — OR-ed beside the raw compare rather than
+ * per-row type of a STREAM (`inject(1m).is(1)`). A stored row holds its REAL (`storedForm`), so it needs none. It reads as its REAL — OR-ed beside the raw compare rather than
  * replacing it, which keeps the value index and the `IN`-list form usable. `bounds` are the plain-number
  * bounds of one `eq` or one `within`; `null` where none needs the arm.
  */
 function decimalTextArm(subject: Expr, type: SubjectType, bounds: readonly Expr[]): Expr | null {
-  if (type.kind !== 'perRow' || !bounds.length) return null;
+  if (type.kind !== 'perRow' || type.stored || !bounds.length) return null;
   const real: Expr = { kind: 'cast', arg: subject, to: 'real' };
   return and(binary('=', type.vtype, compilerText('bigdecimal')),
     bounds.length === 1 ? binary('=', real, bounds[0]!) : { kind: 'in-list', expr: real, values: bounds });
@@ -316,6 +339,10 @@ const ordered = (
     // int as if it were comparable.
     return compilerFalse;
   }
+  // A STORED row's number is its comparable form and so is the bound (`storedBound`): one raw compare under
+  // the Number guard, which keeps every other type space (a String, a Boolean's 0/1) out.
+  if (numericBound && !temporal && isStoredRow(type) && type.kind === 'perRow')
+    return { kind: 'case', whens: [[{ kind: 'in-list', expr: type.vtype, values: NUMERIC_VTYPES.map(compilerText) }, binary(op, subject, bound)]], else: compilerFalse };
   const wide = numericBound && !temporal ? wideBound(value) : null;
   if (type.kind === 'static') {
     const canonical = normalizeTypeName(type.type);
@@ -531,6 +558,9 @@ const sameSpaceEquality = (subject: Expr, bound: Expr, value: unknown, type: Sub
   if (temporal || !(typeof value === 'number' || typeof value === 'bigint' || value instanceof BigDecimal)) return raw;
   // A String never equals a Number, however it is spelled (`inject('1.0').is(1.0m)`).
   if (type.kind === 'static' && normalizeTypeName(type.type) === 'string') return CONSTANT.false;
+  // A STORED row holds every number in its comparable form, and the bound is already in it (`storedBound`):
+  // SQLite's own `=` is the answer, and the `(key, value)` index serves it. A TEXT row never equals a number.
+  if (isStoredRow(type)) return raw;
   // A row of no number class — a per-row String, an untagged TEXT (framed as a String by its storage class) —
   // never equals a Number bound, even where its text spells the bound's.
   const nonNumber: Expr = type.kind === 'unknown' && type.tag ? raw : compilerFalse;
@@ -687,7 +717,7 @@ export const typedValueEq = (aValue: Expr, aVtype: Expr, bValue: Expr, bVtype: E
   return {
     kind: 'case',
     whens: [
-      [and(numeric(aVtype), numeric(bVtype)), binary('=', storedCompareOn(aVtype)(aValue), storedCompareOn(bVtype)(bValue))],
+      [and(numeric(aVtype), numeric(bVtype)), binary('=', comparableNumber(aValue, aVtype), comparableNumber(bValue, bVtype))],
       [binary('=', aVtype, bVtype), binary('=', aValue, bValue)],
     ],
     else: compilerFalse,
@@ -777,8 +807,8 @@ export const subjectOperand = (value: Expr, type: SubjectType): TypedOperand => 
  * `vp_key_value`).
  *
  * It is `typedValueEq`'s two arms read as one partition: every `Number` vtype is ONE family (the
- * `numeric` arm — `NumberHelper` compares across int/real), keyed by `storedCompareOn` (the same cast
- * the arm applies, which bridges `30` and `30.0` and pulls a decimal/bigint TEXT tail to its number);
+ * `numeric` arm — `NumberHelper` compares across int/real), keyed by `comparableNumber` (the same form
+ * the arm compares, which pulls a decimal/bigint TEXT tail to the number a stored row holds);
  * every other vtype is its own family keyed by the raw value (the same-vtype arm). A `NULL` vtype or
  * value keys `NULL`, which no `=` meets — `typedValueEq` is false there too. The family sentinel is not
  * a vtype name, so a numeric value cannot meet a non-numeric one whose vtype spells it.
@@ -787,9 +817,16 @@ export const typedValueKey = (value: Expr, vtype: Expr): readonly [Expr, Expr] =
   const numeric: Expr = { kind: 'in-list', expr: vtype, values: NUMERIC_VTYPES.map(compilerText) };
   return [
     { kind: 'case', whens: [[numeric, compilerText('#number')]], else: vtype },
-    { kind: 'case', whens: [[numeric, storedCompareOn(vtype)(value)]], else: value },
+    { kind: 'case', whens: [[numeric, comparableNumber(value, vtype)]], else: value },
   ];
 };
+
+/** A NUMBER as the comparable form a stored property row holds in `value` (`storedForm`): a decimal-TEXT
+ *  BigDecimal as its REAL, a decimal-TEXT long/bigint as its INTEGER inside int64 (its REAL past it), any
+ *  other number as itself. So a value read off a stream equals a stored row of the same number by a plain
+ *  `=`, which is what lets a merge seek `(key, value)` for every numeric criterion. SQLite's own `=` then
+ *  bridges INTEGER and REAL (`30` and `30.0`), which is `NumberHelper`'s one number space. */
+const comparableNumber = (value: Expr, vtype: Expr): Expr => storedForm(value, vtype).value;
 
 /** `TextP` -> a LIKE pattern with the user's metacharacters escaped (`likeEscaped`). A wire parameter stays a
  * parameter through the pattern; interpolating its current value here would silently make it a
@@ -963,7 +1000,7 @@ export function valueSet(
   // A P nested among varargs is not a form Gremlin has (`hasKey(P.eq('a'), 'b')` does not type), so
   // declining beats folding one into a member list.
   if (args.some((a) => isPred(a.value))) return null;
-  const values = args.map((a) => (a.value === null ? compilerNull() : operand(a.value, a.type, a.name)));
+  const values = args.map((a) => (a.value === null ? compilerNull() : operand(a.value, a.type, a.name, type)));
   if (values.some((v) => !v)) return null;
   // ONE member that is null: `x = NULL` is never true, which is the answer, and spelling it as the
   // comparison rather than as `CONSTANT.false` keeps the reason readable in the emitted SQL.
@@ -1032,7 +1069,7 @@ export function predicateExpr(
     }
     // The BARE value — the one operand that can be a top-level parameter (`has(k, $x)`, `is($x)`), so it
     // alone carries the declared type and the param name; a `P.gt(x)` operand is nested and inlines.
-    const value = operand(pred, opType, opParam);
+    const value = operand(pred, opType, opParam, type);
     return value && equality(subject, value, pred, type, opType);
   }
 
@@ -1097,7 +1134,7 @@ export function predicateExpr(
     // The operand inlines as a TYPED literal, storage class following its declared canonical type —
     // the thesis's "we know the type, stop throwing it away" (an integer-valued `P.gt(2.0)` renders
     // `2.0`, not `2`). Result-invariant: SQLite compares an INTEGER and a REAL numerically alike.
-    const bound = operand(operands[0].value, operands[0].type, operands[0].name);
+    const bound = operand(operands[0].value, operands[0].type, operands[0].name, type);
     if (!bound) return null;
     // Equality stays a RAW compare: canonical text is exact, and it keeps the value index usable
     // for the common case. Only ORDERING needs the cast, and only it pays for one.
@@ -1169,7 +1206,7 @@ export function predicateExpr(
     // null is (an unproductive operand can neither add a `within` match nor remove a `without` one), so
     // "drop the non-producing operand" and "leave its NULL in the list" are the same answer.
     const members = memberArgs.map((o) =>
-      isNested(o.value) ? (resolveScalar ? resolveScalar(o.value) : null) : operand(o.value, o.type, o.name));
+      isNested(o.value) ? (resolveScalar ? resolveScalar(o.value) : null) : operand(o.value, o.type, o.name, type));
     if (members.some((m) => !m)) return null;
     // Membership is `eq` per member (`Contains.within`), so a literal member whose equality is not the
     // raw compare (`equality` — a TEXT-carried number, a String spelling a number) cannot ride an `IN` list.
@@ -1178,7 +1215,7 @@ export function predicateExpr(
     // space confines the whole `IN` list once, so the index-friendly list form survives it.
     const same = memberArgs.map((o, i) => isNested(o.value) ? binary('=', subject, members[i]!) : sameSpaceEquality(subject, members[i]!, o.value, type, o.type));
     if (same.some((e) => !e)) return null;
-    // A stored BigDecimal riding as TEXT is the one row neither form sees (`decimalTextArm`): ONE arm for the set.
+    // A stream's BigDecimal riding as TEXT is the one row neither form sees (`decimalTextArm`): ONE arm for the set.
     const decimalArm = decimalTextArm(subject, type, members.filter((_, i) => plainNumber(memberArgs[i]!.value, memberArgs[i]!.type)) as Expr[]);
     const withArm = (e: Expr): Expr => (decimalArm ? binary('or', e, decimalArm) : e);
     const spaces = new Set(memberArgs.map((o) => isNested(o.value) ? null : boundSpace(o.value, o.type)));
@@ -1202,7 +1239,7 @@ export function predicateExpr(
   if (op === 'between' || op === 'inside' || op === 'outside') {
     const bounds = operands.length === 1 && Array.isArray(operands[0].value) ? collectionMembers(operands[0]) : operands;
     if (bounds.length !== 2) return null;
-    const [low, high] = [operand(bounds[0].value, bounds[0].type, bounds[0].name), operand(bounds[1].value, bounds[1].type, bounds[1].name)];
+    const [low, high] = [operand(bounds[0].value, bounds[0].type, bounds[0].name, type), operand(bounds[1].value, bounds[1].type, bounds[1].name, type)];
     if (!low || !high) return null;
     // outside is a DISJUNCTION either side of the range; between/inside are a conjunction inside it. The
     // low bound is exclusive for inside/outside (`>`/`<`) and inclusive for between (`>=`).

@@ -11,7 +11,7 @@ import { CONSTANT, storedCompareOn } from './predicate.ts';
 import { valueIsKind } from './receiver.ts';
 import type { ValueEvidence } from './tag.ts';
 import { propertyRelation } from './property.ts';
-import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, renumber, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
+import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, renumber, storedPayload, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 
 // ---------- GraphSource: one traversal vocabulary over two physical graph shapes ----------
 //
@@ -96,11 +96,13 @@ export interface GraphSource {
    *  hands it the graph's own value + vtype expressions (so the Gremlin `P` semantics live in the
    *  caller while the physical columns stay the source's), and it returns the comparison Expr, or `null`
    *  where the predicate could not be built (which declines the whole clause). `valuePred` is `undefined`
-   *  for a bare `has(key)` presence test. The `BaseGraph` EXISTS shape is what `semijoin.ts`'s
+   *  for a bare `has(key)` presence test. `stored` says the value is a stored row's COMPARABLE `value`
+   *  column (`storedForm`) rather than a payload that may carry a number as decimal TEXT — `BaseGraph`'s
+   *  is, a landed tree's is not. The `BaseGraph` EXISTS shape is what `semijoin.ts`'s
    *  `indexSeek`/`trigramSeek` recognise, so it is preserved exactly. */
   hasPropertyPredicate(
     kind: Elem, id: Expr, key: string,
-    valuePred: ((value: Expr, vtype: Expr) => Expr | null) | undefined, fresh: Minter,
+    valuePred: ((value: Expr, vtype: Expr, stored: boolean) => Expr | null) | undefined, fresh: Minter,
   ): Expr | null;
 
   /** `has(T.id, …)` / `has(T.label, …)` — a TOKEN key, which reads the element itself rather than a
@@ -464,7 +466,7 @@ export const BaseGraph: GraphSource = {
     // arriving the assembler fuses this projection away, so an ordinary `values()` is byte-unchanged.
     const props = make.scan({
       id: fresh('vp'), table, alias: fresh('rp'), channels: [],
-      type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('id', 'int')),
+      type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true), meta('id', 'int')),
     });
     // A JOIN, not an EXISTS: `values()` emits one traverser PER matching property, so multiplying the
     // row is the answer. `ordered` so the stream drives and `vp_node_key(node,key)` is probed rather
@@ -472,7 +474,7 @@ export const BaseGraph: GraphSource = {
     // scan's last column (`id`) — the emitter's join select is `[left…, right…]` by position.
     const joined = make.join({
       id: fresh('j'), left: input, right: props, join: 'inner', ordered: true, channels: input.channels,
-      type: typeOf(...elementCols(input.channels), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('pord', 'int')),
+      type: typeOf(...elementCols(input.channels), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true), meta('pord', 'int')),
       on: and(eq(col(props.id, owner), col(input.id, 'id')), keyMembership(col(props.id, 'key'), keys)),
     });
     const base = make.project({
@@ -563,7 +565,7 @@ export const BaseGraph: GraphSource = {
     });
     // The property row's own `vtype` is in scope here, so an ordering comparison gets the vtype-aware
     // key — the whole reason the value predicate is a callback the caller supplies.
-    const matches = valuePred ? valuePred(col(props.id, 'value'), col(props.id, 'vtype')) : undefined;
+    const matches = valuePred ? valuePred(col(props.id, 'value'), col(props.id, 'vtype'), true) : undefined;
     if (valuePred && !matches) return null;
     const base = and(eq(col(props.id, owner), id), eq(col(props.id, 'key'), compilerText(key)));
     const matching = make.filter({
@@ -710,13 +712,15 @@ export const BaseGraph: GraphSource = {
     const { table, owner } = PROPERTIES[kind];
     const scan = make.scan({
       id: fresh('vp'), table, alias: fresh('rp'), channels: [],
-      type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+      type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),
     });
     const mine = make.filter({
       id: fresh('f'), input: scan, channels: [], type: scan.type,
       pred: and(eq(col(scan.id, owner), id), eq(col(scan.id, 'key'), compilerText(key))),
     });
-    const value = ordering ? storedCompareOn(col(mine.id, 'vtype'))(col(mine.id, 'value')) : col(mine.id, 'value');
+    // An ORDERING read is a sort key, so it reads the comparable `value` (a BigDecimal sorts by its number,
+    // not as TEXT after every number); any other read is the payload the stream hands onward.
+    const value = ordering ? storedCompareOn(col(mine.id, 'vtype'))(col(mine.id, 'value')) : storedPayload(col(mine.id, 'value'), col(mine.id, 'exact'));
     return firstOf(mine, value, col(mine.id, 'id'), fresh);
   },
 
@@ -724,7 +728,7 @@ export const BaseGraph: GraphSource = {
     const { table, owner } = PROPERTIES[kind];
     const props = make.scan({
       id: fresh('vm'), table, alias: fresh('rvm'), channels: [],
-      type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+      type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),
     });
     const mine = make.filter({
       id: fresh('vf'), input: props, channels: [], type: props.type,
@@ -733,7 +737,7 @@ export const BaseGraph: GraphSource = {
     // The key's values as an ordered array of `{t,v}` nodes (insertion order = rowid), and the key's
     // ordinal as the earliest rowid — the shape `elementValueMap` turns into a list value or takes the
     // last of for a flat map.
-    const values: Expr = { kind: 'agg', fn: 'json_group_array', args: [jsonOf(typedNode(col(mine.id, 'value'), col(mine.id, 'vtype')))], orderBy: [{ expr: col(mine.id, 'id'), dir: 'asc' }] };
+    const values: Expr = { kind: 'agg', fn: 'json_group_array', args: [jsonOf(typedNode(col(mine.id, 'value'), col(mine.id, 'vtype'), col(mine.id, 'exact')))], orderBy: [{ expr: col(mine.id, 'id'), dir: 'asc' }] };
     return make.aggregate({
       id: fresh('vk'), input: mine, channels: [],
       type: typeOf(meta(VALUEMAP_PAIR.key, 'text'), meta(VALUEMAP_PAIR.values, 'json'), meta(VALUEMAP_PAIR.ord, 'int')),

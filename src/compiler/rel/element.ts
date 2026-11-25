@@ -155,14 +155,15 @@ function nodeExternalId(rowid: Expr, fresh: Minter): Expr {
 function vertexProps(node: Expr, fresh: Minter, detached = false): Expr {
   const vp = make.scan({
     id: fresh('wvp'), table: 'vertex_properties', alias: fresh('rwp'), channels: [],
-    type: typeOf(meta('id', 'int'), meta('node', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('meta', 'blob', true)),
+    type: typeOf(meta('id', 'int'), meta('node', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('meta', 'blob', true), meta('exact', 'text', true)),
   });
   const mine = make.filter({ id: fresh('wpf'), input: vp, channels: [], type: vp.type, pred: eq(col(vp.id, 'node'), node) });
+  const exact = col(mine.id, 'exact');
   // The DETACHED path emits `{t,v,vpid,meta}` so a landed subgraph reconstructs a full
   // `DetachedVertexProperty` (its id + meta-properties); an ordinary read stays `{t,v}`.
   const memberNode = detached
-    ? typedNodeDetached(col(mine.id, 'value'), col(mine.id, 'vtype'), col(mine.id, 'id'), jsonOf(col(mine.id, 'meta')))
-    : typedNode(col(mine.id, 'value'), col(mine.id, 'vtype'));
+    ? typedNodeDetached(col(mine.id, 'value'), col(mine.id, 'vtype'), col(mine.id, 'id'), jsonOf(col(mine.id, 'meta')), exact)
+    : typedNode(col(mine.id, 'value'), col(mine.id, 'vtype'), exact);
   const perKey = make.aggregate({
     id: fresh('wpk'), input: mine, channels: [],
     type: typeOf(meta('key', 'text'), meta('vs', 'json'), meta('ord', 'int')),
@@ -197,7 +198,7 @@ function vertexProps(node: Expr, fresh: Minter, detached = false): Expr {
 function edgeProps(edge: Expr, fresh: Minter): Expr {
   const ep = make.scan({
     id: fresh('wep'), table: 'edge_properties', alias: fresh('rwe'), channels: [],
-    type: typeOf(meta('id', 'int'), meta('edge', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+    type: typeOf(meta('id', 'int'), meta('edge', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),
   });
   const mine = make.filter({ id: fresh('wef'), input: ep, channels: [], type: ep.type, pred: eq(col(ep.id, 'edge'), edge) });
   const bag = make.aggregate({
@@ -205,7 +206,7 @@ function edgeProps(edge: Expr, fresh: Minter): Expr {
     groupBy: [],
     aggs: [['props', {
       kind: 'agg', fn: 'json_group_object',
-      args: [col(mine.id, 'key'), jsonOf(typedNode(col(mine.id, 'value'), col(mine.id, 'vtype')))],
+      args: [col(mine.id, 'key'), jsonOf(typedNode(col(mine.id, 'value'), col(mine.id, 'vtype'), col(mine.id, 'exact')))],
       orderBy: [{ expr: col(mine.id, 'id'), dir: 'asc' }],
     }]],
   });

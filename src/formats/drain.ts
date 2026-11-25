@@ -128,12 +128,13 @@ export function groupByOwner<T extends { owner: number }>(rows: readonly T[]): M
  *  vertex property) its meta bag as `json()` TEXT. Shared by every writer's property stitching. */
 export interface PropRow { id: number; owner: number; key: string; value: unknown; vtype: string | null; meta: string | null }
 
-/** The `value` projection for a property read. A COLLECTION is stored as a JSONB blob, so a drain that
- *  JSON-parses the value (GraphSON's `valueNodeFromStored`) must ask for its `json()` TEXT — a raw blob
- *  would arrive as a byte Map; a drain that re-emits the value as a cell (CSV) leaves it raw. This is the
- *  same wrap the write-path readers use (`write.ts` readVertexProps). */
+/** The `value` projection for a property read — its PAYLOAD: the exact digits where the row keeps them,
+ *  else the stored value (`storedPayload`, src/compiler/rel/build.ts), so a BigDecimal or a wide long leaves
+ *  exactly as it was written. A COLLECTION is stored as a JSONB blob, so a drain that JSON-parses the value
+ *  (GraphSON's `valueNodeFromStored`) must ask for its `json()` TEXT — a raw blob would arrive as a byte
+ *  Map; a drain that re-emits the value as a cell (CSV) leaves it raw. */
 const valueExpr = (asText: boolean): Expression =>
-  asText ? q`CASE WHEN vtype IN ('list','map','set') THEN json(value) ELSE value END AS value` : q`value`;
+  asText ? q`CASE WHEN vtype IN ('list','map','set') THEN json(value) ELSE COALESCE(exact, value) END AS value` : q`COALESCE(exact, value) AS value`;
 
 /** A page of vertex owners' label names, grouped by owner (a vertex's labels in insertion order). */
 export const labelsForOwners = (w: RowWriter, ids: readonly number[]): Map<number, { owner: number; name: string }[]> =>

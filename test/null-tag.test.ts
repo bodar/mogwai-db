@@ -119,7 +119,8 @@ describe('an alias entry spells a compile-time null with the null tag', () => {
   test('a stored value entry keeps its bare vtype column — no per-row inference', () => {
     const { sql } = read("g.V().as('v').values('name').as('n').select('v','n')");
     expect(sql).toMatch(/'t', \w+\.vtype\)\) AS a1/);
-    expect(sql).not.toContain('COALESCE(rp');
+    // No inferred tag: the vtype column is never coalesced (the payload's `COALESCE(exact, value)` is a value read).
+    expect(sql).not.toMatch(/COALESCE\(rp\d+\.vtype/);
   });
 });
 

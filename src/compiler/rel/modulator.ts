@@ -8,7 +8,7 @@ import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../s
 import type { IRStep } from '../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, caseWhen, freshTraverserRow, hostPresence, hostTag, mayBeAbsent, statedPresence, type ChildHost, type ChildSeam, type ChildValue, type Presence } from './child.ts';
 import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
-import { and, eq, firstOf, jsonField, jsonOf, mapNode, meta, PROPERTIES, storedValueOn, typedNode, typedNodeOnce, onceTyped, typeOf, familyKey, type Minter } from './build.ts';
+import { and, eq, firstOf, jsonField, jsonOf, mapNode, meta, PROPERTIES, storedPayload, storedValueOn, typedNode, typedNodeOnce, onceTyped, typeOf, familyKey, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { storedCompareOn, storedCompareOnce } from './predicate.ts';
 import { aliasEntryNode, aliasGuard, aliasProjection, liveAliases, readFraming, type Pop } from './alias.ts';
@@ -789,7 +789,7 @@ export function byNode(modulation: Modulation, host: ChildHost, source: GraphSou
   // ONE subquery for both halves: the tag IS the row the value came from.
   if (key.kind !== 'property') return null;
   const mine = propertyRowFor(host, key.key, fresh);
-  return firstOf(mine, typedNode(col(mine.id, 'value'), col(mine.id, 'vtype')), col(mine.id, 'id'), fresh);
+  return firstOf(mine, typedNode(col(mine.id, 'stored'), col(mine.id, 'vtype'), col(mine.id, 'exact')), col(mine.id, 'id'), fresh);
 }
 
 /**
@@ -975,11 +975,20 @@ function propertyRowFor(host: Extract<ChildHost, { kind: 'element' }>, key: stri
   const { table, owner } = PROPERTIES[host.elem];
   const scan = make.scan({
     id: fresh('vp'), table, alias: fresh('rp'), channels: [],
-    type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
+    type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),
   });
-  return make.filter({
+  const mine = make.filter({
     id: fresh('f'), input: scan, channels: [], type: scan.type,
     pred: and(eq(col(scan.id, owner), host.id), eq(col(scan.id, 'key'), compilerText(key))),
+  });
+  // Every reader here hands the value onward (a `by()` value, a `values(k).is(…)` survivor), so `value` is
+  // the row's PAYLOAD (`storedPayload`) — a BigDecimal's own digits, as `values(k)` reads them. `stored` and
+  // `exact` are its two columns, for a `{t,v}` node that reads the digits in one arm (`typedNode`).
+  return make.project({
+    id: fresh('p'), input: mine, channels: [],
+    type: typeOf(meta('id', 'int'), meta('value', 'any', true), meta('vtype', 'text', true), meta('stored', 'any', true), meta('exact', 'text', true)),
+    exprs: [['id', col(mine.id, 'id')], ['value', storedPayload(col(mine.id, 'value'), col(mine.id, 'exact'))], ['vtype', col(mine.id, 'vtype')],
+      ['stored', col(mine.id, 'value')], ['exact', col(mine.id, 'exact')]],
   });
 }
 

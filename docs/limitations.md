@@ -60,7 +60,8 @@ There are three kinds of limitation:
 | Topic | mogwai-db |
 |---|---|
 | Equality | By value: `1`, `1L` and `1.0` are equal. `true` and `1` are not. A UUID and a string are not. When equal keys merge (in `groupCount()`), the key keeps one of the types: `inject(1, 1.0).groupCount()` is `{1.0: 2}`. |
-| Comparison | Exact SQLite comparison, no Java widening: `9007199254740993L > 9007199254740992d` is true. `bigdecimal` compares at double precision. |
+| Comparison | Exact SQLite comparison, no Java widening: `9007199254740993L > 9007199254740992d` is true. A `bigdecimal`, and a `bigint` outside the long range, compares at double precision. A stored one keeps its exact digits for output only. So `has(k, 9007199254740993.0m)` does not find the long `9007199254740993`. |
+| Merge identity | `mergeV()`/`mergeE()` find an element by the same equality. Two `bigdecimal` values that are equal as doubles match one element: keys that differ only after about 16 significant digits upsert one element. |
 | Float | Stored as a double. `0.1f` equals `0.1d`. |
 | Signed zero | `-0.0` is `0.0`. |
 | `sum()` and `mean()` | Add as doubles, then return the common type. `Infinity + -Infinity` is `null`. |

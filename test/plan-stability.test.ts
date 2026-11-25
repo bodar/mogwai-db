@@ -137,26 +137,26 @@ describe('id routing: every id question is a seek', () => {
   });
 });
 
-// A NUMERIC equality keeps its (key, value) SEEK. A plain number also matches a stored BigDecimal by its REAL
-// (`decimalTextArm`, src/compiler/rel/predicate.ts), so the predicate is `value = n OR (vtype = 'bigdecimal'
-// AND CAST(value AS REAL) = n)`. As ONE predicate SQLite served that OR only through `vp_key_value(key=?)`:
-// every row of the key, per query (LDBC `has('Post','ID',x)`: 87 ms against 0.018 ms). The owner seek reads
-// each disjunct as its own arm (`seekArms`, src/rel/passes/semijoin.ts), so each arm is a seek: the raw compare
-// on `(key, value)`, the decimal arm on the partial `vp_decimal`/`ep_decimal`.
+// A NUMERIC equality keeps its (key, value) SEEK. A stored BigDecimal or wide long holds its COMPARABLE form
+// in `value` (`storedForm`, src/compiler/rel/build.ts), so a plain number, a BigDecimal and a BigInteger bound
+// are one raw `value = x`: ONE `(key, value)` seek, with no decimal arm and no second index. (Before, a
+// TEXT-stored BigDecimal needed an OR-ed `CAST(value AS REAL)` arm and a partial `vp_decimal` to serve it.)
 describe('a numeric equality seeks (key, value), never the bare key', () => {
-  const NUMERIC_SEEK: Readonly<Record<string, readonly [string, string, string]>> = {
-    'vertex eq': ["g.V().has('person','age',29).count()", 'vp_key_value', 'vp_decimal'],
-    'vertex within': ["g.V().has('age',within(29,30)).count()", 'vp_key_value', 'vp_decimal'],
-    'edge eq': ["g.E().has('weight',0.5).count()", 'ep_key_value', 'ep_decimal'],
-    'edge within': ["g.E().has('weight',within(0.5,1.0)).count()", 'ep_key_value', 'ep_decimal'],
+  const NUMERIC_SEEK: Readonly<Record<string, readonly [string, string]>> = {
+    'vertex eq': ["g.V().has('person','age',29).count()", 'vp_key_value'],
+    'vertex within': ["g.V().has('age',within(29,30)).count()", 'vp_key_value'],
+    'vertex BigDecimal eq': ["g.V().has('age',29.5m).count()", 'vp_key_value'],
+    'vertex BigInteger eq': ["g.V().has('age',962077547172962077547n).count()", 'vp_key_value'],
+    'edge eq': ["g.E().has('weight',0.5).count()", 'ep_key_value'],
+    'edge within': ["g.E().has('weight',within(0.5,1.0)).count()", 'ep_key_value'],
   };
-  for (const [name, [gremlin, raw, decimal]] of Object.entries(NUMERIC_SEEK)) {
-    test(`${name}: ${raw} on (key, value) and ${decimal} on (key, <expr>), cold and warm`, () => {
+  for (const [name, [gremlin, index]] of Object.entries(NUMERIC_SEEK)) {
+    test(`${name}: one ${index} seek on (key, value), cold and warm`, () => {
       const { sql, binds } = read(gremlin);
       for (const store of [noStats, withStats]) {
         const details = (store.query(`EXPLAIN QUERY PLAN ${sql}`, [...binds]) as { detail: string }[]).map((r) => r.detail);
-        expect(details.filter((d) => d.includes(raw))).toEqual([expect.stringContaining('(key=? AND value=?)')]);
-        expect(details.filter((d) => d.includes(decimal))).toEqual([expect.stringContaining('(key=? AND <expr>=?)')]);
+        expect(details.filter((d) => d.includes(index))).toEqual([expect.stringContaining('(key=? AND value=?)')]);
+        expect(details.filter((d) => /_decimal\b/.test(d))).toEqual([]);
       }
     });
   }

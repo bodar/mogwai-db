@@ -202,7 +202,7 @@ export function boundGraph(vertexBinding: string | null, edgeBinding: string | n
       // A vertex key holds an ARRAY of `{t,v}` nodes — any-member membership.
       const ex = make.explode({ id: fresh('bhx'), input: row, channels: [], expr: at, as: { value: 'hv' },
         type: typeOf(...row.type.cols, meta('hv', 'any', true)) });
-      const matches = valuePred ? valuePred(jsonExtract(col(ex.id, 'hv'), '$.v'), jsonExtract(col(ex.id, 'hv'), '$.t')) : undefined;
+      const matches = valuePred ? valuePred(jsonExtract(col(ex.id, 'hv'), '$.v'), jsonExtract(col(ex.id, 'hv'), '$.t'), false) : undefined;
       if (valuePred && !matches) return null;
       const matched = matches ? make.filter({ id: fresh('bhf'), input: ex, channels: [], type: ex.type, pred: matches }) : ex;
       return existsOf(matched, fresh);

@@ -257,7 +257,7 @@ describe('a walk condition at a hub costs O(1) per frontier row', () => {
 
   test('an until is asked once per walk row and read everywhere else', () => {
     const { sql } = read("g.V().repeat(out()).until(has('age',gt(40))).emit(in('created').has('age',gt(45))).count()");
-    expect(sql.match(/> 40\)/g)).toHaveLength(2); // the INT and REAL spellings of the one test
+    expect(sql.match(/> 40\)/g)).toHaveLength(1); // one stored compare: every number is its comparable form
     expect(sql.match(/lp0 > 0/g)).toHaveLength(1);
   });
 

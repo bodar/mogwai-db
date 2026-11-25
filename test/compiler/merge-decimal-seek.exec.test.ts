@@ -1,10 +1,10 @@
-// A MERGE SEARCH FINDS A STORED BIGDECIMAL THROUGH ITS DECIMAL INDEX.
+// A MERGE SEARCH FINDS A STORED BIGDECIMAL OR WIDE LONG THROUGH THE ONE (key, value) INDEX.
 //
-// A per-driver merge search (`seekedSearch`, src/compiler/rel/write.ts) narrows each numeric criterion by the
-// stored TEXT tail its cast could meet (`decimalTextSeeks`): a BigDecimal through the partial
-// `vp_decimal`/`ep_decimal` index on `(key, CAST(value AS REAL))` — the very cast the search's residual
-// compares — and a long/bigint stored as TEXT (|c| ≥ 2^53) through a `(key, value)` range. The residual
-// decides; these tests pin the ANSWER (a match does not create) and the PLAN (each arm is a SEARCH).
+// A stored number holds its COMPARABLE form in `value` (`storedForm`, src/compiler/rel/build.ts) — a BigDecimal
+// its REAL, a long past 2^53 its INTEGER — and its exact digits in `exact`. So a per-driver merge search
+// (`seekedSearch`, src/compiler/rel/write.ts) seeks every numeric criterion on `(key, value)` at the driver's
+// `typedValueKey`, the same form. These tests pin the ANSWER (a match does not create) and the PLAN (one
+// SEARCH, no decimal index).
 import { describe, expect, test } from 'bun:test';
 import { compile } from '../../src/compiler/compiler.ts';
 import { runSteps } from '../../src/program.ts';
@@ -17,7 +17,7 @@ import { bare, run } from '../support/harness.ts';
 const fresh = (): GraphStore => new GraphStore(new BunSqlite(':memory:'));
 const count = (s: GraphStore, q: string): number => bare(run(s, q)[0].v);
 
-describe('a merge search matches a stored BigDecimal and a TEXT-stored long', () => {
+describe('a merge search matches a stored BigDecimal and a wide long', () => {
   for (const [name, seed, merge, check, expected] of [
     ['1m by 1', "g.addV('p').property('n', 1m)", "g.inject([n:1]).mergeV()", "g.V().count()", 1],
     ['1m by 1.0', "g.addV('p').property('n', 1m)", "g.inject([n:1.0]).mergeV()", "g.V().count()", 1],
@@ -25,11 +25,11 @@ describe('a merge search matches a stored BigDecimal and a TEXT-stored long', ()
     ['-0.5m by -0.5', "g.addV('p').property('n', -0.5m)", "g.inject([n:-0.5]).mergeV()", "g.V().count()", 1],
     ['a computed search', "g.addV('p').property('n', 1m).addV('q').property('n', 1)", "g.V().hasLabel('q').mergeV(__.project('n').by(values('n')))", "g.V().count()", 2],
     ['an edge weight 0.5m', "g.addV('a').as('a').addV('b').addE('e').from('a').property('w', 0.5m)", "g.inject([(T.label):'e', w:0.5]).mergeE()", "g.E().count()", 1],
-    ['a long exactly 2^53 (TEXT)', "g.addV('p').property('n', 9007199254740992L)", "g.inject([n:9007199254740992L]).mergeV()", "g.V().count()", 1],
-    ['-2^53 (TEXT)', "g.addV('p').property('n', -9007199254740992L)", "g.inject([n:-9007199254740992L]).mergeV()", "g.V().count()", 1],
+    ['a long exactly 2^53', "g.addV('p').property('n', 9007199254740992L)", "g.inject([n:9007199254740992L]).mergeV()", "g.V().count()", 1],
+    ['-2^53', "g.addV('p').property('n', -9007199254740992L)", "g.inject([n:-9007199254740992L]).mergeV()", "g.V().count()", 1],
     ['2^53 by its double', "g.addV('p').property('n', 9007199254740992L)", "g.inject([n:9007199254740992.0]).mergeV()", "g.V().count()", 1],
-    ['2^60 + 1 (TEXT)', "g.addV('p').property('n', 1152921504606846977L)", "g.inject([n:1152921504606846977L]).mergeV()", "g.V().count()", 1],
-    // The REAL cast of 9007199254740993.0 is 2^53, which is not the long 9007199254740993: no match.
+    ['2^60 + 1', "g.addV('p').property('n', 1152921504606846977L)", "g.inject([n:1152921504606846977L]).mergeV()", "g.V().count()", 1],
+    // A BigDecimal compares as its double: 9007199254740993.0m is 2^53, which is not the long 9007199254740993.
     ['9007199254740993.0m by 9007199254740993L', "g.addV('p').property('n', 9007199254740993.0m)", "g.inject([n:9007199254740993L]).mergeV()", "g.V().count()", 2],
     // Past 2^53 a spooled criterion crosses as its double's exact digits (`stringifyExact`), not JS's
     // shortest spelling (2^55 as 36028797018963970, another number to SQLite), so the point seek finds it.
@@ -69,20 +69,20 @@ function plans(store: GraphStore, q: string): string[] {
     binds.map((bind) => (isRowsBind(bind) ? '[]' : bind))).map((row) => row.detail));
 }
 
-describe('each numeric arm is an index SEARCH', () => {
-  test('a vertex search seeks vp_decimal and the long range of vp_key_value', () => {
+describe('a numeric criterion is one (key, value) SEARCH', () => {
+  test('a vertex search seeks vp_key_value and no decimal index', () => {
     const s = fresh();
     rawVertex(s, 1, 'p');
-    s.query('INSERT INTO vertex_properties(node,key,value,vtype) VALUES(?,?,?,?)', [1, 'n', 'abc', 'string']);
+    run(s, "g.V(1).property('n', 'abc')");
     const plan = plans(s, 'g.inject([n:1]).mergeV()');
-    expect(plan.some((d) => /^SEARCH rsk\d+ USING INDEX vp_decimal \(key=\? AND <expr>=\?\)$/.test(d))).toBe(true);
-    expect(plan.some((d) => /^SEARCH rsk\d+ USING INDEX vp_key_value \(key=\? AND value>\? AND value<\?\)$/.test(d))).toBe(true);
+    expect(plan.some((d) => /^SEARCH rsk\d+ USING INDEX vp_key_value \(key=\? AND value=\?\)$/.test(d))).toBe(true);
     expect(plan.filter((d) => /\brsk\d+\b/.test(d)).every((d) => d.startsWith('SEARCH'))).toBe(true);
+    expect(plan.some((d) => /_decimal\b/.test(d))).toBe(false);
   });
-  test('an edge search seeks ep_decimal', () => {
+  test('an edge search seeks ep_key_value', () => {
     const s = fresh();
     run(s, "g.addV('a').as('a').addV('b').addE('e').from('a').property('w', 0.5m)");
     const plan = plans(s, "g.inject([(T.label):'e', w:0.5]).mergeE()");
-    expect(plan.some((d) => /^SEARCH rsk\d+ USING INDEX ep_decimal \(key=\? AND <expr>=\?\)$/.test(d))).toBe(true);
+    expect(plan.some((d) => /^SEARCH rsk\d+ USING INDEX ep_key_value \(key=\? AND value=\?\)$/.test(d))).toBe(true);
   });
 });

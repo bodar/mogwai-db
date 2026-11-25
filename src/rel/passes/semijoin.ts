@@ -625,9 +625,8 @@ function readsProperty(e: Expr, props: RelId, name?: string): boolean {
 const readsValue = (e: Expr, props: RelId): boolean => readsProperty(e, props, 'value');
 
 /** Does conjunct `e` pin the property `value` by EQUALITY — `value = x`, `value IN (…)`, or the same over an
- *  expression of `value` (the decimal arm's `CAST(value AS REAL)`, which `vp_decimal`/`ep_decimal` index) —
- *  against operands that do not read the property row? That is what an index on `(key, <value expr>)` seeks;
- *  any other constraint (an ordered `CASE`, a `LIKE`) reads the key's whole slice. */
+ *  expression of `value` — against operands that do not read the property row? That is what an index on
+ *  `(key, value)` seeks; any other constraint (an ordered `CASE`, a `LIKE`) reads the key's whole slice. */
 function pinsValue(e: Expr, props: RelId): boolean {
   if (e.kind === 'binary' && e.op === '=') {
     return (readsValue(e.left, props) && !readsProperty(e.right, props))
@@ -639,11 +638,11 @@ function pinsValue(e: Expr, props: RelId): boolean {
 /**
  * The ARMS an owner seek reads, each a conjunct list: `free` itself, or — when ONE top-level conjunct is a
  * disjunction whose every disjunct, beside the other conjuncts, pins `value` by equality (`pinsValue`) — one arm
- * per disjunct. A raw compare OR-ed with the decimal arm (`decimalTextArm`, `src/compiler/rel/predicate.ts`) is
- * such a disjunction: as one predicate SQLite serves it only by reading the key's every row through `(key=?)`;
- * as a `UNION ALL` each arm is a seek — `vp_key_value(key, value)` for the raw compare, the partial
- * `vp_decimal(key, CAST(value AS REAL))` for the decimal arm. It is the form SQLite's own multi-index OR
- * (`WHERE_MULTI_OR`) takes, but only with statistics, which a young DO graph does not have (RelIR plan §1 P4).
+ * per disjunct (`has(k, eq(a).or(eq(b)))`). As one predicate SQLite serves such an OR only by reading the key's
+ * every row through `(key=?)`; as a `UNION ALL` each arm is a `vp_key_value(key, value)` seek. It is the form
+ * SQLite's own multi-index OR (`WHERE_MULTI_OR`) takes, but only with statistics, which a young DO graph does not
+ * have (RelIR plan §1 P4). (A stored number is its comparable form, `storedForm`, so a numeric equality is one
+ * raw compare and needs no arm of its own.)
  *
  * Exactly ONE conjunct is expanded, never a general DNF: DNF multiplies arms, and each arm is statement text
  * under the 100 KB cap. A nested `OR` stays inside its arm. The equality test keeps the expansion from costing:

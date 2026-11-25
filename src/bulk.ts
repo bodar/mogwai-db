@@ -43,6 +43,7 @@ import { storedRev } from './rev.ts';
 import { deleteMembers, insertSet, markMembersDirty, updateSet, type SetColumn } from './setwrite.ts';
 import { stringifyExact } from './json-exact.ts';
 import { execute, identifier, q, value } from './sql/kernel/q.ts';
+import { storedForm } from './compiler/rel/build.ts';
 
 /** Landing a PRESERVED rev on a matched vertex during `'replace'` (replication apply): the rev crosses
  *  as its packed hex (`storedRev`, rev.ts) `unhex()`ed, and dirty=3 tells the refresh to keep it. */
@@ -174,8 +175,10 @@ function dedupeByKey<T>(items: readonly T[], keyOf: (item: T) => number | string
   return [...keyed.values(), ...anonymous];
 }
 
-const VERTEX_PROP_COLUMNS = ['id', 'node', 'key', 'value', 'vtype', 'meta'] as const;
-const EDGE_PROP_COLUMNS = ['id', 'edge', 'key', 'value', 'vtype'] as const;
+// `exact` crosses as a null placeholder: a SCALAR row derives it (and its comparable `value`) in SQL from the
+// payload and tag that crossed (`storedForm`), the one conversion every property writer shares.
+const VERTEX_PROP_COLUMNS = ['id', 'node', 'key', 'value', 'vtype', 'meta', 'exact'] as const;
+const EDGE_PROP_COLUMNS = ['id', 'edge', 'key', 'value', 'vtype', 'exact'] as const;
 
 /**
  * Buffer elements, then land them in one chunked pass per table.
@@ -329,11 +332,11 @@ export class BulkLoader {
       if (pid >= this.nextVertexProp) this.nextVertexProp = pid + 1;
       // The meta bag is JSON text SQLite reads (`jsonb`), so it goes through the ONE writer of such a text.
       const meta = p.meta ? stringifyExact(p.meta) : null;
-      (collection ? into.collection : into.scalar).push([pid, owner, p.key, stored, vtype, meta]);
+      (collection ? into.collection : into.scalar).push([pid, owner, p.key, stored, vtype, meta, null]);
     } else {
       if (pid >= this.nextEdgeProp) this.nextEdgeProp = pid + 1;
       if (p.meta) throw new Error(`meta-properties are not valid on an edge property (edge ${owner}, key ${p.key})`);
-      (collection ? into.collection : into.scalar).push([pid, owner, p.key, stored, vtype]);
+      (collection ? into.collection : into.scalar).push([pid, owner, p.key, stored, vtype, null]);
     }
     this.ftsRows.push(...propertyFtsRows(ownerElem, pid, owner, p.key, p.value, p.typeNode ?? null));
     this.counts.properties++;
@@ -598,8 +601,12 @@ export class BulkLoader {
     const isJsonb = (c: string) => c === 'meta' || (jsonbValue && c === 'value');
     // A raw BLOB, crossed as hex + unhex()'d (setwrite.ts): the gid, and the packed rev (rev.ts).
     const isBlob = (c: string) => c === 'gid' || c === 'rev';
+    // A SCALAR property row's `value`/`exact` are its payload's stored form (`storedForm`).
+    const stored = !jsonbValue && columns.includes('exact');
+    const derive = (c: string): SetColumn['derive'] => !stored || (c !== 'value' && c !== 'exact') ? undefined
+      : (cellOf) => storedForm(cellOf('value'), cellOf('vtype'))[c === 'value' ? 'value' : 'exact'];
     const spec: SetColumn[] = columns.map((c) => ({
-      name: c, type: isJsonb(c) || isBlob(c) ? 'blob' : 'any', jsonb: isJsonb(c), blob: isBlob(c),
+      name: c, type: isJsonb(c) || isBlob(c) ? 'blob' : 'any', jsonb: isJsonb(c), blob: isBlob(c), derive: derive(c),
     }));
     this.counts.statements += insertSet(this.store, table, spec, rows);
   }

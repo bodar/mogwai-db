@@ -277,6 +277,56 @@ export const PROPERTIES = {
   edge: { table: 'edge_properties', owner: 'edge' },
 } as const;
 
+/** The number tags whose value may arrive as decimal TEXT (`storedScalar`'s exact tail). */
+const EXACT_TAIL_VTYPES: readonly string[] = ['bigdecimal', 'long', 'bigint'];
+
+/**
+ * THE PROPERTY ROW'S TWO VALUE COLUMNS, from a value in its PAYLOAD form (what a stream carries and the
+ * output frames) and its tag. `value` is the COMPARABLE form, `exact` the digits only the output reads.
+ *
+ * A number carried as decimal TEXT (a BigDecimal, a long/bigint past ±2^53 — `storedScalar`) stores its
+ * number in `value`: a BigDecimal as its REAL, a long/bigint as its INTEGER inside int64 and its REAL past
+ * it. SQLite then compares, sorts and indexes it natively, with no decimal arm at any compare site; that
+ * is the documented "a BigDecimal compares at double precision" (`docs/limitations.md`). The TEXT itself
+ * goes to `exact`, so a BigDecimal keeps its digits and scale and a wide long its digits on the way out.
+ * Every other value stores as itself with `exact` NULL.
+ *
+ * The conversion is SQLite's own CAST at EVERY writer — a constant write, a computed one, the bulk
+ * loader — and a compared BigDecimal bound converts through the same CAST (`predicate.ts`), so one
+ * decimal never meets two different doubles. A compile-time tag outside the exact tail folds to
+ * `(payload, NULL)`: no per-row term where none can be needed.
+ */
+export function storedForm(payload: Expr, vtype: Expr): { readonly value: Expr; readonly exact: Expr } {
+  const staticVtype = vtype.kind === 'lit' && vtype.source === 'compiler-text' ? vtype.value : undefined;
+  if (staticVtype !== undefined && !EXACT_TAIL_VTYPES.includes(String(staticVtype))) return { value: payload, exact: compilerNull('text') };
+  const storage = (name: string): Expr => ({ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [payload] }, right: compilerText(name) });
+  const isText = storage('text');
+  const tagged = (names: readonly string[], test: Expr): Expr => staticVtype !== undefined
+    ? (names.includes(String(staticVtype)) ? test : { kind: 'binary', op: '=', left: compilerInt(1), right: compilerInt(0) })
+    : { kind: 'binary', op: 'and', left: { kind: 'in-list', expr: vtype, values: names.map(compilerText) }, right: test };
+  const among = (names: readonly string[]): Expr => tagged(names, isText);
+  // An INTEGER long past ±2^53 (a JSON-spooled one keeps its digits as a number) needs its digits too: a
+  // JS reader of the bare INTEGER would round it.
+  const wideInt: Expr = { kind: 'binary', op: 'and', left: storage('integer'), right: { kind: 'binary', op: 'or',
+    left: { kind: 'binary', op: '>', left: payload, right: compilerInt(SAFE_INT) }, right: { kind: 'binary', op: '<', left: payload, right: compilerInt(-SAFE_INT) } } };
+  const real: Expr = { kind: 'cast', arg: payload, to: 'real' };
+  const int: Expr = { kind: 'cast', arg: payload, to: 'int' };
+  // A long/bigint TEXT is an INTEGER where its digits fit int64 (the INTEGER spells them back), else its REAL.
+  const fits: Expr = { kind: 'binary', op: '=', left: { kind: 'cast', arg: int, to: 'text' }, right: payload };
+  const wholes = staticVtype === 'bigdecimal' ? [] : [[among(['long', 'bigint']), { kind: 'case', whens: [[fits, int]], else: real } as Expr] as const];
+  const decimals = staticVtype !== undefined && staticVtype !== 'bigdecimal' ? [] : [[among(['bigdecimal']), real] as const];
+  return {
+    value: { kind: 'case', whens: [...decimals, ...wholes], else: payload },
+    exact: { kind: 'case', whens: [[among(EXACT_TAIL_VTYPES), payload],
+      ...(staticVtype === 'bigdecimal' ? [] : [[tagged(['long', 'bigint'], wideInt), { kind: 'cast', arg: payload, to: 'text' } as Expr] as const])], else: compilerNull('text') },
+  };
+}
+
+/** A property row's PAYLOAD — its exact digits where it has them, else its comparable `value`
+ *  (`storedForm`). Every reader that hands the value onward or frames it reads this; every reader that
+ *  compares, seeks or sorts reads `value`. */
+export const storedPayload = (value: Expr, exact: Expr): Expr => coalesce(exact, value);
+
 /** The columns `GraphSource.valueMapPairs` yields — one row per property KEY of the element: the key
  *  name, the ordered ARRAY of its `{t,v}` value nodes, and a per-key emission ordinal. `elementValueMap`
  *  (map.ts) reads these to build the `valueMap`/`elementMap` entries, so the physical read (base tables
@@ -596,22 +646,24 @@ const literalCollection = (vtype: Expr): boolean | null => {
  *  (`modulator.ts`), so the `json()` arm was dead and paid for — measured on
  *  `g.V().group().by(__.values("name").substring(0,1)).by(__.constant(1))`, whose 42 binds carried
  *  only FOUR distinct values, `"name"` fourteen times. */
-export const storedValueOn = (value: Expr, vtype: Expr): Expr => {
+export const storedValueOn = (value: Expr, vtype: Expr, exact?: Expr): Expr => {
+  // A stored row's `exact` digits (`storedForm`) are its payload where present; a collection has none.
+  const scalar = exact ? storedPayload(value, exact) : value;
   const collection = literalCollection(vtype);
   if (collection === true) return { kind: 'call', fn: 'json', args: [value] };
-  if (collection === false) return value;
+  if (collection === false) return scalar;
   return {
     kind: 'case',
     whens: [[{ kind: 'in-list', expr: vtype, values: COLLECTION_VTYPES.map(compilerText) },
       { kind: 'call', fn: 'json', args: [value] }]],
-    else: value,
+    else: scalar,
   };
 };
 
-/** The common case: the value and its type are the `value`/`vtype` COLUMNS of a property scan.
- *  Derived from the general form rather than spelled twice — the same relationship
- *  `storedCompare`/`storedCompareOn` already have, and for the same reason. */
-export const storedValue = (rel: RelId): Expr => storedValueOn(col(rel, 'value'), col(rel, 'vtype'));
+/** The common case: the value and its type are the `value`/`exact`/`vtype` COLUMNS of a property scan,
+ *  read as its payload (`storedPayload`). Derived from the general form rather than spelled twice — the
+ *  same relationship `storedCompare`/`storedCompareOn` already have, and for the same reason. */
+export const storedValue = (rel: RelId): Expr => storedValueOn(col(rel, 'value'), col(rel, 'vtype'), col(rel, 'exact'));
 
 /** VTYPE tags that denote a binary64 — SQLite's JSON WRITER serializes these at 15 significant digits
  *  and cannot round-trip one that needs 16-17 (a mean, a `math()` quotient). Both the Gremlin classes
@@ -766,11 +818,17 @@ const binary64Under = (tag: Expr, value: Expr, inferred: boolean): Expr => {
  * embedded JSON and a numeric value survives SQLite's lossy JSON channel, at every depth a `{t,v}` node
  * reaches.
  */
-export const typedNode = (value: Expr, vtype: Expr): Expr => ({
+export const typedNode = (value: Expr, vtype: Expr, exact?: Expr): Expr => ({
   kind: 'json-object',
-  entries: [['t', vtype], ['v', jsonMember(value, vtype)]],
+  entries: [['t', vtype], ['v', storedMember(value, vtype, exact)]],
   binary: false,
 });
+
+/** `jsonMember` of a STORED property row: its `exact` digits where it keeps them (`storedForm` — already the
+ *  TEXT a BigDecimal or a wide long rides a JSON member as), else the member of its `value`. Coalesced ONCE
+ *  around the member, so the row's value is not re-spelled as a `COALESCE` at every arm of its `CASE` (a
+ *  JSON member keeps its subtype through `COALESCE`). */
+const storedMember = (value: Expr, vtype: Expr, exact?: Expr): Expr => exact ? coalesce(exact, jsonMember(value, vtype)) : jsonMember(value, vtype);
 
 /** A value cheap enough to spell at every use — a column read or a literal — which `once` passes through. */
 const spelledFreely = (e: Expr): boolean => e.kind === 'col' || e.kind === 'lit';
@@ -822,9 +880,9 @@ export const typedNodeOnce = (value: Expr, vtype: Expr, fresh: Minter): Expr =>
  * `meta` rides as `json(...)` — a BLOB cannot cross the JSON transport (root `CLAUDE.md`), and a null
  * meta column becomes JSON null, which the decoder reads as no meta-properties.
  */
-export const typedNodeDetached = (value: Expr, vtype: Expr, vpid: Expr, metaJson: Expr): Expr => ({
+export const typedNodeDetached = (value: Expr, vtype: Expr, vpid: Expr, metaJson: Expr, exact?: Expr): Expr => ({
   kind: 'json-object',
-  entries: [['t', vtype], ['v', jsonMember(value, vtype)], ['vpid', vpid], ['meta', metaJson]],
+  entries: [['t', vtype], ['v', storedMember(value, vtype, exact)], ['vpid', vpid], ['meta', metaJson]],
   binary: false,
 });
 

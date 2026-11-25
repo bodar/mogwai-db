@@ -2,6 +2,8 @@ import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { compile } from '../../src/compiler/compiler.ts';
 import { exec } from './executor.ts';
+import { insertSet } from '../../src/setwrite.ts';
+import { storedForm } from '../../src/compiler/rel/build.ts';
 
 // Shared graph-minting primitives. These began in `test/L5-properties/oracle.ts`; they moved here
 // when the census (test/L7-census/) became a second consumer, because a helper used by two levels
@@ -14,6 +16,18 @@ import { exec } from './executor.ts';
 export function rawVertex(store: GraphStore, id: number, ...labelNames: string[]): void {
   store.query('INSERT INTO nodes(id) VALUES(?)', [id]);
   store.addVertexLabels(id, labelNames);
+}
+
+/** Insert vertex properties by raw SQL — each `[node, key, payload, vtype]`, its payload (a number's
+ *  decimal TEXT for a BigDecimal or a wide long, as `storedScalar` hands every writer) stored in the row's
+ *  stored form, the comparable `value` and the `exact` digits, by the one conversion every writer shares
+ *  (`storedForm`). One statement for the whole set. */
+export function rawProperties(store: GraphStore, rows: readonly (readonly [number, string, unknown, string | null])[]): void {
+  const derived = (column: 'value' | 'exact') => (cellOf: (name: string) => import('../../src/rel/expr.ts').Expr) => storedForm(cellOf('value'), cellOf('vtype'))[column];
+  insertSet(store, 'vertex_properties', [
+    { name: 'node', type: 'int' }, { name: 'key', type: 'text' }, { name: 'value', type: 'any', derive: derived('value') },
+    { name: 'vtype', type: 'text' }, { name: 'exact', type: 'text', derive: derived('exact') },
+  ], rows.map((row) => [...row, null]));
 }
 
 // Minting a seed graph is expensive: each seed traversal re-compiles through the whole antlr→IR→SQL

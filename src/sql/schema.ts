@@ -10,9 +10,9 @@
 import { relation } from './kernel/q.ts';
 
 export const nodes = relation('nodes', ['id', 'uid']);
-export const vertexProperties = relation('vertex_properties', ['id', 'node', 'key', 'value', 'vtype', 'meta']);
+export const vertexProperties = relation('vertex_properties', ['id', 'node', 'key', 'value', 'vtype', 'meta', 'exact']);
 export const edges = relation('edges', ['id', 'uid', 'src', 'label', 'tgt']);
-export const edgeProperties = relation('edge_properties', ['id', 'edge', 'key', 'value', 'vtype']);
+export const edgeProperties = relation('edge_properties', ['id', 'edge', 'key', 'value', 'vtype', 'exact']);
 export const labels = relation('labels', ['id', 'name']);
 // A vertex carries a SET of labels (TinkerPop 4 multi-label); an EDGE label is fixed at
 // exactly one by spec (`EdgeFeatures.getLabelCardinality()` is "always ONE"), so it stays

@@ -21,7 +21,7 @@ import { runSteps } from '../../src/program.ts';
 import { isRowsBind } from '../../src/rel/emit.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
-import { rawVertex } from '../support/graph.ts';
+import { rawProperties, rawVertex } from '../support/graph.ts';
 import { run } from '../support/harness.ts';
 import { RaisedByQuery } from '../../src/rel/raise.ts';
 import { nestedSnapshotScans, type PlanRow } from '../support/snapshot-scans.ts';
@@ -123,11 +123,12 @@ function shaped(n: number, extra: (i: number) => readonly (readonly [string, unk
   const raw = new BunSqlite(':memory:');
   const store = new GraphStore(raw);
   raw.exec('BEGIN');
+  const props: [number, string, unknown, string][] = [];
   for (let i = 1; i <= n; i++) {
     rawVertex(store, i, 'person');
-    for (const [key, value, vtype] of [['name', `n${i}`, 'string'] as const, ['age', i, 'int'] as const, ...extra(i)])
-      store.query('INSERT INTO vertex_properties(node,key,value,vtype) VALUES(?,?,?,?)', [i, key, value, vtype]);
+    for (const [key, value, vtype] of [['name', `n${i}`, 'string'] as const, ['age', i, 'int'] as const, ...extra(i)]) props.push([i, key, value, vtype]);
   }
+  rawProperties(store, props);
   raw.exec('COMMIT');
   if (hub) {
     rawVertex(store, n + 1, 'hub');
@@ -226,10 +227,8 @@ describe('a numeric merge search finds every decimal TEXT the search compares eq
   ];
   const store = (): GraphStore => {
     const s = new GraphStore(new BunSqlite(':memory:'));
-    stored.forEach(([value, vtype], i) => {
-      rawVertex(s, i + 1, 'v');
-      s.query('INSERT INTO vertex_properties(node,key,value,vtype) VALUES(?,?,?,?)', [i + 1, 'x', value, vtype]);
-    });
+    stored.forEach((_, i) => rawVertex(s, i + 1, 'v'));
+    rawProperties(s, stored.map(([value, vtype], i) => [i + 1, 'x', value, vtype] as const));
     return s;
   };
   for (const [driver, ids] of [

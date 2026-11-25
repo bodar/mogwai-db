@@ -1,5 +1,5 @@
 import type { ParamEnv } from '../../gremlin/param-env.ts';
-import { col, compilerInt, compilerNull, compilerReal, compilerText, isNot, param, type BinaryOp, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, isNot, param, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
 import type { Binding, Guard } from '../../rel/plan.ts';
@@ -23,7 +23,7 @@ import {
   LABEL_ITEM_NAME, LABEL_MEMBER_NAME, LABEL_NAME, type NameRules, validateLabel, validatePropertyKey,
 } from '../../gremlin/validate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
-import { and, carriedCols, eq, explodeMembers, fenced, meta, presenceFenced, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
+import { and, carriedCols, eq, explodeMembers, fenced, meta, storedForm, presenceFenced, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
 import { substRelId } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import { propertyOwnerId, propertyRowId } from './property.ts';
@@ -460,6 +460,12 @@ const storedExpr = (write: PropertySet): Expr => {
   return constLit(arg(write.stored, storageType, write.valueName))!;
 };
 
+/** A constant write's two value COLUMNS (`storedForm`): the comparable `value` every equality against
+ *  stored rows reads, and the `exact` digits beside it. A collection is its own comparable form. */
+const storedColumns = (write: PropertySet): { readonly value: Expr; readonly exact: Expr } =>
+  write.collection ? { value: storedExpr(write), exact: compilerNull('text') }
+    : storedForm(storedExpr(write), write.vtype === null ? compilerNull('text') : compilerText(write.vtype));
+
 const metaExpr = (meta: NonNullable<PropertySet['meta']>): Expr => ({
   kind: 'call', fn: 'jsonb', args: [{
     kind: 'call', fn: 'json_object', args: meta.flatMap((entry) => {
@@ -498,8 +504,19 @@ function patchSetMeta(meta: readonly MetaPropSpec[], declared: VertexCardinality
 
 /** The property side-table each element kind writes, as `Scan` must declare it. */
 const PROPERTY_TABLE = {
-  vertex: { table: 'vertex_properties' as Table, owner: 'node', cols: [meta('id', 'int'), meta('node', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('meta', 'blob', true)] },
-  edge: { table: 'edge_properties' as Table, owner: 'edge', cols: [meta('id', 'int'), meta('edge', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)] },
+  vertex: { table: 'vertex_properties' as Table, owner: 'node', cols: [meta('id', 'int'), meta('node', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('meta', 'blob', true), meta('exact', 'text', true)] },
+  edge: { table: 'edge_properties' as Table, owner: 'edge', cols: [meta('id', 'int'), meta('edge', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)] },
+} as const;
+
+/** A property row's `value`/`vtype`/`exact` cells from a value in its payload form and its tag (`storedForm`). */
+const storedCells = (payload: Expr, vtype: Expr): readonly (readonly [string, Expr])[] => {
+  const { value, exact } = storedForm(payload, vtype);
+  return [['value', value], ['vtype', vtype], ['exact', exact]];
+};
+
+/** An edge property is single by schema (`UNIQUE(edge, key)`): a second write REPLACES its value columns. */
+const EDGE_PROPERTY_UPSERT = {
+  target: ['edge', 'key'], set: [['value', col(EXCLUDED, 'value')], ['vtype', col(EXCLUDED, 'vtype')], ['exact', col(EXCLUDED, 'exact')]],
 } as const;
 
 const CARDINALITY_COLS: readonly ColMeta[] = [meta('node', 'int'), meta('key', 'text'), meta('cardinality', 'text')];
@@ -685,7 +702,7 @@ function propertyStatements(
   if (elem !== 'edge' && write.meta !== null && (write.cardinality === null || write.cardinality === 'set')) {
     bind(patchSetMeta(write.meta, write.cardinality, (t) => and(
       and({ kind: 'in-query', expr: col(t.id, spec.owner), plan: ids, negated: false }, eq(col(t.id, 'key'), propertyKeyExpr(write.key, write.keyName))),
-      eq(col(t.id, 'value'), storedExpr(write)),
+      eq(col(t.id, 'value'), storedColumns(write).value),
     ), fresh));
   }
 
@@ -713,7 +730,7 @@ function propertyStatements(
     const matching = make.filter({
       id: fresh('f'), input: scan, channels: [], type: scan.type,
       pred: and(and(eq(col(scan.id, spec.owner), col(base.id, 'id')), eq(col(scan.id, 'key'), propertyKeyExpr(write.key, write.keyName))),
-        eq(col(scan.id, 'value'), storedExpr(write))),
+        eq(col(scan.id, 'value'), storedColumns(write).value)),
     });
     return { kind: 'exists', plan: matching, negated: true };
   };
@@ -731,16 +748,14 @@ function propertyStatements(
     : base;
   const source = make.project({
     id: fresh('p'), input: seed, channels: [],
-    type: typeOf(meta(spec.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true),
+    type: typeOf(meta(spec.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true),
       ...(write.meta === null ? [] : [meta('meta', 'blob', true)])),
-    exprs: [[spec.owner, col(seed.id, 'id')], ['key', propertyKeyExpr(write.key, write.keyName)], ['value', storedExpr(write)], ['vtype', write.vtype === null ? compilerNull('text') : compilerText(write.vtype)],
-      ...(write.meta === null ? [] : [['meta', metaExpr(write.meta)] as const])],
+    exprs: [[spec.owner, col(seed.id, 'id')], ['key', propertyKeyExpr(write.key, write.keyName)], ['value', storedColumns(write).value], ['vtype', write.vtype === null ? compilerNull('text') : compilerText(write.vtype)],
+      ['exact', storedColumns(write).exact], ...(write.meta === null ? [] : [['meta', metaExpr(write.meta)] as const])],
   });
   const rowsWritten = insert({
-    target, cols: [spec.owner, 'key', 'value', 'vtype', ...(write.meta === null ? [] : ['meta'])], source, channels: [], type: WRITTEN_TYPE,
-    ...(elem === 'edge'
-      ? { onConflict: { target: ['edge', 'key'], set: [['value', col(EXCLUDED, 'value')], ['vtype', col(EXCLUDED, 'vtype')]] } }
-      : {}),
+    target, cols: [spec.owner, 'key', 'value', 'vtype', 'exact', ...(write.meta === null ? [] : ['meta'])], source, channels: [], type: WRITTEN_TYPE,
+    ...(elem === 'edge' ? { onConflict: EDGE_PROPERTY_UPSERT } : {}),
     returning: [['id', col(target.id, 'id')], ['owner', col(target.id, spec.owner)]],
   });
   // The insert's `RETURNING` is RETAINED by construction (a statement binding always is), which is
@@ -1942,7 +1957,8 @@ function runtimeWriteRows(
     const scan = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
     const matching = make.filter({
       id: fresh('f'), input: scan, channels: [], type: scan.type,
-      pred: and(and(eq(col(scan.id, spec.owner), col(ranked.id, 'owner')), eq(col(scan.id, 'key'), col(ranked.id, 'k'))), eq(col(scan.id, 'value'), col(ranked.id, 'v'))),
+      pred: and(and(eq(col(scan.id, spec.owner), col(ranked.id, 'owner')), eq(col(scan.id, 'key'), col(ranked.id, 'k'))),
+        eq(col(scan.id, 'value'), storedForm(col(ranked.id, 'v'), col(ranked.id, 'vt')).value)),
     });
     const absent: Expr = { kind: 'exists', plan: matching, negated: true };
     return nullable ? or({ kind: 'binary', op: 'is not', left: col(ranked.id, 'lo'), right: compilerNull('int') }, absent) : absent;
@@ -1972,7 +1988,7 @@ function runtimeWriteRows(
   // Meta on a value a `set` element already holds is a PATCH of that row (`patchSetMeta`). It changes no
   // VALUE, so the insert below is still the first statement to change anything the body reads.
   if (elem !== 'edge' && meta_ !== null && (cardinality === null || cardinality === 'set')) {
-    const held = slotRows(elem, rows, (slot, row) => eq(slot('value'), row('v')), fresh);
+    const held = slotRows(elem, rows, (slot, row) => eq(slot('value'), storedForm(row('v'), row('vt')).value), fresh);
     bind(patchSetMeta(meta_, cardinality, (t) => ({ kind: 'in-query', expr: col(t.id, 'id'), plan: held, negated: false }), fresh));
   }
 
@@ -1980,13 +1996,13 @@ function runtimeWriteRows(
   const withMeta = elem !== 'edge' && meta_ !== null;
   const source = make.project({
     id: fresh('p'), input: ordered, channels: [],
-    type: typeOf(meta(spec.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), ...(withMeta ? [meta('meta', 'blob', true)] : [])),
-    exprs: [[spec.owner, col(ordered.id, 'owner')], ['key', col(ordered.id, 'k')], ['value', col(ordered.id, 'v')], ['vtype', col(ordered.id, 'vt')],
+    type: typeOf(meta(spec.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true), ...(withMeta ? [meta('meta', 'blob', true)] : [])),
+    exprs: [[spec.owner, col(ordered.id, 'owner')], ['key', col(ordered.id, 'k')], ...storedCells(col(ordered.id, 'v'), col(ordered.id, 'vt')),
       ...(withMeta ? [['meta', metaExpr(meta_!)] as const] : [])],
   });
   const written = bind(insert({
-    target, cols: [spec.owner, 'key', 'value', 'vtype', ...(withMeta ? ['meta'] : [])], source, channels: [], type: RUNTIME_WRITTEN_TYPE,
-    ...(elem === 'edge' ? { onConflict: { target: ['edge', 'key'], set: [['value', col(EXCLUDED, 'value')], ['vtype', col(EXCLUDED, 'vtype')]] } } : {}),
+    target, cols: [spec.owner, 'key', 'value', 'vtype', 'exact', ...(withMeta ? ['meta'] : [])], source, channels: [], type: RUNTIME_WRITTEN_TYPE,
+    ...(elem === 'edge' ? { onConflict: EDGE_PROPERTY_UPSERT } : {}),
     returning: [['id', col(target.id, 'id')], ['owner', col(target.id, spec.owner)], ['k', col(target.id, 'key')]],
   }));
   const newIds = (): Rel => make.project({ id: fresh('p'), input: written, channels: [], type: ID_TYPE, exprs: [['id', col(written.id, 'id')]] });
@@ -2222,11 +2238,14 @@ function mergeArmValueWrite(
   const valueRel = resolved.rel;
   // The driver's value as a rooted scalar — one value for the (shared) merged elements.
   const one = make.limit({ id: fresh('li'), input: valueRel, channels: valueRel.channels, type: valueRel.type, count: compilerInt(1) });
-  const scalarOf = (column: string, kind: 'any' | 'text'): Expr => ({
-    kind: 'scalar', plan: make.project({ id: fresh('p'), input: one, channels: [], type: typeOf(meta(column, kind, true)), exprs: [[column, col(one.id, column)]] }),
+  const scalarOf = (expr: Expr, kind: 'any' | 'text'): Expr => ({
+    kind: 'scalar', plan: make.project({ id: fresh('p'), input: one, channels: [], type: typeOf(meta('x', kind, true)), exprs: [['x', expr]] }),
   });
-  const valueExpr = scalarOf('v', 'any');
-  const vtypeExpr: Expr = scalarOf('vt', 'text');
+  // The row's comparable `value` and its `exact` digits, each read off the one value row (`storedForm`).
+  const stored = storedForm(col(one.id, 'v'), col(one.id, 'vt'));
+  const valueExpr = scalarOf(stored.value, 'any');
+  const exactExpr = scalarOf(stored.exact, 'text');
+  const vtypeExpr: Expr = scalarOf(col(one.id, 'vt'), 'text');
   const ids = idsOf(target, fresh);
   const owner = (rel: Rel): Expr => col(rel.id, 'id');
 
@@ -2243,7 +2262,7 @@ function mergeArmValueWrite(
     const scan = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
     const matching = make.filter({
       id: fresh('f'), input: scan, channels: [], type: scan.type,
-      pred: and(and(eq(col(scan.id, spec.owner), owner(ids)), eq(col(scan.id, 'key'), key)), eq(col(scan.id, 'value'), scalarOf('v', 'any'))),
+      pred: and(and(eq(col(scan.id, spec.owner), owner(ids)), eq(col(scan.id, 'key'), key)), eq(col(scan.id, 'value'), valueExpr)),
     });
     return { kind: 'exists', plan: matching, negated: true };
   };
@@ -2253,10 +2272,10 @@ function mergeArmValueWrite(
     : ids;
   const t = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
   const source = make.project({
-    id: fresh('p'), input: seed, channels: [], type: typeOf(meta(spec.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-    exprs: [[spec.owner, owner(seed)], ['key', key], ['value', valueExpr], ['vtype', vtypeExpr]],
+    id: fresh('p'), input: seed, channels: [], type: typeOf(meta(spec.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),
+    exprs: [[spec.owner, owner(seed)], ['key', key], ['value', valueExpr], ['vtype', vtypeExpr], ['exact', exactExpr]],
   });
-  bind(insert({ target: t, cols: [spec.owner, 'key', 'value', 'vtype'], source, channels: [], type: WRITTEN_TYPE, returning: [['id', col(t.id, 'id')], ['owner', col(t.id, spec.owner)]] }));
+  bind(insert({ target: t, cols: [spec.owner, 'key', 'value', 'vtype', 'exact'], source, channels: [], type: WRITTEN_TYPE, returning: [['id', col(t.id, 'id')], ['owner', col(t.id, spec.owner)]] }));
   return true;
 }
 
@@ -2315,10 +2334,10 @@ function armValueWriteCorrelated(
   removeRows('vertex', stale.ids, bind, fresh, stale.pred);
   const t = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
   const source = make.project({
-    id: fresh('p'), input: paired, channels: [], type: typeOf(meta(spec.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-    exprs: [[spec.owner, col(paired.id, 'id')], ['key', key], ['value', col(paired.id, 'v')], ['vtype', col(paired.id, 'vtype')]],
+    id: fresh('p'), input: paired, channels: [], type: typeOf(meta(spec.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),
+    exprs: [[spec.owner, col(paired.id, 'id')], ['key', key], ...storedCells(col(paired.id, 'v'), col(paired.id, 'vtype'))],
   });
-  bind(insert({ target: t, cols: [spec.owner, 'key', 'value', 'vtype'], source, channels: [], type: WRITTEN_TYPE, returning: [['id', col(t.id, 'id')], ['owner', col(t.id, spec.owner)]] }));
+  bind(insert({ target: t, cols: [spec.owner, 'key', 'value', 'vtype', 'exact'], source, channels: [], type: WRITTEN_TYPE, returning: [['id', col(t.id, 'id')], ['owner', col(t.id, spec.owner)]] }));
   return true;
 }
 
@@ -3924,106 +3943,30 @@ function seekOwners(driving: Rel, index: Rel, on: Expr, owner: string, fresh: Mi
 }
 
 /**
- * The PROPERTY seek for a `has(key, value)` criterion of a typed value — arms over `drivers` (a fresh
- * relation per call, narrowed by the predicate it is handed). The first reads `(key, value)` through
- * `vp_key_value`/`ep_key_value` at the value's `typedValueKey`, which equals every stored row
- * `typedValueEq` admits whose storage form IS its compare form. The rows whose form is not are a number
- * held as decimal TEXT (`storedScalar`'s exact tail — a BigDecimal, a long past ±2^53 — the reason
- * `storedCompareOn` casts at all), so a NUMERIC driver also reads the key's TEXT values through
- * `decimalTextSeeks`.
+ * The PROPERTY seek for a `has(key, value)` criterion of a typed value — over `drivers` (a fresh relation
+ * per call, narrowed by the predicate it is handed). It reads `(key, value)` through
+ * `vp_key_value`/`ep_key_value` at the value's `typedValueKey`, which IS the comparable form a stored row
+ * holds in `value` (`storedForm`) — a BigDecimal its REAL, a wide long its INTEGER — so every row
+ * `typedValueEq` admits is found by this one seek. An array, so a host spreads it beside its other arms.
+ *
+ * The key is computed HERE, from the driver's value and tag, never spooled: the drivers are a retained
+ * snapshot that crosses JSON through a JS reader, and a long past 2^53 survives that only as its payload's
+ * digits (a TEXT), never as the INTEGER its key is — a spooled INTEGER key came back as its nearest double.
  */
 function propertySeeks(
   elem: Elem, drivers: (narrow: (driver: RelId) => Expr) => Rel,
-  key: (driver: RelId) => Expr, valueKey: (driver: RelId) => Expr, vtype: (driver: RelId) => Expr, fresh: Minter,
+  key: (driver: RelId) => Expr, value: (driver: RelId) => Expr, vtype: (driver: RelId) => Expr, fresh: Minter,
 ): readonly Rel[] {
   const spec = PROPERTY_TABLE[elem];
-  const props = (): Rel => make.scan({ id: fresh('sk'), table: spec.table, alias: fresh('rsk'), channels: [], type: typeOf(...spec.cols) });
-  const exact = drivers(() => eq(compilerInt(1), compilerInt(1))), exactProps = props();
-  return [
-    seekOwners(exact, exactProps, and(eq(col(exactProps.id, 'key'), key(exact.id)), eq(col(exactProps.id, 'value'), valueKey(exact.id))), spec.owner, fresh),
-    // A NUMERIC value's key IS its compared number (`typedValueKey`'s numeric arm is `storedCompareOn`).
-    ...decimalTextSeeks((narrow) => drivers((driver) => and({ kind: 'in-list', expr: vtype(driver), values: NUMERIC_VTYPES.map(compilerText) }, narrow(driver))),
-      key, valueKey, props, spec.owner, fresh),
-  ];
+  const exact = drivers(() => eq(compilerInt(1), compilerInt(1)));
+  const exactProps = make.scan({ id: fresh('sk'), table: spec.table, alias: fresh('rsk'), channels: [], type: typeOf(...spec.cols) });
+  return [seekOwners(exact, exactProps, and(eq(col(exactProps.id, 'key'), key(exact.id)),
+    eq(col(exactProps.id, 'value'), typedValueKey(value(exact.id), vtype(exact.id))[1])), spec.owner, fresh)];
 }
 
 /** The columns a property seek reads per driver, PROJECTED ONCE into the retained drivers — the key, the
- *  value's vtype and its `typedValueKey` compare form — so no arm re-spells the extraction. */
+ *  value's payload and its vtype — so no arm re-spells the extraction. */
 const SEEK_KEY = 'sk_key', SEEK_VTYPE = 'sk_vt', SEEK_VALUE = 'sk_x', SEEK_ORD = 'sk_o';
-
-/**
- * THE DECIMAL-TEXT tail of a NUMERIC criterion — the stored TEXT rows (`storedScalar`'s exact tail: a
- * BigDecimal always, a long/bigint at or past ±2^53) whose `storedCompareOn` cast could equal the driver's
- * compared number `c`, as index seeks rather than the whole TEXT range of the key (which made a numeric
- * search over a string-valued key read every string, per driver). Two arms, one per stored tail:
- *  - a BIGDECIMAL row is compared by its REAL cast, which is the expression the partial `vp_decimal` /
- *    `ep_decimal` index holds (`src/storage.ts`): one SEARCH on `(key, CAST(value AS REAL)) = (k, c)` under
- *    `vtype = 'bigdecimal'`. A point is enough at every magnitude because a spooled `c` keeps its double's
- *    value: past 2^53 it crosses the JSON spool as that double's exact digits (`stringifyExact`), not JS's
- *    shortest spelling (2^55 as `36028797018963970`, another number to SQLite);
- *  - a LONG/BIGINT TEXT row is compared by its exact INT cast, so it meets only `|c| ≥ 2^53` (a long below
- *    is stored as an INTEGER and found by the `(key, value)` arm; 2^53 itself is not a safe integer, so the
- *    bound is inclusive). The cast is exact, but `c` may not be: an INTEGER past 2^53 reaches the arm through
- *    a spooled snapshot as its nearest double. So the stored integer part lies within `U = |c|/2^50 + 1`
- *    (several ulps) of trunc|c|; where both ends spell the same number of digits a decimal's text order IS
- *    its numeric order, so it is one RANGE between the two ends (sign-prefixed); otherwise (the ends' lengths
- *    differ, a magnitude past an INTEGER) the arm reads the key's numeric-looking TEXT,
- *    `value >= '-' AND value < ':'` — the bound that still keeps every other string out.
- * A seek only NARROWS: the search's residual decides, so an arm that admits more than the cast does costs a
- * probe, never an answer.
- */
-function decimalTextSeeks(
-  drivers: (narrow: (driver: RelId) => Expr) => Rel, key: (driver: RelId) => Expr, compared: (driver: RelId) => Expr,
-  props: () => Rel, owner: string, fresh: Minter,
-): readonly Rel[] {
-  const C = 'sk_c', LO = 'sk_lo', HI = 'sk_hi';
-  const cmp = (op: BinaryOp, left: Expr, right: Expr): Expr => ({ kind: 'binary', op, left, right });
-  const call = (fn: string, ...args: Expr[]): Expr => ({ kind: 'call', fn, args });
-  const text = (e: Expr): Expr => ({ kind: 'cast', arg: e, to: 'text' });
-  const int = (e: Expr): Expr => ({ kind: 'cast', arg: e, to: 'int' });
-  const cat = (a: Expr, b: Expr): Expr => cmp('||', a, b);
-  const SAFE = 2 ** 53, INTEGRAL = 9e18;
-  // A magnitude test spelled as two comparisons — `abs()` of the least INTEGER raises in SQLite.
-  const within = (c: Expr, bound: number): Expr => and(cmp('>', c, compilerReal(-bound)), cmp('<', c, compilerReal(bound)));
-  const not = (arg: Expr): Expr => ({ kind: 'unary', op: 'not', arg });
-  // The driver's compared number (a column of the retained drivers), named once for every regime test and bound.
-  const keyed = (narrow: (c: Expr) => Expr): Rel => {
-    const driving = drivers(() => eq(compilerInt(1), compilerInt(1)));
-    const withC = make.project({
-      id: fresh('p'), input: driving, channels: [], type: typeOf(...driving.type.cols, meta(C, 'any', true)),
-      exprs: [...driving.type.cols.map((column) => [column.name, col(driving.id, column.name)] as const), [C, compared(driving.id)]],
-    });
-    return make.filter({ id: fresh('f'), input: withC, channels: [], type: withC.type, pred: narrow(col(withC.id, C)) });
-  };
-  // BigDecimal: the partial decimal index, keyed by the very cast the residual compares. The `vtype` term is
-  // the index's own WHERE, so SQLite may use it. A POINT seek at every magnitude: a spooled `c` past 2^53
-  // crosses as the exact digits of its double (`stringifyExact`), so it equals the stored cast it came from.
-  const every = keyed(() => eq(compilerInt(1), compilerInt(1))), decimals = props();
-  const decimal = seekOwners(every, decimals, and(and(eq(col(decimals.id, 'key'), key(every.id)), eq(col(decimals.id, 'vtype'), compilerText('bigdecimal'))),
-    eq({ kind: 'cast', arg: col(decimals.id, 'value'), to: 'real' }, col(every.id, C))), owner, fresh);
-  // |c| ≥ 2^53, a long/bigint TEXT: below 9·10^18 with ends of one length, one range on the integer part's
-  // digits; otherwise the key's numeric-looking TEXT. A CASE, so the ends are only computed for a magnitude
-  // they are defined on.
-  const sign = (c: Expr): Expr => ({ kind: 'case', whens: [[cmp('<', c, compilerInt(0)), compilerText('-')]], else: compilerText('') });
-  const reach = (c: Expr): Expr => cmp('+', cmp('/', call('abs', int(c)), compilerInt(2 ** 50)), compilerInt(1));
-  const end = (c: Expr, side: '-' | '+'): Expr => text(cmp(side, call('abs', int(c)), reach(c)));
-  const spans = (c: Expr): Expr => ({ kind: 'case', whens: [[within(c, INTEGRAL), eq(call('length', end(c, '-')), call('length', end(c, '+')))]],
-    else: eq(compilerInt(1), compilerInt(0)) });
-  const bound = (c: Expr, ranged: Expr, otherwise: string): Expr => ({ kind: 'case', whens: [[spans(c), ranged]], else: compilerText(otherwise) });
-  const large = keyed((c) => not(within(c, SAFE)));
-  const c = col(large.id, C);
-  const drivingCols = large.type.cols.filter((column) => column.name !== C);
-  const bounded = make.project({
-    id: fresh('p'), input: large, channels: [], type: typeOf(...drivingCols, meta(LO, 'text', true), meta(HI, 'text', true)),
-    exprs: [...drivingCols.map((column) => [column.name, col(large.id, column.name)] as const),
-      [LO, bound(c, cat(sign(c), end(c, '-')), '-')], [HI, bound(c, cat(cat(sign(c), end(c, '+')), compilerText('/')), ':')]],
-  });
-  const longs = props();
-  const textLong: Expr = { kind: 'in-list', expr: col(longs.id, 'vtype'), values: ['long', 'bigint'].map(compilerText) };
-  const spanned = seekOwners(bounded, longs, and(and(and(eq(col(longs.id, 'key'), key(bounded.id)), textLong),
-    cmp('>=', col(longs.id, 'value'), col(bounded.id, LO))), cmp('<', col(longs.id, 'value'), col(bounded.id, HI))), owner, fresh);
-  return [decimal, spanned];
-}
 
 /**
  * HOW MANY stored rows hold `key` at `valueKey` (a `typedValueKey` compare form), CAPPED — the selectivity a
@@ -4059,15 +4002,13 @@ function computedMatch(
   const productive = (rel: RelId, i: number, yes: boolean): Expr => eq(col(rel, ppCol(i)), compilerInt(yes ? 1 : 0));
   // Each productive key's capped count, projected ONCE per driver beside it (one key has no choice to make).
   const countCol = (i: number): string => `sc_${i}`;
-  const valueCol = (i: number): string => `${SEEK_VALUE}_${i}`;
   const counted = (() => {
     const ref = make.ref({ id: fresh('r'), name: (carrier as Extract<Rel, { kind: 'ref' }>).name, channels: [], type: carrier.type });
     const valueKey = (i: number): Expr => typedValueKey(col(ref.id, cvCol(i)), col(ref.id, ptCol(i)))[1];
     return bind(make.project({
       id: fresh('p'), input: ref, channels: [],
-      type: typeOf(...carrier.type.cols, ...cKeys.map((_, i) => meta(valueCol(i), 'any', true)), ...(cKeys.length < 2 ? [] : cKeys.map((_, i) => meta(countCol(i), 'int', true)))),
+      type: typeOf(...carrier.type.cols, ...(cKeys.length < 2 ? [] : cKeys.map((_, i) => meta(countCol(i), 'int', true)))),
       exprs: [...carrier.type.cols.map((column) => [column.name, col(ref.id, column.name)] as const),
-        ...cKeys.map((_, i) => [valueCol(i), valueKey(i)] as const),
         ...(cKeys.length < 2 ? [] : cKeys.map((key, i) => [countCol(i), { kind: 'case', whens: [[productive(ref.id, i, true),
           cappedCount(elem, compilerText(key), valueKey(i), fresh)]], else: compilerNull('int') } as Expr] as const))],
     }), true);
@@ -4095,7 +4036,7 @@ function computedMatch(
     return or(productive(driver, i, false), { kind: 'exists', plan: probe, negated: false } as Expr);
   }).reduce((a, b) => and(a, b), eq(compilerInt(1), compilerInt(1)));
   const arms = cKeys.flatMap((key, i) => propertySeeks(elem, (narrow) => drivers((rel) => and(drives(i)(rel), narrow(rel))),
-    () => compilerText(key), (driver) => col(driver, valueCol(i)), (driver) => col(driver, ptCol(i)), fresh));
+    () => compilerText(key), (driver) => col(driver, cvCol(i)), (driver) => col(driver, ptCol(i)), fresh));
   const unnarrowed = drivers((rel) => cKeys.map((_, j) => productive(rel, j, false)).reduce((a, b) => and(a, b), eq(compilerInt(1), compilerInt(1))));
   return seekedSearch(carrier.type.cols, arms, unnarrowed, candidates, 'id', residual, hasOrd, bind, fresh);
 }
@@ -4159,7 +4100,7 @@ function mapDrivers(carrier: Rel, elem: Elem, bind: Binder, fresh: Minter): MapD
       id: fresh('p'), input: picked, channels: [],
       type: typeOf(...picked.type.cols, meta(SEEK_KEY, 'any', true), meta(SEEK_VTYPE, 'text', true), meta(SEEK_VALUE, 'any', true)),
       exprs: [...picked.type.cols.map((column) => [column.name, col(picked.id, column.name)] as const),
-        [SEEK_KEY, entry('keys', '$.v')], [SEEK_VTYPE, entry('values', '$.t')], [SEEK_VALUE, typedValueKey(entry('values', '$.v'), entry('values', '$.t'))[1]]],
+        [SEEK_KEY, entry('keys', '$.v')], [SEEK_VTYPE, entry('values', '$.t')], [SEEK_VALUE, entry('values', '$.v')]],
     }), true);
     return driving();
   };
@@ -5143,10 +5084,10 @@ function mergeVComputed(
     const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
     const present = make.filter({ id: fresh('f'), input: createdTuples, channels: [], type: createdTuples.type, pred: eq(col(createdTuples.id, ppCol(i)), compilerInt(1)) });
     const rows = make.project({
-      id: fresh('p'), input: present, channels: [], type: typeOf(meta('node', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-      exprs: [['node', col(present.id, 'id')], ['key', compilerText(cKeys[i]!)], ['value', col(present.id, cvCol(i))], ['vtype', col(present.id, ptCol(i))]],
+      id: fresh('p'), input: present, channels: [], type: typeOf(meta('node', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),
+      exprs: [['node', col(present.id, 'id')], ['key', compilerText(cKeys[i]!)], ...storedCells(col(present.id, cvCol(i)), col(present.id, ptCol(i)))],
     });
-    bind(insert({ target, cols: ['node', 'key', 'value', 'vtype'], source: rows, channels: [], type: WRITTEN_TYPE, returning: [['id', col(target.id, 'id')], ['owner', col(target.id, spec.owner)]] }));
+    bind(insert({ target, cols: ['node', 'key', 'value', 'vtype', 'exact'], source: rows, channels: [], type: WRITTEN_TYPE, returning: [['id', col(target.id, 'id')], ['owner', col(target.id, spec.owner)]] }));
   }
   // `onCreate`'s own CONSTANT properties, over the created vertices (its label already joined the
   // creation above). Additional to the merge argument's computed values, which are already written. A
@@ -5401,11 +5342,17 @@ function mapEntryProperties(elem: Elem, created: Rel, fresh: Minter): Stmt {
   const { table, owner, cols } = PROPERTY_TABLE[elem];
   const propRows = make.project({
     id: fresh('p'), input: propPairs, channels: [],
-    type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-    exprs: [[owner, col(propPairs.id, 'id')], ['key', side('keys', '$.v')], ['value', side('values', '$.v')], ['vtype', side('values', '$.t')]],
+    type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('pv', 'any', true), meta('vtype', 'text', true)),
+    exprs: [[owner, col(propPairs.id, 'id')], ['key', side('keys', '$.v')], ['pv', side('values', '$.v')], ['vtype', side('values', '$.t')]],
+  });
+  // The entry's value and tag are extracted ONCE (above) and the stored columns derived from them here.
+  const stored = make.project({
+    id: fresh('p'), input: propRows, channels: [],
+    type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),
+    exprs: [[owner, col(propRows.id, owner)], ['key', col(propRows.id, 'key')], ...storedCells(col(propRows.id, 'pv'), col(propRows.id, 'vtype'))],
   });
   const target = make.scan({ id: fresh('t'), table, alias: fresh('wt'), channels: [], type: typeOf(...cols) });
-  return insert({ target, cols: [owner, 'key', 'value', 'vtype'], source: propRows, channels: [], type: WRITTEN_TYPE, returning: [['id', col(target.id, 'id')], ['owner', col(target.id, owner)]] });
+  return insert({ target, cols: [owner, 'key', 'value', 'vtype', 'exact'], source: stored, channels: [], type: WRITTEN_TYPE, returning: [['id', col(target.id, 'id')], ['owner', col(target.id, owner)]] });
 }
 
 /** The vtype tags an external vertex id carries when it is a ROWID (SQLite's integer storage class) —
@@ -6099,10 +6046,10 @@ function mergeEComputed(
     const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
     const present = make.filter({ id: fresh('f'), input: createdTuples, channels: [], type: createdTuples.type, pred: eq(col(createdTuples.id, ppCol(i)), compilerInt(1)) });
     const rowsP = make.project({
-      id: fresh('p'), input: present, channels: [], type: typeOf(meta('edge', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-      exprs: [['edge', col(present.id, 'id')], ['key', compilerText(cKeys[i]!)], ['value', col(present.id, cvCol(i))], ['vtype', col(present.id, ptCol(i))]],
+      id: fresh('p'), input: present, channels: [], type: typeOf(meta('edge', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),
+      exprs: [['edge', col(present.id, 'id')], ['key', compilerText(cKeys[i]!)], ...storedCells(col(present.id, cvCol(i)), col(present.id, ptCol(i)))],
     });
-    bind(insert({ target, cols: ['edge', 'key', 'value', 'vtype'], source: rowsP, channels: [], type: WRITTEN_TYPE, returning: [['id', col(target.id, 'id')], ['owner', col(target.id, spec.owner)]] }));
+    bind(insert({ target, cols: ['edge', 'key', 'value', 'vtype', 'exact'], source: rowsP, channels: [], type: WRITTEN_TYPE, returning: [['id', col(target.id, 'id')], ['owner', col(target.id, spec.owner)]] }));
   }
   // `onCreate`'s own CONSTANT properties, over the created edges (its label already joined the creation;
   // a runtime onCreate edge value declines upstream, as onMatch's does) — onto a created edge whose
