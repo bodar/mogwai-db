@@ -29,6 +29,7 @@ import { EMPTY_REGISTRY } from './services/spi/registry.ts';
 import type { FederationSource } from './compiler/segment.ts';
 import { NO_IO_STORE, type IoStore } from './iostore.ts';
 import type { GraphStore } from './storage.ts';
+import { PlanCache } from './compiler/plan-cache.ts';
 
 /** How the app scope OBTAINS its registry. A registry is not a value the entry point can build
  *  in isolation: a service takes its own dependencies at CONSTRUCTION (federate needs `source`,
@@ -60,7 +61,11 @@ export type AppScope =
    *  object — the tier no longer decides the visibility, the Engine interface does, and an
    *  app-scope store is exactly as unreachable as a request-scope one. Undefined for a compile
    *  with no executor behind it (a bare `compile()`); a service that needs rows fails closed. */
-  & Dependency<'store', GraphStore | undefined>;
+  & Dependency<'store', GraphStore | undefined>
+  /** The compiled plans of this scope's requests (`compiler/plan-cache.ts`). App scope is its
+   *  lifecycle because a plan is a function of the request and of this scope's registry and fast
+   *  paths, and of nothing the store holds: per graph on a DO, per manager on the edge. */
+  & Dependency<'planCache', PlanCache>;
 
 /** The per-REQUEST dependency contract (an AppScope plus what one traversal fixes). */
 export type RequestScope =
@@ -84,12 +89,14 @@ export function createAppScope(deps?: Partial<{
   source: FederationSource | undefined;
   io: IoStore;
   store: GraphStore | undefined;
+  planCache: PlanCache;
 }>): AppScope {
   const app: AppScope = LazyMap.create()
     .set('fastPaths', instance(deps?.fastPaths ?? DEFAULT_FAST_PATHS))
     .set('source', instance(deps?.source))
     .set('io', instance(deps?.io ?? NO_IO_STORE))
     .set('store', instance(deps?.store))
+    .set('planCache', instance(deps?.planCache ?? new PlanCache()))
     .set('registry', () => (deps?.registry ?? (() => EMPTY_REGISTRY))(app));
   return app;
 }

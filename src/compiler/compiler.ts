@@ -1,6 +1,7 @@
-import { parseGremlin, stepChain, unansweredTerminalMethod, extractStrategies, extractSack, extractSideEffects, extractSourceOptions, sideEffectPolicies as extractSideEffectPolicies } from '../gremlin/frontend.ts';
+import { PlanCache, planCacheKey } from './plan-cache.ts';
+import { isVolatileQuery, parseGremlin, stepChain, unansweredTerminalMethod, extractStrategies, extractSack, extractSideEffects, extractSourceOptions, sideEffectPolicies as extractSideEffectPolicies } from '../gremlin/frontend.ts';
 import { type TypeNode } from '../gremlin/types.ts';
-import { paramEnv } from '../gremlin/param-env.ts';
+import { paramEnv, type ParamEnv } from '../gremlin/param-env.ts';
 import { runPasses } from './ir/passes.ts';
 import { programScopeNames, sideEffectShadowedLabel, unlocatableSubPath, unresolvableWhereKey } from './ir/labels.ts';
 import { UNCOMPARABLE_LITERAL, uncarriedLiteral, uncomparableLiteral } from './ir/uncarried-literal.ts';
@@ -46,10 +47,34 @@ function applyDiscard(plan: Executable): Executable {
  *  (segment.ts runPlan). Every non-barrier caller keeps using compile() below, whose type never
  *  widened — only execute.ts's orchestrator consumes a Plan. */
 export function compilePlan(gremlin: string, wireParams: Record<string, any>, options?: CompileOptions, wireParamTypes: Record<string, TypeNode> = {}): Plan {
+  // THE PARAMETER ENVIRONMENT, built once (`paramEnv`): every parameter carries a type from here on (the
+  // wire's where it declared one, the JS value's own otherwise — an untyped Boolean would otherwise be
+  // stored, and compared, as 1/0), and a Float lands on its carrier before anything reads it. ONE value,
+  // so every nested body re-parsed downstream reads the same types as the root chain — and the plan
+  // cache keys on the same values and types the compile reads.
+  const params = paramEnv(wireParams, wireParamTypes);
+  const cache = cacheFor(gremlin, params, options);
+  const cached = cache?.plans.get(cache.key);
+  if (cached !== undefined) return cached;
   // The compile's ONE work meter, made here rather than inside so the boundary below reads what it recorded.
   const budget = options?.budget ?? new CompileBudget();
-  try { return compileUnguarded(gremlin, wireParams, options, wireParamTypes, budget); }
+  let plan: Plan;
+  try { plan = compileUnguarded(gremlin, params, options, budget); }
   catch (error) { throw tooDeep(error) ?? expansionNamed(error, budget) ?? error; }
+  // Only a single-statement plan is reusable: a segment plan's resume compiles against landed rows, and
+  // a plan whose TEXT reads the clock holds the instant it was compiled at (`isVolatileQuery`).
+  if (cache && plan.kind === 'sql' && plan.compiled.cleanup === undefined && !isVolatileQuery(parseGremlin(gremlin)))
+    cache.plans.set(cache.key, plan);
+  return plan;
+}
+
+/** Where this compile's plan is cached and under which key — or `null` when it is not cacheable
+ *  (`plan-cache.ts`): no app scope to hold it, a caller-held work meter that must see the compile run,
+ *  a loose option the app scope does not settle, or parameters with no small canonical spelling. */
+function cacheFor(gremlin: string, params: ParamEnv, options: CompileOptions | undefined): { plans: PlanCache; key: string } | null {
+  if (!options?.app || options.budget || options.fastPaths || options.registry) return null;
+  const key = planCacheKey(gremlin, params, resolveFederationDepth(options), options.detached ?? false);
+  return key === null ? null : { plans: options.app.planCache, key };
 }
 
 /**
@@ -110,12 +135,7 @@ function tooDeep(error: unknown): UnsupportedTraversal | null {
   return UnsupportedTraversal.because('this traversal nests deeper than the compiler can follow — a repeat() unrolled to a large times() or loops() count, or child traversals nested hundreds deep, is the usual cause');
 }
 
-function compileUnguarded(gremlin: string, wireParams: Record<string, any>, options: CompileOptions | undefined, wireParamTypes: Record<string, TypeNode>, budget: CompileBudget): Plan {
-  // THE PARAMETER ENVIRONMENT, built once (`paramEnv`): every parameter carries a type from here on (the
-  // wire's where it declared one, the JS value's own otherwise — an untyped Boolean would otherwise be
-  // stored, and compared, as 1/0), and a Float lands on its carrier before anything reads it. ONE value,
-  // so every nested body re-parsed downstream reads the same types as the root chain.
-  const params = paramEnv(wireParams, wireParamTypes);
+function compileUnguarded(gremlin: string, params: ParamEnv, options: CompileOptions | undefined, budget: CompileBudget): Plan {
   const tree = parseGremlin(gremlin);
   // A terminal method the step walk cannot see (`next()`, `toSet()`, …) asks a different question than
   // the stream does — decline rather than answer the stream for it (`unansweredTerminalMethod`).

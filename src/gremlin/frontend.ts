@@ -1,10 +1,10 @@
 import { NO_PARAMS, type ParamEnv } from './param-env.ts';
 import {
-  CharStream, CommonTokenStream, BaseErrorListener, ParserRuleContext,
+  CharStream, CommonTokenStream, BaseErrorListener, ParserRuleContext, type ParseTree,
   BailErrorStrategy, ParseCancellationException, PredictionMode,
 } from 'antlr4ng';
 import { GremlinLexer } from '../../parser/GremlinLexer.ts';
-import { GremlinParser } from '../../parser/GremlinParser.ts';
+import { GremlinParser, DateLiteralContext } from '../../parser/GremlinParser.ts';
 import { binaryOfBase64, fitsSafeInteger, BigDecimal, Duration, mapSlot, type TypeNode, type CanonicalType, type MapEntryType } from './types.ts';
 import { floatCanonical } from './float.ts';
 import { UnsupportedTraversal } from '../compiler/unsupported.ts';
@@ -108,6 +108,24 @@ export function parseGremlin(query: string): ReturnType<typeof parseGremlinUncac
   parseCache.set(query, tree);
   if (parseCache.size > PARSE_CACHE_MAX) parseCache.delete(parseCache.keys().next().value!);
   return tree;
+}
+
+// A query is VOLATILE when its TEXT reads the clock: a no-argument `datetime()` is "now", captured as a
+// literal when the step chain is built (`emitArg`, `DateLiteralContext`). Its compiled plan holds that
+// instant, so it must not be reused (`PlanCache`). A fact of the text, so it is computed once per parse
+// tree and memoised beside the tree, which the parse cache keeps alive for as long as the text is hot.
+const volatileTrees = new WeakMap<object, boolean>();
+
+export function isVolatileQuery(tree: ReturnType<typeof parseGremlinUncached>): boolean {
+  let known = volatileTrees.get(tree);
+  if (known === undefined) { known = readsClock(tree); volatileTrees.set(tree, known); }
+  return known;
+}
+
+function readsClock(node: ParseTree): boolean {
+  if (node instanceof DateLiteralContext && node.stringLiteral() === null) return true;
+  for (let i = 0; i < node.getChildCount(); i++) if (readsClock(node.getChild(i)!)) return true;
+  return false;
 }
 
 // ---------- step extraction ----------

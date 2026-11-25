@@ -37,6 +37,16 @@ and the code that emits the big-decimal arm.
 
 ### L2. Cache compiled plans
 
+**Status: v1 LANDED.** `src/compiler/plan-cache.ts`, used by `compilePlan`, held on the app scope.
+- The key is the text, each parameter's value and type, the federation depth and the detached mode.
+- Only a single-statement plan is cached. A segment plan, a failed compile, a query with a
+  no-argument `datetime()`, and a parameter set larger than 4 KB are never cached.
+- The LRU holds 512 entries and 8 MB of text per app scope.
+- A compile does not read the store, so a write cannot make a cached plan stale.
+- Measured: 28 of 30 LDBC queries hit. A warm compile is about 2 µs. q17 and q19 are segment plans
+  and do not hit.
+- v1 serves only repeated IDENTICAL requests. See Deferred for v2.
+
 **Fact.** Compile costs more than the SQL on 22 of the 30 LDBC queries (compile p50 1.3–16 ms). On
 the L6 corpus, 97% of mogwai's per-query time is compile (median 2.15 ms compile, 0.059 ms SQL).
 mogwai caches only the parse (`src/gremlin/frontend.ts`, 512 entries). Relate caches the plan and
@@ -100,3 +110,10 @@ value), and fix it where every Boolean passes, not per step.
   the 100 KB statement cap). `within(1, 2)` is the common spelling and seeks. Revisit only with evidence.
 - **Check if `write.ts` `decimalTextSeeks` can seek `vp_decimal` (from L1).** Its BigDecimal half may
   use the new index. It also covers the long-as-TEXT tail, so it is not a drop-in deletion.
+- **L2 v2 — pin-on-read parameters.** v1 keys on every parameter value. So one text sent with
+  different parameter values gets no hit. In v2, the compile records which parameters it read the
+  VALUE of (pinned, as TinkerPop's `GValueManager` does). The key holds only the pinned values. A hit
+  rebinds the unpinned parameters by name through the kernel's named-bind keying. A derived bind
+  (`#fts`) is recomputed or treated as pinned.
+- **L2 — segment-plan heads under the cache.** v1 never caches a segment plan (LDBC q17, q19). A
+  segment's head can be cached. Its resume compiles against landed rows and must never be cached.
