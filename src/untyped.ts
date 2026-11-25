@@ -27,7 +27,7 @@
 // (`src/formats/graphson.ts`) is the io/adjacency form and is deliberately NOT reused here; this is a
 // different, response-shaped rendering.
 import type { FrameNode, TreeBranch, ValueNode } from './gremlin/types.ts';
-import { base64OfBinary, numberClassOf, treeBranches, valueNodeFromStored } from './gremlin/types.ts';
+import { base64OfBinary, booleanOfStored, numberClassOf, treeBranches, valueNodeFromStored } from './gremlin/types.ts';
 import { exactNumberOf, isExactNumber, type ExactNumber } from './json-exact.ts';
 
 const rawJson = JSON as unknown as { rawJSON?: (text: string) => unknown };
@@ -50,10 +50,13 @@ function untypedInteger(x: bigint): unknown {
   return rawJson.rawJSON ? rawJson.rawJSON(String(x)) : String(x);
 }
 
-/** A scalar leaf's bare value as JSON: a number (`untypedNumber`/`untypedInteger`), and an INTEGRAL
- *  tag's decimal text (a Long past 2^53) as the number it is rather than a string. A raw exact number
- *  (`parseExactJson`) re-stringifies as its own source text, so it passes through. */
+/** A scalar leaf's bare value as JSON: a Boolean as JSON `true`/`false` (it rides as the 1/0 SQLite
+ *  stores, so only its TAG says it is not a number — an untagged 0/1 stays a number), a number
+ *  (`untypedNumber`/`untypedInteger`), and an INTEGRAL tag's decimal text (a Long past 2^53) as the
+ *  number it is rather than a string. A raw exact number (`parseExactJson`) re-stringifies as its own
+ *  source text, so it passes through. */
 function untypedLeaf(tag: string | null, v: unknown): unknown {
+  if (tag === 'boolean') return booleanOfStored(v);
   if (typeof v === 'number') return untypedNumber(v);
   if (typeof v === 'bigint') return untypedInteger(v);
   if (typeof v === 'string' && INTEGRAL_TAGS.has(tag) && DECIMAL_INTEGER.test(v)) return untypedInteger(BigInt(v));
@@ -163,9 +166,12 @@ function untypedMapKey(k: FrameNode): string {
   }
 }
 
-/** A scalar key by its tag: `String(v)`, a whole Double (by tag, or a bare number `numberClassOf` calls
- *  a Double) with `.0` appended; an integral exact number as its digits. */
+/** A scalar key by its tag: `String(v)`, a Boolean as `true`/`false` (never its stored 1/0 — a Boolean
+ *  and the Int `1` then spell apart, or collide as `"true"` with the String `"true"`, which `untypedMap`
+ *  resolves), a whole Double (by tag, or a bare number `numberClassOf` calls a Double) with `.0`
+ *  appended; an integral exact number as its digits. */
 function scalarKey(tag: string | null, v: unknown): string {
+  if (tag === 'boolean') return String(booleanOfStored(v));
   if (isExactNumber(v)) {
     const { integral, text } = exactNumberOf(v as ExactNumber);
     if (integral && (tag === null || INTEGRAL_TAGS.has(tag))) return text;

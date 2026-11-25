@@ -41,7 +41,7 @@
 import { BulkLoader, loadStreaming, type BulkEdge, type BulkOptions, type BulkProperty, type BulkStats, type BulkVertex } from '../bulk.ts';
 import type { GraphStore } from '../storage.ts';
 import type { IoSink } from '../iostore.ts';
-import { base64OfBinary, BigDecimal, Duration, exactInteger, type CanonicalType } from '../gremlin/types.ts';
+import { base64OfBinary, BigDecimal, booleanOfStored, Duration, exactInteger, type CanonicalType } from '../gremlin/types.ts';
 import { dateOfMillis } from '../gremlin/coerce.ts';
 import { type PropRow, edgePropsForOwners, keysetPages, labelsForOwners, pumpLinesToSink, rowsForOwners, vertexPropsForOwners } from './drain.ts';
 import { execute, identifier, q, type Expression } from '../sql/kernel/q.ts';
@@ -499,8 +499,7 @@ function csvTypeName(key: string, vtype: CanonicalType | null): string {
  *  the widened six — a widened value loses its TYPE TAG, never its digits or characters. */
 function csvText(vtype: CanonicalType | null, stored: unknown): string {
   switch (vtype) {
-    // Stored as 1/0 (coerceBindValue — DO SQLite rejects a boolean bind).
-    case 'boolean': return stored === 1 || stored === true ? 'true' : 'false';
+    case 'boolean': return String(booleanOfStored(stored));
     case 'datetime': return dateOfMillis(stored).toISOString();
     // Stored as total nanos; every external format spells a duration ISO-8601.
     case 'duration': return Duration.from(String(stored)).toIso();

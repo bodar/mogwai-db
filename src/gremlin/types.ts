@@ -363,6 +363,11 @@ export function binaryOfBase64(text: string): string | null {
   return binaryCarrier(Buffer.from(m[1]!, 'base64'));
 }
 
+/** A `boolean`-tagged value's JS Boolean. SQLite stores a Boolean as 1/0 (`coerceBindValue` — the DO
+ *  rejects a boolean bind), and a value that never reached storage is still `true`/`false`; both read
+ *  back here. The one decode every external form (GraphSON, CSV, the untyped JSON response) uses. */
+export const booleanOfStored = (stored: unknown): boolean => stored === true || stored === 1;
+
 /** Normalize ANY value to a lossless SQLite bind at the one seam both runtimes cross
  *  (storage.ts coerceBind). A bigint binds as a JS number while it fits ±2^53 exactly,
  *  else as its decimal string (a raw bigint bind throws on the DO; Number() truncates —

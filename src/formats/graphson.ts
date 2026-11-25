@@ -33,7 +33,7 @@ import type { GraphStore } from '../storage.ts';
 import type { IoSink } from '../iostore.ts';
 import { dateOfMillis } from '../gremlin/coerce.ts';
 import {
-    base64OfBinary, BigDecimal, binaryOfBase64, Duration, exactInteger, gremlinTypeOf, leafTag, mapSlot, valueNodeFromStored,
+    base64OfBinary, BigDecimal, binaryOfBase64, booleanOfStored, Duration, exactInteger, gremlinTypeOf, leafTag, mapSlot, valueNodeFromStored,
     type CanonicalType, type MapEntryType, type TypeNode, type ValueNode,
 } from '../gremlin/types.ts';
 import { type PropRow, edgePropsForOwners, groupByOwner, keysetPages, labelsForOwners, linesOf, pumpLinesToSink, rowsForOwners, vertexPropsForOwners } from './drain.ts';
@@ -424,9 +424,9 @@ export function graphsonNode(node: ValueNode): unknown {
  *  `unquoteExactNumbers` turns back into a bare JSON number. */
 function leafJson(type: CanonicalType | null, stored: unknown): unknown {
   switch (type) {
-    // A boolean stores as 1/0 (coerceBindValue — DO SQLite rejects a boolean bind), so the writer has
-    // to put the JSON boolean back or the reader reads a number and loses the type.
-    case 'boolean': return stored === 1 || stored === true;
+    // A boolean stores as 1/0, so the writer has to put the JSON boolean back or the reader reads a
+    // number and loses the type.
+    case 'boolean': return booleanOfStored(stored);
     case 'bigint': case 'bigdecimal': return String(stored);
     // A long past 2^53 is stored as decimal TEXT (coerceBindValue); within range it is a number.
     case 'long': return typeof stored === 'string' ? stored : stored;
