@@ -171,13 +171,6 @@ Queries that run and return a wrong result today. Fix these first.
   - `mean()` of a BigInteger must answer a BigDecimal. Today it raises "BigDecimal scale arithmetic is not supported".
 - **Fix:** Carry the type tag through each of these paths.
 
-#### A list in a `project()` slot loses its Boolean or datetime type (`project-fold-type-loss`)
-- **Area:** values
-- **Reach:** plausible
-- **Problem:** A value that `project().by(...fold())` collects into a list loses its type tag. `g.inject(true).project('b').by(fold())` gives `{"b":[1]}`, not `[true]`. `g.inject(datetime(...)).project('b').by(fold())` gives a plain number, not a date. GraphBinary and JSON give the same wrong values. `group().by().by(fold())` and `map(fold())` keep the type.
-- **Fix:** Find where the compiler lowers a list inside a `project` slot and carry the member tag there, as the `group` and `map` paths do.
-- **Where:** the `project().by` lowering; compare with the `group().by` value lowering.
-
 #### `reverse()` over a list-valued property does not reverse it (`reverse-list-value`)
 - **Area:** values
 - **Reach:** plausible
@@ -190,12 +183,6 @@ Queries that run and return a wrong result today. Fix these first.
 - **Reach:** rare
 - **Problem:** Over a set-valued `m`, `g.V().as('v').values('m').is(typeOf(GType.SET)).as('a').select('v','a')` gives `a` as a List. `group().by('name').by(values('m').is(typeOf(SET)).fold())` gives a List of a List.
 - **Fix:** Make the record-field and group-value framers read `ListOf.set`. Extend `typeof-framing.exec.test.ts` beyond the single-key select.
-
-#### `project().by(out().count().fold())` frames the count as Int (`project-count-fold-class`)
-- **Area:** numbers
-- **Reach:** plausible
-- **Problem:** The report is `[3i]`; the reference is `[3L]` (`CountGlobalStep` yields a Long). The top-level `g.V().out().count().fold()` is correct.
-- **Fix:** Confirm with a framed run, then frame the folded count as a Long.
 
 #### `group().by(length())` key wire type (`group-length-key-tag`)
 - **Area:** framing

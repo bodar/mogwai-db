@@ -1769,9 +1769,9 @@ export function mapNodePayload(map: Expr, valOf: MapOf, source: GraphSource, fre
   const inner: Expr = { kind: 'call', fn: 'json_extract', args: [node, compilerText('$.v')] };
   let value: Expr;
   if (valOf.kind === 'list') {
-    const members = listNodeExpr(inner, valOf.of, source, fresh);
-    if (!members) throw new Error('RelIR lowering: map list value has no typed-node framing');
-    value = listNode(members);
+    const node = listNodeExpr(inner, valOf.of, source, fresh);
+    if (!node) throw new Error('RelIR lowering: map list value has no typed-node framing');
+    value = node;
   } else {
     value = mapNode(mapNodePayload(inner, (valOf as Extract<MapOf, { kind: 'map' }>).of, source, fresh));
   }

@@ -876,10 +876,11 @@ export const mapNode = (pairs: Expr): Expr =>
  * payload objects, nested collections rebuilt), so this only adds the `{t:'list', v:…}` envelope the
  * framer reads. One spelling, because the `{t:'list', v:[…]}` node was inlined at four sites
  * (`map.ts`'s collecting value, `history.ts`, the group value side); a list nested in a `project()`
- * field must be the SAME node or `frameTypedNode` frames it as an untyped value.
+ * field must be the SAME node or `frameTypedNode` frames it as an untyped value. `memberTag` is the list's
+ * static member type (`m`, `FrameNode`), stated once on the list for members that ride bare.
  */
-export const listNode = (members: Expr): Expr =>
-  ({ kind: 'json-object', entries: [['t', compilerText('list')], ['v', members]], binary: false });
+export const listNode = (members: Expr, memberTag?: string): Expr =>
+  ({ kind: 'json-object', entries: [['t', compilerText('list')], ...(memberTag ? [['m', compilerText(memberTag)] as const] : []), ['v', members]], binary: false });
 
 /**
  * The FIRST row of a one-column relation, as an expression — SQL's scalar subquery.

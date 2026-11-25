@@ -24,7 +24,7 @@ import { collectsSideEffect, FAN_OUT_HOSTS, FILTER_HOSTS, isLocalScope, isStream
 import { keepsPosition, splitPosition } from './movement.ts';
 import type { ListOf, MapOf } from '../../../sql/kernel/render.ts';
 import { countsTraversers, groupKeyTerms, groupRows, isValueBarrier, keyedValuesMap, mapHoldsRowids, mapNodePayload, poolingStep, POOLED_RECIPE, type GroupedMap, type GroupRows } from '../map.ts';
-import { selfDescribingList } from '../list.ts';
+import { staticMemberTag } from '../list.ts';
 import { someStepDeep } from '../../ir/walk.ts';
 import { asLabelsOf, matchLabelsOf } from '../../ir/labels.ts';
 import { bulkObservedFrom } from '../../ir/bulk.ts';
@@ -2726,16 +2726,15 @@ function poolMembers(site: HostSite, bys: readonly (Modulation | undefined)[]): 
       ...(valueCols[1] ? { vtype: col(joined.id, first.renamed.get(valueCols[1].name)!) } : {}),
     };
     const valueFraming = tail.framing;
-    // A list value is NESTED in the map, so its members must describe themselves (`selfDescribingList`) — and
+    // A list value is NESTED in the map, so its static member type rides on its node (`staticMemberTag`) — and
     // be members the tree framer can walk (`listNodeExpr`): a path member has no `{t:'path'}` node yet.
     if (valueFraming.kind === 'list' && !treeFramed(valueFraming.of)) return null;
     // …and a MAP value keeps its element rowids for the root framer, which expands them through `singleOf`
     // (`mapNodePayload`, recursive over a nested map); any other value shape is not one this node builder states.
     if (valueFraming.kind !== 'list' && valueFraming.kind !== 'map' && valueFraming.kind !== 'scalar' && valueFraming.kind !== 'elements') return null;
-    const listed = valueFraming.kind === 'list' ? selfDescribingList(valueExpr, valueFraming.of, fresh) : null;
-    const node = listed ? listNode(listed.list) : memberNodeOf(produced, ctx.source, fresh);
+    const node = valueFraming.kind === 'list' ? listNode(valueExpr, staticMemberTag(valueFraming.of)) : memberNodeOf(produced, ctx.source, fresh);
     if (!node) return null;
-    const singleOf: MapOf = valueFraming.kind === 'list' ? { kind: 'list', of: listed!.of, ...(valueFraming.set ? { set: true } : {}) }
+    const singleOf: MapOf = valueFraming.kind === 'list' ? { kind: 'list', of: valueFraming.of, ...(valueFraming.set ? { set: true } : {}) }
       : valueFraming.kind === 'map' ? { kind: 'map', of: valueFraming.valOf } : { kind: 'scalar' };
     return keyedValuesMap(joined, col(joined.id, KEY), keyElem, node, singleOf, step, ctx.source, fresh);
   };

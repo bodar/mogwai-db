@@ -5,7 +5,7 @@ import { compilePlan, UnsupportedTraversal, hasTypedMembers, perRowColumn, perRo
 import { dateOfMillis } from './gremlin/coerce.ts';
 import type { FederationSource } from './compiler/segment.ts';
 import type { Elem } from './compiler/elem.ts';
-import { binaryBytes, booleanOfStored, hasSerializer, isCollectionType, leafTag, propertyTag, treeBranches, valueNodeFromStored, type FrameNode, type TreeBranch, type TypeNode, type ValueNode } from './gremlin/types.ts';
+import { binaryBytes, booleanOfStored, hasSerializer, isCollectionType, leafTag, listMembers, propertyTag, taggedMembers, treeBranches, valueNodeFromStored, type FrameNode, type TreeBranch, type TypeNode, type ValueNode } from './gremlin/types.ts';
 import { direction, ioc, Property, t } from './io.ts';
 import { createAppScope, type AppScope, type RegistryProvider } from './scopes.ts';
 import type { IoStore } from './iostore.ts';
@@ -175,8 +175,8 @@ function frameTypedNode(node: FrameNode): Buffer {
   // map's value side is a naked array of property values (the untyped list substrate's contract),
   // and it now frames without the blob being rebuilt into a typed tree first.
   if (Array.isArray(node)) return listBuffer(node.map(frameTypedNode));
-  if (node.t === 'list') return listBuffer((node.v as FrameNode[]).map(frameTypedNode));
-  if (node.t === 'set') return setBuffer((node.v as FrameNode[]).map(frameTypedNode));
+  if (node.t === 'list') return listBuffer(listMembers(node).map(frameTypedNode));
+  if (node.t === 'set') return setBuffer(listMembers(node).map(frameTypedNode));
   if (node.t === 'map') return typedMapBuffer(node.v as [FrameNode, FrameNode][]);
   // An ELEMENT member — `v` is the public payload the SQL side already expanded, so this is the same
   // `rowVertex`/`rowEdge` the top-level element shapes use. It is one arm rather than a descriptor at
@@ -419,7 +419,7 @@ function listMemberNodes(items: any[], of: ListOf): FrameNode[] {
     case 'scalar': {
       if (hasTypedMembers(of)) return items;
       const as = staticTypeOf(of.type);
-      if (as !== undefined) return items.map((x) => ({ t: as, v: x }));
+      if (as !== undefined) return taggedMembers(items, as);
       return items.map((x) => (x !== null && typeof x === 'object' && !isExactNumber(x) ? { t: null, v: x } : x));
     }
     case 'mixed': return items;

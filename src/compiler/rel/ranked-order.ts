@@ -39,7 +39,7 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { IRStep } from '../ir/strategies.ts';
 import type { ChildHost, ChildSeam } from './child.ts';
-import { jsonEachSet, jsonOf, listNode, mapNode, meta, typeOf, type Minter } from './build.ts';
+import { jsonEachSet, jsonOf, mapNode, meta, typeOf, type Minter } from './build.ts';
 import { listNodeExpr } from './list.ts';
 import { byNode, isProductiveBy, type Modulation } from './modulator.ts';
 import { orderabilityCompare } from './orderability.ts';
@@ -123,8 +123,7 @@ export function keyProductive(keyText: Expr, required: readonly number[]): Expr 
 /** A bare `by()`'s key — the traverser itself as a member node. */
 function identityNode(host: ChildHost, source: GraphSource, fresh: Minter): Expr | null {
   if (host.kind === 'list') {
-    const members = listNodeExpr(host.list, host.of, source, fresh);
-    return members && listNode(members);
+    return listNodeExpr(host.list, host.of, source, fresh);
   }
   if (host.kind === 'map') return mapNode(jsonOf(host.map));
   if (host.kind === 'element') return source.elementNode(host.elem, host.id, fresh);

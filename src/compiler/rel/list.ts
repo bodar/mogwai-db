@@ -2017,22 +2017,6 @@ export function listPayloadExpr(list: Expr, of: ListOf, source: GraphSource, fre
 
 /** The ordered `json_group_array` of a per-member expression, COALESCEd to `[]` and re-`json()`ed so the
  *  members' JSON subtype survives the enclosing aggregate. The shared tail of both list expanders. */
-/**
- * A list value whose members must state their own type wherever the list is NESTED (a map value, a member
- * of a member): a STATIC member type (`count().fold()` → longs) is written onto each member as a `{t,v}` node,
- * because the tree framer (`frameTypedNode`) infers a bare member from its storage class and a `long` would
- * frame as an `int`. Any other member encoding already describes itself (an envelope) or infers exactly as it
- * would at the top level (unknown), and is returned as is. The answer's `of` describes the members it holds.
- */
-export function selfDescribingList(list: Expr, of: ListOf, fresh: Minter): { readonly list: Expr; readonly of: ListOf } {
-  if (of.kind !== 'scalar' || of.type.kind !== 'static') return { list, of };
-  const members = membersOf(jsonOf(list), fresh);
-  return {
-    list: rebuiltMembers(members, typedNode(col(members.id, MEMBER.value), compilerText(of.type.type)), fresh),
-    of: withMemberType(of, PER_ROW_ENVELOPE),
-  };
-}
-
 function rebuiltMembers(members: Rel, member: Expr, fresh: Minter): Expr {
   const rebuilt = make.aggregate({
     id: fresh('lp'), input: members, channels: [], type: typeOf(meta('members', 'json', true)),
@@ -2043,7 +2027,7 @@ function rebuiltMembers(members: Rel, member: Expr, fresh: Minter): Expr {
 }
 
 /**
- * A list's members as a SELF-DESCRIBING wire array — `listPayloadExpr`'s twin for the tree framer.
+ * A list as a SELF-DESCRIBING `{t:'list'[, m], v}` node — `listPayloadExpr`'s twin for the tree framer.
  *
  * The distinction is which framer reads the result, exactly the `elementNode`/`elementObject` split
  * (`element.ts`): `listPayloadExpr` targets the top-level `listMemberNodes` framer, whose `elem` arm
@@ -2054,7 +2038,8 @@ function rebuiltMembers(members: Rel, member: Expr, fresh: Minter): Expr {
  *
  * - a SCALAR list's members are already frameable by `frameTypedNode` (a bare value infers, a `{t,v}`
  *   envelope self-describes), so it rides out as `json(list)` unchanged — the same shortcut
- *   `listPayloadExpr` takes for the same reason;
+ *   `listPayloadExpr` takes for the same reason — and a STATIC member type its storage class does not
+ *   imply is stated once on the node (`staticMemberTag`);
  * - a MAP list's members are self-describing pairs arrays; each becomes a `{t:'map', v:pairs}` node so
  *   the tree walker reads a map rather than an untyped array;
  * - an ELEMENT list's members are ROWIDS and expand to `elementNode` (the `{t,v}` form) — the one place
@@ -2062,6 +2047,23 @@ function rebuiltMembers(members: Rel, member: Expr, fresh: Minter): Expr {
  * - a NESTED list recurses under `listNode`, so a list of lists frames as `{t:'list', v:[{t:'list',…}]}`.
  */
 export function listNodeExpr(list: Expr, of: ListOf, source: GraphSource, fresh: Minter): Expr | null {
+  const members = listNodeMembers(list, of, source, fresh);
+  return members && listNode(members, staticMemberTag(of));
+}
+
+/** The STATIC member type a scalar list states ONCE on its node (`m`), for members that ride bare and whose
+ *  storage class does not imply their type — a `count().fold()`'s Longs, a `fold()` of Booleans or Dates. The
+ *  tree walkers apply it (`listMembers`, `gremlin/types.ts`) exactly as the root framer applies the same
+ *  static type (`listMemberNodes`). A type the storage class infers back exactly (`LOSSLESS_VTYPES`) needs no
+ *  tag, so a string or int list's node is unchanged. One literal per list: no per-member SQL. */
+export function staticMemberTag(of: ListOf): string | undefined {
+  if (of.kind !== 'scalar' || hasTypedMembers(of)) return undefined;
+  const tag = staticTypeOf(of.type);
+  return tag === undefined || (LOSSLESS_VTYPES as readonly string[]).includes(tag) ? undefined : tag;
+}
+
+/** `listNodeExpr`'s members array. */
+function listNodeMembers(list: Expr, of: ListOf, source: GraphSource, fresh: Minter): Expr | null {
   // A PATH member nested in a MAP/RECORD value (`group().by().by(path)`) needs a `{t:'path'}` wrapper the
   // tree walker (`frameTypedNode`) would read — not built yet, so it declines below (fail closed) rather
   // than framing a path as a bare list. `path().fold()` targets `listPayloadExpr`, not this tree walker.
@@ -2082,7 +2084,7 @@ export function listNodeExpr(list: Expr, of: ListOf, source: GraphSource, fresh:
   if (of.kind !== 'list') return null;
   const members = membersOf(jsonOf(list), fresh);
   const inner = listNodeExpr(col(members.id, MEMBER.value), of.of, source, fresh);
-  return inner && rebuiltMembers(members, listNode(inner), fresh);
+  return inner && rebuiltMembers(members, inner, fresh);
 }
 
 /** Demote every ELEMENT leaf of a list member tree to a raw rowid scalar, so `listPayloadExpr` takes its

@@ -4,7 +4,7 @@ import type { Rel } from '../../rel/rel.ts';
 import { perRowColumn, type MapOf, type MixedArm, type Shape } from '../../sql/kernel/render.ts';
 import type { Elem } from '../elem.ts';
 import type { IRStep } from '../ir/step.ts';
-import { carriedCols, eq, jsonOf, listNode, mapNode, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
+import { carriedCols, eq, jsonOf, mapNode, meta, typedNode, typeOf, EMPTY_ARRAY, type Minter } from './build.ts';
 import { freshTraverserRow, type ChildHost, type ChildSeam } from './child.ts';
 import { fieldCol, fieldNamed, fieldPresence, framingCols, type FramedRel, type RecordField, type RelFraming } from './framing.ts';
 import { listNodeExpr } from './list.ts';
@@ -12,15 +12,15 @@ import { exprHasSubquery, isSelfContained } from '../../rel/walk.ts';
 import { exprMayAbort } from '../../rel/raise.ts';
 import { MAP_COL, mapHoldsRowids, mapNodePayload, mapPayload } from './map.ts';
 import { byField, modulations, type ByField } from './modulator.ts';
+import type { GraphSource } from './source.ts';
+import { aliasGuard, aliasPresent, aliasProjection, liveAliases, readFraming, readProjection, selectSpec, type AliasRead, type Pop } from './alias.ts';
+import type { AliasMap } from '../alias.ts';
+import type { ColMeta } from '../../rel/types.ts';
 
 /** A caller-supplied field for a `by()` SLOT (its ring position), or `undefined` to take the slot's own
  *  `byField` — how a connector that has already joined a child body's rows beside the host (`lower/scoped.ts`)
  *  hands the record builder that slot without a second spelling of the ring, the key checks or the field loop. */
 export type FieldFor = (slot: number) => ByField | undefined;
-import type { GraphSource } from './source.ts';
-import { aliasGuard, aliasPresent, aliasProjection, liveAliases, readFraming, readProjection, selectSpec, type AliasRead, type Pop } from './alias.ts';
-import type { AliasMap } from '../alias.ts';
-import type { ColMeta } from '../../rel/types.ts';
 
 /**
  * THE RECORD SHAPE — a map whose KEYS ARE KNOWN AT COMPILE TIME, carried as columns.
@@ -289,8 +289,7 @@ function fieldNode(read: FieldRead, field: RecordField, source: GraphSource, fre
       // `listNodeExpr`, NOT `listPayloadExpr`: this member is framed by the tree walker (`frameTypedNode`),
       // which needs every leaf tagged (`{t:'vertex',…}`), where the top-level list framer takes bare
       // element objects — the `elementNode`/`elementObject` split, one level up.
-      const members = listNodeExpr(own('list'), framing.of, source, fresh);
-      return members && listNode(members);
+      return listNodeExpr(own('list'), framing.of, source, fresh);
     }
     // A per-row TYPED NODE field would be a `cap(mixed).unfold()` in a `project()` slot — terminal, and
     // `byField` produces no such thing, so it declines like `variant` for the same reason.

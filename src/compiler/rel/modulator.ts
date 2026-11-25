@@ -8,7 +8,7 @@ import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../s
 import type { IRStep } from '../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, caseWhen, freshTraverserRow, hostPresence, hostTag, mayBeAbsent, statedPresence, type ChildHost, type ChildSeam, type ChildValue, type Presence } from './child.ts';
 import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
-import { and, eq, firstOf, jsonField, jsonOf, listNode, mapNode, meta, PROPERTIES, storedValueOn, typedNode, typedNodeOnce, onceTyped, typeOf, familyKey, type Minter } from './build.ts';
+import { and, eq, firstOf, jsonField, jsonOf, mapNode, meta, PROPERTIES, storedValueOn, typedNode, typedNodeOnce, onceTyped, typeOf, familyKey, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { storedCompareOn, storedCompareOnce } from './predicate.ts';
 import { aliasEntryNode, aliasGuard, aliasProjection, liveAliases, readFraming, type Pop } from './alias.ts';
@@ -665,10 +665,7 @@ export function producedMemberNode(value: Expr, framing: RelFraming, source: Gra
   }
   const member = framing.kind === 'elements' ? source.elementNode(framing.elem, value, fresh)
     : framing.kind === 'map' ? mapNode(value)
-      : framing.kind === 'list' ? (() => {
-        const members = listNodeExpr(value, framing.of, source, fresh);
-        return members && listNode(members);
-      })()
+      : framing.kind === 'list' ? listNodeExpr(value, framing.of, source, fresh)
       : framing.kind === 'scalar' ? scalarNode(value, vtype, framing.type, fresh)
         : null;
   if (!member) return null;
@@ -697,8 +694,7 @@ export function byNode(modulation: Modulation, host: ChildHost, source: GraphSou
     // Column/Select pass the live value through (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/structure/Column.java:57-68`,
     // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/SelectStep.java:66-89`).
     if (host.entry.valOf.kind === 'list') {
-      const members = listNodeExpr(jsonField(host.entry.val, 'v'), host.entry.valOf.of, source, fresh);
-      return members && listNode(members);
+      return listNodeExpr(jsonField(host.entry.val, 'v'), host.entry.valOf.of, source, fresh);
     }
     return host.entry.val;
   }

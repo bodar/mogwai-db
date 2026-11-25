@@ -27,7 +27,7 @@
 // (`src/formats/graphson.ts`) is the io/adjacency form and is deliberately NOT reused here; this is a
 // different, response-shaped rendering.
 import type { FrameNode, TreeBranch, ValueNode } from './gremlin/types.ts';
-import { base64OfBinary, booleanOfStored, numberClassOf, treeBranches, valueNodeFromStored } from './gremlin/types.ts';
+import { base64OfBinary, booleanOfStored, listMembers, numberClassOf, treeBranches, valueNodeFromStored } from './gremlin/types.ts';
 import { exactNumberOf, isExactNumber, type ExactNumber } from './json-exact.ts';
 
 const rawJson = JSON as unknown as { rawJSON?: (text: string) => unknown };
@@ -78,7 +78,7 @@ export function untyped(node: FrameNode): unknown {
   switch (node.t) {
     case 'list':
     case 'set':
-      return (node.v as FrameNode[]).map(untyped);
+      return listMembers(node).map(untyped);
     case 'map':
       return untypedMap(node.v as [FrameNode, FrameNode][]);
     case 'vertex':

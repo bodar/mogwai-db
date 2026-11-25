@@ -11,7 +11,7 @@
 // It is stored on write (vertex_properties.vtype / edge_properties.vtype) and
 // consumed on read (typeOf filter + per-row framing).
 
-import { stringifyExact } from '../json-exact.ts';
+import { isExactNumber, stringifyExact } from '../json-exact.ts';
 import { ioc } from '../io.ts';
 import { UnsupportedTraversal } from '../compiler/unsupported.ts';
 import { floatCanonical } from './float.ts';
@@ -622,7 +622,11 @@ export type ValueNode =
  */
 export type FrameNode =
   | ValueNode
-  | { t: 'list' | 'set'; v: FrameNode[] }
+  // `m` is a list's STATIC MEMBER TYPE, stated once on the list rather than once per member (Calcite's
+  // collection type carries its component type the same way). A relational producer sets it where the
+  // members ride bare and their storage class does not imply their type (`count().fold()` → Longs,
+  // `fold()` of a `true` → Booleans); `listMembers` applies it, so every walker reads typed members.
+  | { t: 'list' | 'set'; v: FrameNode[]; m?: CanonicalType }
   | { t: 'map'; v: [FrameNode, FrameNode][] }
   // A PROPERTY is the element arm's third kind and rides the same way — `v` is the
   // `{vpid, owner, pk, pv, pvtype, pmeta}` tuple `framePropertyRow` reads, already expanded by SQL. The
@@ -639,6 +643,19 @@ export type FrameNode =
   | { t: 'T'; v: TokenName }
   | { t: 'D'; v: DirectionName }
   | null | string | number | boolean | FrameNode[];
+
+/**
+ * A list's members, each typed by the list's static member type `tag` — THE one rule the root list framer
+ * (`execute.ts` `listMemberNodes`) and the tree walkers (`frameTypedNode`, `untyped`) share. A BARE member
+ * (a primitive, a null, an exact number kept as its source text) becomes the `{t:tag, v}` leaf its envelope
+ * would have encoded; a member that is already a node or an array describes itself and is left as it is.
+ */
+export const taggedMembers = (items: readonly FrameNode[], tag: CanonicalType): FrameNode[] =>
+  items.map((x) => (x === null || typeof x !== 'object' || isExactNumber(x) ? { t: tag, v: x } : x));
+
+/** A list/set node's members as the walkers read them: typed by its `m` (`taggedMembers`) when it has one. */
+export const listMembers = (node: { v: FrameNode[]; m?: CanonicalType }): FrameNode[] =>
+  node.m === undefined ? node.v : taggedMembers(node.v, node.m);
 
 /** One level of a Tree: each child KEY with its own subtree, in first-occurrence order. */
 export interface TreeBranch { readonly key: FrameNode; readonly children: TreeBranch[] }
