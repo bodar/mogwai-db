@@ -60,7 +60,7 @@ export function changesFeed(store: GraphStore, since: number, limit?: number, ma
   // `COALESCE(uid, id)` has NONE affinity, so an integer rowid matches an integer and a uid string a
   // string, never crossing. ONE JSON bind for the whole set (the binds rule, §6·2), never a placeholder list.
   const filtered = match !== undefined;
-  const rows = store.query<{ seq: number; id: string; kind: string; rev: string | null; deleted: number }>(
+  const rows = store.query<FeedRow>(
     filtered
       ? `WITH matched(id) AS (
            SELECT id FROM nodes WHERE COALESCE(uid, id) IN (SELECT value FROM json_each(?))),
@@ -86,6 +86,12 @@ export function changesFeed(store: GraphStore, since: number, limit?: number, ma
     filtered
       ? (paged ? [JSON.stringify(match), since, since, since, limit] : [JSON.stringify(match), since, since, since])
       : (paged ? [since, since, since, limit] : [since, since, since]));
+  // When a page was TRUNCATED (a full batch), the cursor resumes at the last row's seq so the next page
+  // reads strictly after it; otherwise the feed is fully drained and `last_seq` is the graph's `update_seq`
+  // (a re-pull from there reads nothing, even if the highest element seq is below the counter).
+  const truncated = paged && rows.length === limit;
+  const last_seq = truncated ? rows[rows.length - 1]!.seq : store.nextSeqBlock(0);
+  if (truncated) rows.push(...endpointsAhead(store, rows, last_seq));
   const conflicts = conflictLeaves(store, rows.filter((r) => !r.deleted).map((r) => r.id)); // gid → loser leaf revs (4b-2)
   const results: ChangeRow[] = rows.map((r) => ({
     seq: r.seq, id: r.id, kind: r.kind as 'vertex' | 'edge',
@@ -95,12 +101,26 @@ export function changesFeed(store: GraphStore, since: number, limit?: number, ma
     ...(r.deleted ? { deleted: true as const } : {}),
     ...(conflicts.get(r.id)?.length ? { conflicts: conflicts.get(r.id) } : {}),
   }));
-  // When a page was TRUNCATED (a full batch), the cursor resumes at the last row's seq so the next page
-  // reads strictly after it; otherwise the feed is fully drained and `last_seq` is the graph's `update_seq`
-  // (a re-pull from there reads nothing, even if the highest element seq is below the counter).
-  const truncated = paged && rows.length === limit;
-  const last_seq = truncated ? rows[rows.length - 1]!.seq : store.nextSeqBlock(0);
   return { results, last_seq, ...(truncated || !backfilled ? { truncated: true as const } : {}) };
+}
+
+type FeedRow = { seq: number; id: string; kind: string; rev: string | null; deleted: number };
+
+/** The endpoint vertices of a page's live edges whose seq lies AFTER the page (`after`). A later write
+ *  re-sequences a vertex past its edges (`g.V().property(…)`), so a page can hold an edge whose endpoint a
+ *  fresh target has never seen, and the edge could not land. The page carries those endpoints too, at
+ *  their own seq: where the target already holds the rev, `_revs_diff` makes it a no-op, and when the
+ *  vertex comes round again in seq order it is a no-op the same way. Bounded by two per edge in the page;
+ *  the cursor (`last_seq`) is unchanged. */
+function endpointsAhead(store: GraphStore, rows: readonly FeedRow[], after: number): FeedRow[] {
+  const edgeGids = rows.filter((r) => r.kind === 'edge' && !r.deleted).map((r) => r.id);
+  if (!edgeGids.length) return [];
+  return store.query<FeedRow>(
+    `WITH page(src, tgt) AS (
+       SELECT src, tgt FROM edges WHERE gid IS NOT NULL AND gid IN (SELECT unhex(value) FROM json_each(?)))
+     SELECT seq, hex(gid) AS id, 'vertex' AS kind, hex(rev) AS rev, 0 AS deleted FROM nodes
+     WHERE seq > ? AND gid IS NOT NULL AND id IN (SELECT src FROM page UNION SELECT tgt FROM page)
+     ORDER BY seq`, [JSON.stringify(edgeGids), after]);
 }
 
 /** gid → its shadowed conflict-LOSER leaf revs (4b-2), so the feed advertises them (`?style=all_docs`).

@@ -111,6 +111,14 @@ function applyChangeSet(store: GraphStore, cs: ChangeSet): void {
   for (const v of vertices) vGids.add(upper(v.gid));
   for (const e of edges) { vGids.add(upper(e.srcGid)); vGids.add(upper(e.tgtGid)); }
   const vRow = resolveGids(store, 'nodes', [...vGids]);
+  // An endpoint neither held here nor in this batch cannot be landed. The replicator never sends one (the
+  // feed carries an edge's endpoints with it, `changesFeed`); another `_bulk_docs` writer gets a refusal
+  // naming the gids, before anything is written.
+  const batchV = new Set(vertices.map((v) => upper(v.gid)));
+  for (const e of edges)
+    for (const end of [upper(e.srcGid), upper(e.tgtGid)])
+      if (!vRow.has(end) && !batchV.has(end))
+        throw new Error(`replication: edge ${upper(e.gid)} names vertex ${end}, which neither this graph nor this batch holds`);
   let nextNode = maxId(store, 'nodes') + 1;
   for (const g of vGids) if (!vRow.has(g)) vRow.set(g, nextNode++);
 

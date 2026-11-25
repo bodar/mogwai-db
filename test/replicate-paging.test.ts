@@ -136,3 +136,31 @@ describe('replication — paged + paced drain (Phase 5a)', () => {
     expect(fingerprint(await s.changes('local'))).toEqual(fingerprint(await s.changes('remote')));
   });
 });
+
+// A vertex written after its edges is re-sequenced past them, so a page can hold an edge whose endpoint a
+// fresh target has never seen. The feed carries that endpoint with the page (`changesFeed`), so the edge
+// lands; any order within or between pages converges (storage density plan, F3).
+describe('replication — an edge paged before its endpoint', () => {
+  test('300 p->q pairs, then a vertex update, replicate whole to a fresh graph', async () => {
+    const s = setup();
+    await s.changes('src'); // replication on, before the writes
+    for (let i = 0; i < 300; i++) await s.run('src', "g.addV('p').as('p').addV('q').addE('k').from('p')");
+    await s.run('src', "g.V().property('m', 1)");
+    expect(await s.mgr.info('src')).toEqual({ vertexCount: 600, edgeCount: 300 });
+    const r = await runReplication(localPeer(s.mgr, 'src'), localPeer(s.mgr, 'dst'), cpFor(s.mgr, 'dst', 'j'));
+    expect(r.more).toBe(false);
+    expect(await s.mgr.info('dst')).toEqual({ vertexCount: 600, edgeCount: 300 });
+    expect(fingerprint(await s.changes('dst'))).toEqual(fingerprint(await s.changes('src')));
+  });
+
+  test('a _bulk_docs edge whose endpoint neither graph nor batch holds is refused by gid, writing nothing', async () => {
+    const s = setup();
+    await s.changes('src');
+    await s.run('src', "g.addV('p').as('p').addV('q').addE('k').from('p')");
+    const feed = await s.changes('src');
+    const edge = feed.results.find((r) => r.kind === 'edge')!;
+    const doc = await s.mgr.bulkGet('src', [{ gid: edge.id, kind: 'edge' }]);
+    await expect(s.mgr.bulkDocs('dst', doc)).rejects.toThrow(/replication: edge [0-9A-F]{32} names vertex [0-9A-F]{32}, which neither this graph nor this batch holds/);
+    expect(await s.mgr.info('dst')).toEqual({ vertexCount: 0, edgeCount: 0 });
+  });
+});
