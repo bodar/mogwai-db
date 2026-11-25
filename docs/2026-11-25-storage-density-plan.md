@@ -55,6 +55,12 @@ Expected: 15–20 MB, a few lines.
 hub-scale test; O(|E|) for a root `E().hasLabel`). Remove another index only with the same evidence.
 
 ### S3. Replication metadata on demand (`gid`, `rev`, `seq` and their indexes)
+
+✅ **LANDED (2026-11-25, `1fbd3261`).** A graph computes `gid`, `rev` and `seq` only after it first
+exposes identity: a replication call, the match set, or a GraphSON export. CSV does not turn it on.
+Mechanism: `exposeIdentity` in `src/refresh.ts` and the `replication` state row. It backfills in rowid
+pages, vertices before edges. `nodes_gid` and `edges_gid` are now partial indexes. Measured: LDBC sf0.1
+shrinks by 289 MB, and bulk load goes from 105 s to 53 s. Remaining: nothing.
 Owner decision: the FIRST replication call on a graph (`_changes`, `_revs_diff` or `_bulk_docs` — a
 target needs the metadata too) turns it on. Until then a write computes no `gid`, `rev` or `seq` (no
 content hash), and their indexes hold nothing.
