@@ -293,6 +293,17 @@ byte-stable reuse.
 9. **One volatility authority** (`volatility-one-authority`; round-1 follow-up "Volatility has two
    authorities"). The literal visitor declares a dynamic literal. `compilePlan` asks the same
    predicate. No answer changes until item 8 gives a second dynamic literal.
+   ✅ **Items 8 and 9 landed 2026-11-25 (`afde6e28`).** `g.inject(UUID())` draws `crypto.randomUUID()`,
+   tagged `uuid` (reference: `GenericLiteralVisitor.visitUuidLiteral`). One predicate, `dynamicLiteral`
+   (`src/gremlin/frontend.ts`), drives the value draw and `isVolatileQuery`; `readsClock` is deleted. The
+   value is memoised per request in `ParamEnv.dynamicLiterals`, so a body extracted twice reads one value.
+   Test: `test/compiler/dynamic-literal.exec.test.ts`. Remains:
+   - Two dateDiff constant-fold sites still extract with `NO_PARAMS`: `src/compiler/rel/transform.ts:471/474`
+     and `src/gremlin/coerce.ts:636/703`. Each draws its own `datetime()` at its site, and the env is not
+     in scope there. This is ms-level and is the same as before this change.
+   - A federated pushdown sends the query text to a sibling graph, so the sibling draws its own `UUID()`.
+   - The census shows 7 traversals that execute now but are not in the baseline. They are on trunk
+     already and have nothing to do with this change, so the census is not re-recorded.
 
 ### Reuse sweep (byte-stable unless said)
 
