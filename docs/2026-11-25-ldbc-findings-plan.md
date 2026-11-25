@@ -142,7 +142,7 @@ All findings were minor. They are ordered: wrong answers first, then cheap fixes
   (`src/compiler/rel/predicate.ts`). The correlated form
   `has('age', select('a').values('age'))` also leaves it out. Same answer and SQL before L1. Fix the
   json_each and correlated arms through the one decimal-arm rule, not per site.
-- **GraphBinary does not use `booleanOfStored` (from L3, cheap).** `frameValue`
+- ✅ *(Landed 2026-11-25 as round-3 item 6.)* **GraphBinary does not use `booleanOfStored` (from L3, cheap).** `frameValue`
   (`src/execute.ts`, around line 333) decodes a `boolean` tag with `Boolean(v)`. Use
   `booleanOfStored` there, so the comment "the one decode every external form uses" is true. No
   answer changes for stored 1/0/true/false.
@@ -273,6 +273,9 @@ byte-stable reuse.
 5. **Parse-cache bounds for memory** (follow-up above). Small.
 6. **GraphBinary frames a boolean tag through `booleanOfStored`; name `vp_decimal`/`ep_decimal` in the
    index-build-on-deploy note** (round-1 follow-ups, about 5 lines).
+   ✅ **Landed 2026-11-25 (first half).** `frameValue` (`src/execute.ts`) decodes a `boolean` tag with
+   `booleanOfStored`, the one decode GraphSON, CSV and JSON use. Test: `test/graphbinary-boolean.test.ts`.
+   Remains: nothing. The index-note half is moot: item 3 deletes `vp_decimal`/`ep_decimal`.
 7. **Sargable seek range for an ordered predicate** (`has(k, gt/lt/between/inside …)`; the Deferred
    item above). Linear today, but common reach (range filters, LDBC dates). It is a range derivation
    (Calcite `Sarg`, `vendor/calcite/core/src/main/java/org/apache/calcite/rex/RexSimplify.java`), and
