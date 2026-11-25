@@ -10,6 +10,7 @@ import { executeQuery, executeFramed } from './support/executor.ts';
 import { streamBuffers } from '../src/http.ts';
 import { ioc } from '../src/io.ts';
 import { BigDecimal, Duration } from '../src/gremlin/types.ts';
+import { stringifyExact } from '../src/json-exact.ts';
 
 async function values(gremlin: string, writes: string[]): Promise<any[]> {
   const store = new GraphStore(new BunSqlite(':memory:'));
@@ -135,5 +136,19 @@ describe('numeric ordering/range over the exact tail (option b)', () => {
       `g.addV('t').property('d', 100.25m)`,
     ]);
     expect(out.map((v) => v.toString())).toEqual(['9.9', '10.5', '100.25']);
+  });
+});
+
+describe('a whole number past 2^53 crosses JSON as its exact digits', () => {
+  // JS's shortest spelling of 2^55 is `36028797018963970`, another INTEGER to SQLite, so a spooled snapshot
+  // stopped equalling the value it came from. `stringifyExact` spells the double's own digits inside an INTEGER.
+  test.each([
+    [2 ** 55, '[36028797018963968]'],
+    [-(2 ** 60), '[-1152921504606846976]'],
+    [2 ** 53, '[9007199254740992]'],
+    [2 ** 63, `[${JSON.stringify(2 ** 63)}]`],
+    [2.5, '[2.5]'],
+  ])('%p', (value, spelled) => {
+    expect(stringifyExact([value])).toBe(spelled);
   });
 });

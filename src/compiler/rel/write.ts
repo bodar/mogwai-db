@@ -3964,7 +3964,9 @@ const SEEK_KEY = 'sk_key', SEEK_VTYPE = 'sk_vt', SEEK_VALUE = 'sk_x', SEEK_ORD =
  * search over a string-valued key read every string, per driver). Two arms, one per stored tail:
  *  - a BIGDECIMAL row is compared by its REAL cast, which is the expression the partial `vp_decimal` /
  *    `ep_decimal` index holds (`src/storage.ts`): one SEARCH on `(key, CAST(value AS REAL)) = (k, c)` under
- *    `vtype = 'bigdecimal'`, for every magnitude of `c`;
+ *    `vtype = 'bigdecimal'`. A point is enough at every magnitude because a spooled `c` keeps its double's
+ *    value: past 2^53 it crosses the JSON spool as that double's exact digits (`stringifyExact`), not JS's
+ *    shortest spelling (2^55 as `36028797018963970`, another number to SQLite);
  *  - a LONG/BIGINT TEXT row is compared by its exact INT cast, so it meets only `|c| ≥ 2^53` (a long below
  *    is stored as an INTEGER and found by the `(key, value)` arm; 2^53 itself is not a safe integer, so the
  *    bound is inclusive). The cast is exact, but `c` may not be: an INTEGER past 2^53 reaches the arm through
@@ -4000,7 +4002,8 @@ function decimalTextSeeks(
     return make.filter({ id: fresh('f'), input: withC, channels: [], type: withC.type, pred: narrow(col(withC.id, C)) });
   };
   // BigDecimal: the partial decimal index, keyed by the very cast the residual compares. The `vtype` term is
-  // the index's own WHERE, so SQLite may use it.
+  // the index's own WHERE, so SQLite may use it. A POINT seek at every magnitude: a spooled `c` past 2^53
+  // crosses as the exact digits of its double (`stringifyExact`), so it equals the stored cast it came from.
   const every = keyed(() => eq(compilerInt(1), compilerInt(1))), decimals = props();
   const decimal = seekOwners(every, decimals, and(and(eq(col(decimals.id, 'key'), key(every.id)), eq(col(decimals.id, 'vtype'), compilerText('bigdecimal'))),
     eq({ kind: 'cast', arg: col(decimals.id, 'value'), to: 'real' }, col(every.id, C))), owner, fresh);

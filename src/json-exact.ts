@@ -76,6 +76,12 @@ export function stringifyExact(value: unknown): string {
       && Object.keys(member).some((key) => !key.isWellFormed())) {
       return Object.fromEntries(Object.entries(member).map(([key, inner]) => [key.toWellFormed(), inner]));
     }
+    // A WHOLE number past 2^53 (and inside an INTEGER) crosses as the exact digits of its double. JS's shortest
+    // spelling is another number to SQLite: 2^55 is `36028797018963970`, an INTEGER nobody held, so a REAL
+    // read back from a spooled snapshot stopped equalling the stored REAL it came from. The digits keep the
+    // value; the class is SQLite's INTEGER, as the shortest spelling's already was.
+    if (typeof member === 'number' && Number.isInteger(member) && !Number.isSafeInteger(member) && Math.abs(member) < 2 ** 63
+      && rawJson.rawJSON) return rawJson.rawJSON(BigInt(member).toString());
     const spelled = typeof member === 'number' ? exactSpelling(member) : undefined;
     if (spelled === undefined) return member;
     if (rawJson.rawJSON) return rawJson.rawJSON(spelled);

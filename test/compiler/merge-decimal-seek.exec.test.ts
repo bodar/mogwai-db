@@ -31,7 +31,17 @@ describe('a merge search matches a stored BigDecimal and a TEXT-stored long', ()
     ['2^60 + 1 (TEXT)', "g.addV('p').property('n', 1152921504606846977L)", "g.inject([n:1152921504606846977L]).mergeV()", "g.V().count()", 1],
     // The REAL cast of 9007199254740993.0 is 2^53, which is not the long 9007199254740993: no match.
     ['9007199254740993.0m by 9007199254740993L', "g.addV('p').property('n', 9007199254740993.0m)", "g.inject([n:9007199254740993L]).mergeV()", "g.V().count()", 2],
-    ['a string-valued key', "g.addV('p').property('n', '1')", "g.inject([n:1]).mergeV()", "g.V().count()", 2],
+    // Past 2^53 a spooled criterion crosses as its double's exact digits (`stringifyExact`), not JS's
+    // shortest spelling (2^55 as 36028797018963970, another number to SQLite), so the point seek finds it.
+    ['a stored double 2^55 by its double', "g.addV('p').property('n', 36028797018963968.0)", "g.inject([n:36028797018963968.0]).mergeV()", "g.V().count()", 1],
+    ['2^55m by 2^55m', "g.addV('p').property('n', 36028797018963968m)", "g.inject([n:36028797018963968m]).mergeV()", "g.V().count()", 1],
+    ['2^55m by its double', "g.addV('p').property('n', 36028797018963968m)", "g.inject([n:36028797018963968.0]).mergeV()", "g.V().count()", 1],
+    ['2^60m by 2^60m', "g.addV('p').property('n', 1152921504606846976m)", "g.inject([n:1152921504606846976m]).mergeV()", "g.V().count()", 1],
+    ['2^62m by 2^62m', "g.addV('p').property('n', 4611686018427387904m)", "g.inject([n:4611686018427387904m]).mergeV()", "g.V().count()", 1],
+    ['-2^55m by -2^55m', "g.addV('p').property('n', -36028797018963968m)", "g.inject([n:-36028797018963968m]).mergeV()", "g.V().count()", 1],
+    ['a 19-digit decimal past 2^53', "g.addV('p').property('acct', 98765432109876543.21m)", "g.inject([acct:98765432109876543.21m]).mergeV()", "g.V().count()", 1],
+    ['an edge weight 2^55m', "g.addV('a').as('a').addV('b').addE('e').from('a').property('w', 36028797018963968m)", "g.inject([(T.label):'e', w:36028797018963968m]).mergeE()", "g.E().count()", 1],
+    ['a string-valued key',"g.addV('p').property('n', '1')", "g.inject([n:1]).mergeV()", "g.V().count()", 2],
     // At depth: drivers from a union of arms, a computed search after as(), and a criterion from a coalesce body.
     ['drivers from union arms', "g.addV('p').property('n', 1m).addV('p').property('n', 2.5m)", "g.inject(0).union(__.constant([n:1]), __.constant([n:2.5])).mergeV()", "g.V().count()", 2],
     ['a computed search after as()', "g.addV('p').property('n', 2.5m).addV('q').property('n', 2.5)", "g.V().hasLabel('q').as('x').mergeV(__.project('n').by(values('n')))", "g.V().count()", 2],
