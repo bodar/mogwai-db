@@ -30,7 +30,7 @@
 // vertex's own entry).
 import { BulkLoader, loadStreaming, type BulkEdge, type BulkOptions, type BulkProperty, type BulkStats, type BulkVertex } from '../bulk.ts';
 import type { GraphStore } from '../storage.ts';
-import { exposeIdentity } from '../refresh.ts';
+import { exposeIdentity, exposeIdentityByPage } from '../refresh.ts';
 import { decodeRev } from '../rev.ts';
 import type { IoSink } from '../iostore.ts';
 import { dateOfMillis } from '../gremlin/coerce.ts';
@@ -504,12 +504,12 @@ function incidenceJson(
  * each page reads its labels, properties and incident edges in bind-bounded chunks. Peak memory is one
  * page, not the graph — which is what makes a whole-graph export runnable inside a Durable Object
  * rather than only on a machine that can hold the graph twice.
+ *
+ * A typed dump carries identity out of the graph, so the CALLER turns replication metadata on and
+ * backfills it first (`exposeIdentity`): a replica seeded from an identity-less dump would duplicate
+ * every element on its first replication.
  */
-export function* graphsonLines(store: GraphStore, pageSize = 200): Generator<string> {
-  // A typed dump carries identity out of the graph, so it turns replication metadata on and backfills it
-  // first: a replica seeded from an identity-less dump would duplicate every element on its first
-  // replication. O(N), as the export already is.
-  exposeIdentity(store);
+function* graphsonLines(store: GraphStore, pageSize = 200): Generator<string> {
   // `hex(gid)` so the 16-byte BLOB rides as a hex string on both runtimes (a raw BLOB read diverges);
   // `hex(rev)` likewise for the packed rev BLOB, decoded (rev.ts) to its `{gen, hash, ids}` object on the wire.
   for (const page of keysetPages<{ id: number; uid: string | null; gid: string | null; rev: string | null }>(store, 'nodes', ['id', 'uid', q`hex(gid) AS gid`, q`hex(rev) AS rev`], pageSize)) {
@@ -552,7 +552,7 @@ export function* graphsonLines(store: GraphStore, pageSize = 200): Generator<str
         // `gid` (global identity) rides as a bare hex string under a private key — mogwai replication
         // metadata, not part of TinkerPop's element model; a reader that lacks it re-mints (bulk.ts).
         ...(v.gid ? { gid: v.gid } : {}),
-        // `rev` rides as its `{gen, hash}` OBJECT under a private key; a reader that lacks it recomputes
+        // `rev` rides as its `{gen, hash, ids}` OBJECT under a private key; a reader that lacks it recomputes
         // one from content (bulk.ts, preserve-or-compute), which converges for identical content.
         ...(v.rev ? { rev: decodeRev(v.rev) } : {}),
         ...(vp.length ? { properties: vertexPropsJson(vp) } : {}),
@@ -565,8 +565,10 @@ export function* graphsonLines(store: GraphStore, pageSize = 200): Generator<str
 
 /** The whole graph as one newline-separated document — the in-memory form, for tests and small
  *  callers. The whole-graph `io()` path uses `writeGraphsonToSink` instead, which never joins. */
-export const writeGraphson = (store: GraphStore, pageSize?: number): string =>
-  [...graphsonLines(store, pageSize)].join('\n');
+export function writeGraphson(store: GraphStore, pageSize?: number): string {
+  exposeIdentity(store);
+  return [...graphsonLines(store, pageSize)].join('\n');
+}
 
 /**
  * Drain the whole graph into a byte SINK — the streaming writer `io().write()` uses, so a 10 GB
@@ -575,6 +577,9 @@ export const writeGraphson = (store: GraphStore, pageSize?: number): string =>
  * to the sink and forgotten. The document is byte-identical to `writeGraphson` — the same lines,
  * newline-separated, no trailing newline — so either writer round-trips through either reader.
  */
-export function writeGraphsonToSink(store: GraphStore, sink: IoSink, pageSize?: number): Promise<void> {
+export async function writeGraphsonToSink(store: GraphStore, sink: IoSink, pageSize?: number): Promise<void> {
+  // The backfill goes page by page, a turn each: a first export of a large graph inside a DO must not
+  // backfill every element in one turn (one CPU budget, one transaction that a failure rolls back whole).
+  await exposeIdentityByPage(store);
   return pumpLinesToSink(graphsonLines(store, pageSize), sink);
 }

@@ -7,7 +7,7 @@ import { makeRouter } from '../src/router.ts';
 import { changesFeed, revsDiff } from '../src/manager.ts';
 import { localPeer, runReplication, applyWire, bulkGet, validateReplicationFilter, type Checkpoint } from '../src/replicate.ts';
 import { loadBulk } from '../src/bulk.ts';
-import { writeGraphson, loadGraphson } from '../src/formats/graphson.ts';
+import { writeGraphson, writeGraphsonToSink, loadGraphson } from '../src/formats/graphson.ts';
 import { writeCsv } from '../src/formats/csv.ts';
 import { ReplicatorStore, storeRegistry } from '../src/replicator-registry.ts';
 import { runDueReplications } from '../src/scheduler.ts';
@@ -190,5 +190,33 @@ describe('filtered replication backfills a bounded page', () => {
     const r = await runReplication(localPeer(m, 'g'), localPeer(m, 't'), memCp(), { batchSize: 0 }, "g.V().hasLabel('p')");
     expect(r.batches).toBeGreaterThan(2);
     expect(await m.info('t')).toEqual({ vertexCount: 1200, edgeCount: 0 });
+  });
+});
+
+// The first streaming GraphSON export of a never-replicated graph backfills page by page, a turn each, so
+// on a DO no single turn or transaction holds the whole backfill (storage density plan, F2).
+describe('the streaming GraphSON export backfills in pages', () => {
+  test('the backfill advances one page before the first await, and every line still carries gid and rev', async () => {
+    const m = mgr();
+    const s = m.storeOf('g');
+    const n = 2500;
+    loadBulk(s, Array.from({ length: n }, (_, i) => ({ id: i + 1, labels: ['p'], properties: [] })),
+      Array.from({ length: n - 1 }, (_, i) => ({ id: i + 1, label: 'k', src: i + 1, tgt: i + 2, properties: [] })));
+    const chunks: Uint8Array[] = [];
+    const sink = { write: async (c: Uint8Array) => { chunks.push(c); }, close: async () => {}, abort: async () => {} };
+    const exported = writeGraphsonToSink(s, sink);
+    // The call ran synchronously up to its first await: exactly one backfill page is done.
+    const sequenced = () => count(s, 'SELECT count(*) AS n FROM nodes WHERE seq IS NOT NULL');
+    expect(sequenced()).toBe(1000);
+    await exported;
+    expect(sequenced()).toBe(n);
+    expect(count(s, 'SELECT count(*) AS n FROM edges WHERE seq IS NULL')).toBe(0);
+    const lines = Buffer.concat(chunks).toString('utf8').split('\n').map((l) => JSON.parse(l));
+    expect(lines).toHaveLength(n);
+    for (const v of lines) {
+      expect(v.gid).toMatch(/^[0-9A-F]{32}$/);
+      expect(v.rev.gen).toBe(1);
+      for (const e of v.outE?.k ?? []) { expect(e.gid).toMatch(/^[0-9A-F]{32}$/); expect(e.rev.gen).toBe(1); }
+    }
   });
 });

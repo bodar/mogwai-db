@@ -139,6 +139,13 @@ export function exposeIdentity(store: GraphStore, limit?: number): boolean {
   return kind === 'done';
 }
 
+/** `exposeIdentity` drained one page per macrotask turn — the form for a caller that may run long (the
+ *  streaming GraphSON export). On a Durable Object each turn commits on its own, so the backfill cursor
+ *  advances page by page and no single turn or implicit transaction holds the whole graph's backfill. */
+export async function exposeIdentityByPage(store: GraphStore): Promise<void> {
+  while (!exposeIdentity(store, BACKFILL_PAGE)) await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 /** Assign a fresh local seq to every tombstone a `drop()` just recorded (`seq IS NULL`, §6·4), so a
  *  delete enters the by-seq feed after the same write's live elements. The gid/rev were captured by the
  *  compiled drop; only the local seq is the refresh's to assign. A no-op when nothing was deleted. */
