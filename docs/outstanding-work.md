@@ -55,7 +55,7 @@ An item marked "verify" may have landed already. Check it against the code befor
 1. [Wrong answers](#1-wrong-answers) — 33 items
 2. [Performance](#2-performance) — 57 items
 3. [Queries we decline](#3-queries-we-decline) — 89 items
-4. [Shared substrate](#4-shared-substrate) — 17 items
+4. [Shared substrate](#4-shared-substrate) — 19 items
 5. [Product capabilities](#5-product-capabilities) — 7 items
 6. [Internal debt](#6-internal-debt) — 91 items
 7. [Needs an owner decision](#7-needs-an-owner-decision) — 8 items
@@ -1551,6 +1551,21 @@ Building blocks that unblock many other items. Do these before the items that de
 - **Problem:** The merge search builds its seeks by hand: `seekedSearch`, `propertySeeks`, `decimalTextSeeks`, `endpointSeek`, and `cappedCount`'s per-driver choice. Other per-row property searches do not get the most-selective-key and decimal-TEXT-prefix access paths.
 - **Fix:** Move the seeks into a correlated-join `OwnerSeek` that chooses a seek per outer row over the finished algebra. `semijoin.ts` now seeks per outer row (`narrowFilter`), so this is unblocked. The same multi-key `OwnerSeek` was the fix for the 19× two-pool merge guard (verify: the two-pool grid measures linear, see `merge-guard-containment`).
 - **Where:** `src/compiler/rel/write.ts` `seekedSearch`, `propertySeeks`, `decimalTextSeeks`, `endpointSeek`; `src/rel/passes/semijoin.ts`
+
+#### One place resolves label and property-key names (`name-interning`)
+- **Area:** storage, compiler
+- **Reach:** common
+- **Problem:** Labels are interned in a `labels` table, but no one place resolves a label name. About 25 separate label scans exist in 7 files. Property keys are stored as TEXT on every row and every index entry (about 45 MB of 190 MB at LDBC sf0.1). About 100 SQL sites name the `key` column, and the seek passes match the key literal on the property scan.
+- **Fix:** Make the scan factory resolve a name literal once, and make the seek passes match that one form. Move labels onto it first; this removes the duplicated label scans and is worth doing alone. Then intern property keys (`property-key-interning`) as one central change. An unknown name resolves to no rows, never to an error. Owner decision, 2026-11-25.
+- **Where:** the label scans (`git grep -n "labels"` in `src/compiler/rel/` and `src/rel/passes/`); `src/storage.ts` SCHEMA; `docs/2026-11-25-storage-density-plan.md` S6
+
+#### Intern property keys (`property-key-interning`)
+- **Area:** storage
+- **Reach:** common
+- **Problem:** `vertex_properties.key` and `edge_properties.key` repeat the key TEXT per row and per index entry.
+- **Fix:** Store the key as an integer id in a keys table, as labels do. Expected about 45 MB at LDBC sf0.1. Land it only as one central change.
+- **Depends on:** `name-interning`
+- **Where:** `src/storage.ts` SCHEMA; `docs/2026-11-25-storage-density-plan.md` S6
 
 ### Shared substrate: other
 

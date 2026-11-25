@@ -1,6 +1,8 @@
 # Storage density — make a graph smaller without changing an answer
 
-**Status: IN PROGRESS (2026-11-25). S2, S3, S4 landed. S1, S5, S6 wait on the owner (round 1).**
+**Status: IN PROGRESS (2026-11-25). S2, S3, S4 landed. Owner answers (2026-11-25): S1 go, with a
+`docs/limitations.md` §3 row; S5 dropped; S6 moved to `docs/outstanding-work.md` (`name-interning`, then
+`property-key-interning`). F1, F2, F3 are to be fixed.**
 
 **Source.** The LDBC SNB sf0.1 head-to-head against Relate 1.2.0
 (`docs/2026-11-25-ldbc-findings-plan.md`). The mogwai store for 327,588 vertices and 1,477,965 edges is
@@ -36,7 +38,7 @@ Where the bytes go (`dbstat`, MB):
 
 ### S1. Index only string values in FTS
 
-⏸ **NEEDS HUMAN (round 1, 2026-11-25).** Not built. S1 changes one answer, so it breaks the rule "No
+✅ **OWNER: GO (2026-11-25).** Add the §3 row "`tinker.search` matches string values only". Was: S1 changes one answer, so it breaks the rule "No
 answer changes". See "Needs-human questions" below. Unblocks: the owner's answer to Q1.
 `TextP` applies only to strings, so a non-string value in `property_fts` is dead weight. Write FTS rows
 for string values only, at every insert site (`src/refresh.ts`, `src/storage.ts`, the bulk loader).
@@ -89,7 +91,7 @@ only for a graph that replicates. Expected: about 120 MB on such a graph.
 
 ### S5. FTS on demand, per property key
 
-⏸ **DEFERRED, NEEDS HUMAN (round 1, 2026-11-25).** The scout hit the stop rule. "Ready keys as a compile
+❌ **DROPPED (owner, 2026-11-25).** The scout hit the stop rule. "Ready keys as a compile
 input" cannot work on the Cloudflare edge, because the edge compiles without the store. A one-SQL
 guarded seek/scan union was measured: SQLite still runs the guarded scan (10–20 ms vs 0 ms at 400k
 rows). Prerequisite: **S4b. DO-side plan selection** (below, ordered before S5). See Q2.
@@ -106,7 +108,7 @@ passing the key state in).
 
 ### S6. Intern property keys
 
-⏸ **DEFERRED, NEEDS HUMAN (round 1, 2026-11-25).** The scout gate failed. About 100 SQL sites name the
+➡ **MOVED to `docs/outstanding-work.md` (owner, 2026-11-25):** `name-interning`, then `property-key-interning`. The scout gate failed. About 100 SQL sites name the
 key column. Labels do not resolve once: about 25 separate label scans in 7 files. The seek passes match
 the key literal on the property scan. Prerequisite: **S5b. One interning authority for labels and keys**
 (below, ordered before S6). See Q3.
@@ -130,7 +132,7 @@ resolves to "no rows", never to an error.
 
 S5 and S6 do not share a root cause. Each has its own prerequisite.
 
-### S4b. DO-side plan selection (before S5)
+### S4b. DO-side plan selection (before S5) — DROPPED with S5
 A compiled plan may carry alternative SQL. A small store-side fact chooses one at execute time, on the
 DO. This keeps a store-dependent access path out of the store-free edge compile
 (`src/compiler/plan-cache.ts`). Plan it as its own item and measure it first. S5 then needs: a key-state
