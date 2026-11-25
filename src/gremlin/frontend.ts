@@ -96,17 +96,20 @@ function checked<T>(tree: T, errs: Errors): T {
 //
 // A bounded LRU (`BoundedLru`) so a long-lived Durable Object isolate cannot grow the cache without
 // limit. A tree is weighed by its query's length in UTF-16 code units — the text as the proxy for the
-// tree's size (measured on Bun: a tree costs about 100–300 bytes per unit, the short texts the dearer).
-// So the bounds: 512 entries, 256K units in all (some tens of MB of trees), and one text past 64K units
-// is parsed but not held. That per-entry limit is at least the plan cache's
-// (`PLAN_CACHE_MAX_ENTRY_TEXT_UNITS`), whose weight includes the text: a text whose plan can be held keeps
-// its parse. A refused text costs one parse per compile, never a decline (`compilePlan` parses once).
-export const PARSE_CACHE_MAX_ENTRY_TEXT_UNITS = 64 * 1024;
+// tree's size (measured on Bun: a tree costs about 140–210 bytes per unit, the short texts the dearer).
+// The bounds are chosen for MEMORY only, against an isolate of about 128 MB: 512 entries, 64K units in
+// all (about 9–13 MB of trees), and one text past 4K units (under 1 MB of tree) is parsed but not held.
+// They need not agree with the plan cache's: `compilePlan` returns a plan-cache hit before it parses, so
+// a held plan never reads its tree. A refused text costs one parse per compile, never a decline
+// (`compilePlan` parses once).
+export const PARSE_CACHE_MAX_ENTRY_TEXT_UNITS = 4 * 1024;
+/** The most text the parse cache holds, in UTF-16 code units of query text. */
+export const PARSE_CACHE_MAX_TEXT_UNITS = 64 * 1024;
 /** A parsed query text: the tree every extractor below walks. */
 export type ParsedQuery = ReturnType<typeof parseGremlinUncached>;
 
 const parseCache = new BoundedLru<string, ParsedQuery>({
-  maxEntries: 512, maxWeight: 256 * 1024, maxEntryWeight: PARSE_CACHE_MAX_ENTRY_TEXT_UNITS, weigh: (query) => query.length,
+  maxEntries: 512, maxWeight: PARSE_CACHE_MAX_TEXT_UNITS, maxEntryWeight: PARSE_CACHE_MAX_ENTRY_TEXT_UNITS, weigh: (query) => query.length,
 });
 
 export function parseGremlin(query: string): ParsedQuery {
@@ -143,8 +146,9 @@ function dynamicLiteralValue(node: DateLiteralContext | UuidLiteralContext, para
 
 // A query is VOLATILE when its TEXT holds a dynamic literal (`dynamicLiteral`): its compiled plan holds
 // the value drawn at compile time, so it must not be reused (`PlanCache`). A fact of the text, so it is
-// computed once per parse tree and memoised beside the tree, which the parse cache keeps alive for as
-// long as the text is hot.
+// computed once per parse tree and memoised beside the tree. A tree the parse cache does not hold is
+// fresh per compile, so its entry is recomputed then and dropped with the tree (a `WeakMap`); it is never
+// read stale.
 const volatileTrees = new WeakMap<object, boolean>();
 
 export function isVolatileQuery(tree: ParsedQuery): boolean {

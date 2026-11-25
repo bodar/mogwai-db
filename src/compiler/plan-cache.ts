@@ -26,15 +26,14 @@ import { BoundedLru } from '../bounded-lru.ts';
 // latency lane, polling, a dashboard). One text sent with varying parameters gets no hit; that is the
 // deferred "pin-on-read parameters" item in `docs/2026-11-25-ldbc-findings-plan.md`.
 
-/** The most entries one app scope holds. The same bound as the parse cache (`parseGremlin`). */
+/** The most entries one app scope holds. */
 export const PLAN_CACHE_MAX_ENTRIES = 512;
 /** The most text one app scope holds, in UTF-16 CODE UNITS of held text (`freezeAndMeasure`; about two
  *  bytes each) — a Durable Object isolate has about 128 MB. */
 export const PLAN_CACHE_MAX_TEXT_UNITS = 8 * 1024 * 1024;
 /** One plan past this many code units of held text (its key and SQL) is not cached: a large batch write
  *  (measured: 100 `addV()`s render about 280K units) would otherwise evict every hot read for no likely
- *  hit. The same idea as `PLAN_CACHE_MAX_PARAM_KEY`; never a decline. The parse cache's per-entry limit is
- *  at least this, so a text whose plan can be held keeps its parse (`PARSE_CACHE_MAX_ENTRY_TEXT_UNITS`). */
+ *  hit. The same idea as `PLAN_CACHE_MAX_PARAM_KEY`; never a decline. */
 export const PLAN_CACHE_MAX_ENTRY_TEXT_UNITS = 64 * 1024;
 /** A parameter spelling past this is not cached: it would pin its size in the key for no likely hit. */
 export const PLAN_CACHE_MAX_PARAM_KEY = 4096;

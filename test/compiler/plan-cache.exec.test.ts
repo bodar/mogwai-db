@@ -4,7 +4,7 @@
 // is in the key, and each request the key cannot make safe is never cached.
 import { describe, expect, test } from 'bun:test';
 import { compilePlan } from '../../src/compiler/compiler.ts';
-import { PlanCache, planCacheKey, PLAN_CACHE_MAX_ENTRY_TEXT_UNITS } from '../../src/compiler/plan-cache.ts';
+import { PlanCache, planCacheKey } from '../../src/compiler/plan-cache.ts';
 import { parseCacheStats, PARSE_CACHE_MAX_ENTRY_TEXT_UNITS } from '../../src/gremlin/frontend.ts';
 import { createAppScope, type AppScope } from '../../src/scopes.ts';
 import { standardRegistry } from '../../src/services/standard.ts';
@@ -253,8 +253,17 @@ describe('the per-entry limit', () => {
 });
 
 describe('the parse cache', () => {
-  test("its per-entry limit is at least the plan cache's, so a text whose plan is held keeps its parse", () => {
-    expect(PARSE_CACHE_MAX_ENTRY_TEXT_UNITS).toBeGreaterThanOrEqual(PLAN_CACHE_MAX_ENTRY_TEXT_UNITS);
+  // So the parse cache's bounds need not cover what the plan cache holds: a held plan never reads its tree.
+  test('a plan-cache hit never parses', () => {
+    const app = scope();
+    const q = "g.V().has('name','plan-hit-no-parse').count()";
+    compilePlan(q, {}, { app });
+    const before = parseCacheStats();
+    compilePlan(q, {}, { app });
+    const after = parseCacheStats();
+    expect(app.planCache.stats().hits).toBe(1);
+    expect(after.hits).toBe(before.hits);
+    expect(after.misses).toBe(before.misses);
   });
 
   test('a repeated text is a hit', () => {
