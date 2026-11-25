@@ -1,8 +1,7 @@
 import { test, expect, describe } from 'bun:test';
+import { replicatingManager, replicatingStore } from './support/replicating.ts';
 import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
-import { standardRegistry } from '../src/services/standard.ts';
 import { GraphStore } from '../src/storage.ts';
-import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { loadGraphson, writeGraphson } from '../src/formats/graphson.ts';
 import { loadBulk } from '../src/bulk.ts';
 import { computeRev, descendsFrom, revWins } from '../src/rev.ts';
@@ -39,7 +38,7 @@ describe('rev — the rev-tree (Phase 4a)', () => {
 // user-visible yet, so we read it off the store.
 
 interface Rev { gen: number; hash: string }
-const mgr = () => new BunGraphManager(undefined, standardRegistry);
+const mgr = replicatingManager;
 const revs = (m: BunGraphManager, id: string, table: 'nodes' | 'edges'): Rev[] =>
   m.storeOf(id).query<{ rev: string | null }>(`SELECT json(rev) AS rev FROM ${table} ORDER BY id`)
     .map((r) => JSON.parse(r.rev!) as Rev);
@@ -165,7 +164,7 @@ describe('rev — the post-write refresh (compiled path)', () => {
 // round-trip PRESERVES it (idempotent replay); a rev-less load COMPUTES one via the single refresh
 // authority, so it converges with the compiled path for identical content.
 describe('rev — the bulk/format path', () => {
-  const store = (): GraphStore => new GraphStore(new BunSqlite(':memory:'));
+  const store = replicatingStore;
   const storeRevs = (s: GraphStore, table: 'nodes' | 'edges'): Rev[] =>
     s.query<{ rev: string | null }>(`SELECT json(rev) AS rev FROM ${table} ORDER BY id`).map((r) => JSON.parse(r.rev!) as Rev);
 

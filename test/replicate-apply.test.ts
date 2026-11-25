@@ -1,6 +1,6 @@
 import { test, expect, describe } from 'bun:test';
+import { replicatingStore } from './support/replicating.ts';
 import { GraphStore } from '../src/storage.ts';
-import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { applyChanges, type ReplVertex, type ReplEdge } from '../src/replicate.ts';
 
 // Phase 3 step 3a (docs/archive/2026-09-02-replication-and-http-interop-plan.md §4·5, §6·1/§6·2): applyChanges
@@ -8,7 +8,7 @@ import { applyChanges, type ReplVertex, type ReplEdge } from '../src/replicate.t
 // known gid → its rowid, content overwritten; edge endpoints resolved gid→rowid; a delete removes the
 // element and tombstones it. This is the write half the peer protocol (3b) and the replicator (3c) drive.
 
-const store = () => new GraphStore(new BunSqlite(':memory:'));
+const store = replicatingStore;
 const rev = (gen: number, hash: string) => JSON.stringify({ gen, hash });
 const A = 'A'.repeat(32), B = 'B'.repeat(32), C = 'C'.repeat(32);
 const v = (gid: string, r: string, labels: string[], props: Record<string, unknown> = {}): ReplVertex =>

@@ -1,6 +1,5 @@
 import { test, expect, describe } from 'bun:test';
-import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
-import { standardRegistry } from '../src/services/standard.ts';
+import { replicatingManager } from './support/replicating.ts';
 import { bulkGet, applyWire, conflictsFor } from '../src/replicate.ts';
 import type { GraphStore } from '../src/storage.ts';
 
@@ -9,7 +8,7 @@ import type { GraphStore } from '../src/storage.ts';
 // conflict — winner (not-deleted > LOWER gid) keeps the uid, the loser's is shadowed + surfaced, both
 // elements survive, deterministic ⇒ order-independent. A uid is unique per graph, never global.
 
-const mgr = () => new BunGraphManager(undefined, standardRegistry);
+const mgr = replicatingManager;
 const soleGid = (s: GraphStore) => s.query<{ gid: string }>('SELECT hex(gid) AS gid FROM nodes ORDER BY id')[0]!.gid;
 const uidOf = (s: GraphStore, gid: string) => s.query<{ uid: string | null }>('SELECT uid FROM nodes WHERE hex(gid) = ?', [gid])[0]?.uid;
 const count = (s: GraphStore) => s.query<{ n: number }>('SELECT count(*) AS n FROM nodes')[0]!.n;

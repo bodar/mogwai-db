@@ -19,9 +19,10 @@
 
 import type { GraphStore } from './storage.ts';
 import { loadBulk, type BulkEdge, type BulkProperty, type BulkVertex } from './bulk.ts';
-import { deleteMembers, insertSet } from './setwrite.ts';
+import { deleteMembers, insertSet, updateSet } from './setwrite.ts';
+import { mintGid } from './uuid.ts';
 import { execute, identifier, q, value } from './sql/kernel/q.ts';
-import { refreshElements } from './refresh.ts';
+import { exposeIdentity, refreshElements } from './refresh.ts';
 import { labelsForOwners, vertexPropsForOwners, edgePropsForOwners } from './formats/drain.ts';
 import { vertexPropsJson, edgePropsJson, vertexProperties, edgeProperties } from './formats/graphson.ts';
 import { changesFeed, revsDiff } from './manager.ts';
@@ -154,7 +155,13 @@ function applyUids(store: GraphStore, table: 'nodes' | 'edges', items: readonly 
   for (const it of items) {
     if (it.uid == null) continue;
     const gid = upper(it.gid);
-    const holder = execute<{ gid: string }>(store, q`SELECT hex(gid) AS gid FROM ${t} WHERE uid = ${value(it.uid)}`)[0];
+    const holder = execute<{ id: number; gid: string }>(store, q`SELECT id, hex(gid) AS gid FROM ${t} WHERE uid = ${value(it.uid)}`)[0];
+    // A holder the backfill has not reached has no gid yet: mint it on demand, so the clock-free order
+    // below compares two real identities.
+    if (holder && !holder.gid) {
+      holder.gid = mintGid().toUpperCase();
+      execute(store, q`UPDATE ${t} SET gid = unhex(${value(holder.gid)}) WHERE id = ${value(holder.id)}`);
+    }
     if (holder && upper(holder.gid) !== gid) {
       if (gid < upper(holder.gid)) { // incoming wins the uid (lower gid)
         setUid(null, upper(holder.gid)); // strip loser FIRST (UNIQUE)
@@ -416,6 +423,7 @@ export function applyWire(store: GraphStore, ws: WireChangeSet): void {
   // ONE atomic unit, as `applyChanges`: classifying shadows conflict losers (a write) before the apply,
   // so a change set the apply then refuses must not leave those shadows behind it.
   store.atomically(() => {
+    exposeIdentity(store, 0); // a replication target keeps its metadata from now on
     const vertices = classifyWire(store, 'nodes', 'vertex', ws.vertices ?? [],
       (v) => ({ gid: v.gid, rev: v.rev, uid: v.uid, labels: v.labels, properties: reminted(vertexProperties(v.properties)) }));
     const edges = classifyWire(store, 'edges', 'edge', ws.edges ?? [],
@@ -484,11 +492,17 @@ export function checkpoint(store: GraphStore, replicationId: string, seq?: numbe
  * them to gids via one `json_each` bind (type-safe by `COALESCE`'s NONE affinity, as `changesFeed` does).
  */
 export function matchSetGids(store: GraphStore, executor: Executor, filter: string): string[] {
+  exposeIdentity(store, 0);
   const ids = executor.filterVertexIds(filter);
   if (!ids.length) return [];
-  return store.query<{ gid: string }>(
-    'SELECT hex(gid) AS gid FROM nodes WHERE gid IS NOT NULL AND COALESCE(uid, id) IN (SELECT value FROM json_each(?))',
-    [JSON.stringify(ids)]).map((r) => r.gid);
+  const rows = store.query<{ id: number; gid: string }>(
+    'SELECT id, hex(gid) AS gid FROM nodes WHERE COALESCE(uid, id) IN (SELECT value FROM json_each(?))',
+    [JSON.stringify(ids)]);
+  // A matched vertex the backfill has not reached yet has no gid: mint it now (one set-based write), so the
+  // match set is never silently empty. Its rev and seq follow from the backfill.
+  const minted = rows.filter((r) => !r.gid).map((r) => [r.id, (r.gid = mintGid())]);
+  updateSet(store, 'nodes', 'id', [{ name: 'gid', type: 'blob', blob: true }], minted);
+  return rows.map((r) => r.gid.toUpperCase());
 }
 
 /**
@@ -700,9 +714,9 @@ export async function runReplicationPass(
   if (loserRefs.length) { await target.bulkDocs(await source.bulkGet(loserRefs)); written += loserRefs.length; }
 
   await cp.write(feed.last_seq);
-  // A full page (`limit` rows) means the feed was truncated, so another page likely remains; a short page
-  // means the source is drained through `last_seq`.
-  const more = limit != null && feed.results.length >= limit;
+  // A full page (`limit` rows) means the feed was truncated, so another page likely remains; so does a
+  // source still backfilling (`truncated`). Otherwise the source is drained through `last_seq`.
+  const more = limit != null && (feed.results.length >= limit || feed.truncated === true);
   return { read: feed.results.length, written, deleted: deletes.length, last_seq: feed.last_seq, batches: 1, more };
 }
 

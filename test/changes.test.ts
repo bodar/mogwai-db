@@ -1,6 +1,5 @@
 import { test, expect, describe } from 'bun:test';
-import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
-import { standardRegistry } from '../src/services/standard.ts';
+import { replicatingManager } from './support/replicating.ts';
 import { makeRouter } from '../src/router.ts';
 import type { ChangesFeed } from '../src/api.ts';
 
@@ -10,7 +9,7 @@ import type { ChangesFeed } from '../src/api.ts';
 // state; the feed is current-state-sized (moved, not appended); a delete rides as deleted:true.
 
 const setup = () => {
-  const mgr = new BunGraphManager(undefined, standardRegistry);
+  const mgr = replicatingManager();
   const http = makeRouter(mgr);
   const feed = async (since = 0): Promise<ChangesFeed> => {
     const res = await http(new Request(`http://x/gremlin/g/_changes?since=${since}`));

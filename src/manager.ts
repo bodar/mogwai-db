@@ -11,6 +11,7 @@
 // So no verb 404s on a well-formed id — GET/POST auto-create an empty graph,
 // PUT is create-if-absent, DELETE is a no-op when there's nothing to remove.
 import type { GraphStore } from './storage.ts';
+import { exposeIdentity } from './refresh.ts';
 import type { ChangesFeed, ChangeRow, GraphInfo, RevsDiffRequest, RevsDiffResponse, WireRev } from './api.ts';
 // The GraphManager / GraphInfo / Executor seams now live in the API surface (src/api.ts).
 // Re-exported here so existing `import { GraphManager } from './manager.ts'` sites keep working.
@@ -43,6 +44,10 @@ export function changesFeed(store: GraphStore, since: number, limit?: number, ma
   // DISTINCT, strictly-monotonic seq (assigned `base + i + 1` from `nextSeqBlock`, refresh.ts), so no two
   // rows share a boundary seq — a `LIMIT` can never split a seq-group and drop a row.
   const paged = limit != null && limit > 0;
+  // The feed exposes identity: turn replication metadata on, and backfill one page of the elements written
+  // before that (all of them, unpaged). While that backfill is incomplete the feed reports `truncated`, so
+  // a replicator pulls again rather than stopping at a short page.
+  const backfilled = exposeIdentity(store, paged ? limit : undefined);
   // FILTERED replication (filtered-replication-plan F1): when `match` is present, the live feed is
   // restricted to the matched vertices plus their 1-HOP EDGE-CLOSURE — the matched vertices, the edges
   // incident to them, and the OTHER endpoint each such edge reaches. That is an edge-closed subgraph,
@@ -94,7 +99,7 @@ export function changesFeed(store: GraphStore, since: number, limit?: number, ma
   // (a re-pull from there reads nothing, even if the highest element seq is below the counter).
   const truncated = paged && rows.length === limit;
   const last_seq = truncated ? rows[rows.length - 1]!.seq : store.nextSeqBlock(0);
-  return { results, last_seq };
+  return { results, last_seq, ...(truncated || !backfilled ? { truncated: true as const } : {}) };
 }
 
 /** gid → its shadowed conflict-LOSER leaf revs (4b-2), so the feed advertises them (`?style=all_docs`).
@@ -144,6 +149,7 @@ const fullRev = (raw: string | null): WireRev | null => {
  * (`hex(gid)` on the column would scan) — ONE JSON bind, never a data-sized placeholder list (§6·2).
  */
 export function revsDiff(store: GraphStore, request: RevsDiffRequest): RevsDiffResponse {
+  exposeIdentity(store, 0); // a replication target keeps its metadata from now on
   const gids = Object.keys(request).map((g) => g.toUpperCase());
   if (!gids.length) return {};
   const gidsJson = JSON.stringify(gids);

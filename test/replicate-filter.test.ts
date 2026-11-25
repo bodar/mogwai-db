@@ -1,4 +1,5 @@
 import { test, expect, describe } from 'bun:test';
+import { replicatingManager } from './support/replicating.ts';
 import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { standardRegistry } from '../src/services/standard.ts';
 import { changesFeed } from '../src/manager.ts';
@@ -24,7 +25,7 @@ const TASK_GRAPH =
 // reach, and those edges), still shipping ALL tombstones. Never transitive, valid by construction.
 
 const setup = async () => {
-  const mgr = new BunGraphManager(undefined, standardRegistry);
+  const mgr = replicatingManager();
   const exec = mgr.executor('g');
   await exec.framedAsync(TASK_GRAPH, {});
   return { mgr, exec, store: mgr.storeOf('g') };

@@ -284,6 +284,9 @@ export interface ChangeRow {
 export interface ChangesFeed {
   readonly results: readonly ChangeRow[];
   readonly last_seq: number;
+  /** More remains after this page even if it is short: the source is still backfilling the metadata of
+   *  elements written before it first replicated (`src/refresh.ts`), so a replicator must pull again. */
+  readonly truncated?: true;
 }
 
 /** A rev on the wire (`{gen, hash}`), as the feed and diff carry it. `ids` (the stemmed ancestry) is

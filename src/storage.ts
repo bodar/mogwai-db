@@ -80,8 +80,9 @@ const SCHEMA = [
   // stays the fast join key. `rev` is a JSONB `{gen, hash}` recomputed on every mutation (the
   // touch-rev-on-write barrier). Both are dedicated columns, not properties: a property row would
   // store the key string on EVERY element plus a second index (double-digit GB at 10^8), and it is
-  // more CouchDB-faithful. Nullable so a graph created before this column, and an element not yet
-  // touched by the rev barrier, are representable.
+  // more CouchDB-faithful. Nullable: all three (gid, rev, seq) are computed only once the graph first
+  // exposes identity (a replication call or a GraphSON export, `src/refresh.ts`), so a graph that never
+  // does stores none of them, and an element written before that waits for the backfill.
   // `dirty` is the UNIFORM recompute marker for the derived replication columns (gid, rev, seq): a row
   // with `dirty != 0` needs the post-write refresh (`src/refresh.ts`) to (re)compute them, and the value
   // is a small enum telling it HOW — 1 = a fresh CREATE (rev null → compute `{gen:1, …}`), 2 = a MUTATION
@@ -186,10 +187,18 @@ const SCHEMA = [
   `CREATE UNIQUE INDEX IF NOT EXISTS nodes_uid ON nodes(uid) WHERE uid IS NOT NULL`,
   `CREATE UNIQUE INDEX IF NOT EXISTS edges_uid ON edges(uid) WHERE uid IS NOT NULL`,
   // Global identity is UNIQUE per graph and indexed for the gid→rowid resolution replication/merge
-  // does (§6·1). A UNIQUE index over a NULLABLE column admits many NULLs in SQLite, so elements not
-  // yet carrying a gid (a pre-column graph, an untouched element) coexist until minted.
-  `CREATE UNIQUE INDEX IF NOT EXISTS nodes_gid ON nodes(gid)`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS edges_gid ON edges(gid)`,
+  // does (§6·1). PARTIAL: a graph that never replicated or exported holds no gid at all (`src/refresh.ts`,
+  // replication on demand), so the index holds only the elements that have one. A `gid = x` or
+  // `gid IN (SELECT unhex(value) …)` lookup implies `gid IS NOT NULL`, so it still seeks.
+  `CREATE UNIQUE INDEX IF NOT EXISTS nodes_gid ON nodes(gid) WHERE gid IS NOT NULL`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS edges_gid ON edges(gid) WHERE gid IS NOT NULL`,
+  // Replication metadata ON DEMAND (`src/refresh.ts`): one row. `enabled` turns on at the first call that
+  // exposes identity (a replication endpoint, a GraphSON export); until then a write computes no gid, rev
+  // or seq. `backfill_kind`/`backfill_after` is the resumable rowid cursor of the backfill that gives the
+  // pre-enable elements their metadata ('vertex', then 'edge', then 'done').
+  `CREATE TABLE IF NOT EXISTS replication(
+     enabled INTEGER NOT NULL, backfill_kind TEXT NOT NULL, backfill_after INTEGER NOT NULL)`,
+  `INSERT OR IGNORE INTO replication(rowid, enabled, backfill_kind, backfill_after) VALUES (1, 0, 'vertex', 0)`,
   // PARTIAL indexes over ONLY the dirty rows — the recompute sweep (`WHERE dirty`) is index-served and
   // the index is empty once refreshed, so a write that touched nothing pays no scan.
   `CREATE INDEX IF NOT EXISTS nodes_dirty ON nodes(id) WHERE dirty`,

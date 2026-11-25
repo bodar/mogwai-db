@@ -1,4 +1,5 @@
 import { test, expect, describe, beforeAll } from 'bun:test';
+import { replicatingManager, replicatingStore } from './support/replicating.ts';
 import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
@@ -80,7 +81,7 @@ describe('gid — the bulk/format path', () => {
     const src = freshStore();
     seed(src);
     const dump = writeCsv(src);
-    const round = freshStore();
+    const round = replicatingStore(); // on, so the load mints (off, CSV leaves gid NULL until exposed)
     loadCsv(round, dump.vertices);
     loadCsv(round, dump.edges);
     const srcV = gids(src, 'nodes'), roundV = gids(round, 'nodes');
@@ -91,7 +92,7 @@ describe('gid — the bulk/format path', () => {
 });
 
 describe('gid — the compiled write path (post-write refresh)', () => {
-  const mgr = () => new BunGraphManager(undefined, standardRegistry);
+  const mgr = replicatingManager;
   const nodeGids = (m: BunGraphManager, id: string) =>
     m.storeOf(id).query<{ id: number; gid: string | null }>('SELECT id, hex(gid) AS gid FROM nodes ORDER BY id');
   const edgeGids = (m: BunGraphManager, id: string) =>

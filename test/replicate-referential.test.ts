@@ -1,4 +1,5 @@
 import { test, expect, describe } from 'bun:test';
+import { replicatingManager } from './support/replicating.ts';
 import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
 import { standardRegistry } from '../src/services/standard.ts';
 import { applyChanges, applyWire, bulkGet, conflictsFor } from '../src/replicate.ts';
@@ -10,7 +11,7 @@ import type { GraphStore } from '../src/storage.ts';
 // surfaced. A live version likewise supersedes a local tombstone (not-deleted beats deleted). Neither
 // rejects the delete nor drops the edge; the live graph stays consistent by construction.
 
-const mgr = () => new BunGraphManager(undefined, standardRegistry);
+const mgr = replicatingManager;
 const n = (s: GraphStore, sql: string, ...binds: unknown[]) => s.query<{ n: number }>(sql, binds)[0]!.n;
 const gidOf = (s: GraphStore, name: string) =>
   s.query<{ gid: string }>("SELECT hex(n.gid) AS gid FROM nodes n JOIN vertex_properties p ON p.node = n.id WHERE p.key = 'name' AND p.value = ?", [name])[0]!.gid;

@@ -214,7 +214,9 @@ describe('a walk condition at a hub costs O(1) per frontier row', () => {
   // rewritten. Each answers as the same walk at the root does (the per-host counts sum to the root's count, and the
   // root's own collapse never uses the pass), with the rewrite and without it.
   test('magic: a host holding an unordered pick is read once, and answers as the root does', () => {
-    const unordered = "g.V().limit(50).out().local(out().where(__.in().has('age',gt(30))).count()).sum()";
+    // `hasLabel('person')` keeps the pick unordered but non-empty: a bare `V().limit(50)` may pick 50 hubs and
+    // leaves (no out-edges) in the planner's scan order, and a sum over nothing emits no row.
+    const unordered = "g.V().hasLabel('person').limit(50).out().local(out().where(__.in().has('age',gt(30))).count()).sum()";
     const ordered = "g.V().order().by(id,desc).limit(50).out().local(out().where(__.in().has('age',gt(30))).count()).sum()";
     expect(read(unordered).sql).toMatch(/^WITH (\w+) AS MATERIALIZED \(.*LIMIT 50\).*FROM \1 /);
     expect(read(ordered).sql).toContain('AS MATERIALIZED');

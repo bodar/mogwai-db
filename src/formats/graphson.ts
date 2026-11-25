@@ -30,6 +30,7 @@
 // vertex's own entry).
 import { BulkLoader, loadStreaming, type BulkEdge, type BulkOptions, type BulkProperty, type BulkStats, type BulkVertex } from '../bulk.ts';
 import type { GraphStore } from '../storage.ts';
+import { exposeIdentity } from '../refresh.ts';
 import type { IoSink } from '../iostore.ts';
 import { dateOfMillis } from '../gremlin/coerce.ts';
 import {
@@ -504,6 +505,10 @@ function incidenceJson(
  * rather than only on a machine that can hold the graph twice.
  */
 export function* graphsonLines(store: GraphStore, pageSize = 200): Generator<string> {
+  // A typed dump carries identity out of the graph, so it turns replication metadata on and backfills it
+  // first: a replica seeded from an identity-less dump would duplicate every element on its first
+  // replication. O(N), as the export already is.
+  exposeIdentity(store);
   // `hex(gid)` so the 16-byte BLOB rides as a hex string on both runtimes (a raw BLOB read diverges);
   // `json(rev)` so the JSONB rev blob rides as its `{gen, hash}` TEXT, nested as an object on the wire.
   for (const page of keysetPages<{ id: number; uid: string | null; gid: string | null; rev: string | null }>(store, 'nodes', ['id', 'uid', q`hex(gid) AS gid`, q`json(rev) AS rev`], pageSize)) {

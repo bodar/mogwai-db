@@ -1,8 +1,7 @@
 import { test, expect, describe } from 'bun:test';
+import { replicatingManager, replicatingStore } from './support/replicating.ts';
 import { BunGraphManager } from '../src/bun/BunGraphManager.ts';
-import { standardRegistry } from '../src/services/standard.ts';
 import { GraphStore } from '../src/storage.ts';
-import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { loadBulk } from '../src/bulk.ts';
 
 // Phase 2 step 2a (docs/archive/2026-09-02-replication-and-http-interop-plan.md §5·2): a per-element `seq`, a
@@ -11,7 +10,7 @@ import { loadBulk } from '../src/bulk.ts';
 // bumps it, a mutation MOVES the element's entry forward, an untouched sibling keeps its seq, and it stays
 // current-state-sized (one row per element, no append-only growth).
 
-const mgr = () => new BunGraphManager(undefined, standardRegistry);
+const mgr = replicatingManager;
 const seqs = (m: BunGraphManager, id: string, table: 'nodes' | 'edges'): number[] =>
   m.storeOf(id).query<{ seq: number | null }>(`SELECT seq FROM ${table} ORDER BY id`).map((r) => r.seq!);
 const counter = (m: BunGraphManager, id: string): number =>
@@ -71,7 +70,7 @@ describe('seq — the by-sequence cursor (compiled path)', () => {
 });
 
 describe('seq — the bulk/format path', () => {
-  const store = (): GraphStore => new GraphStore(new BunSqlite(':memory:'));
+  const store = replicatingStore;
   const storeSeqs = (s: GraphStore, table: 'nodes' | 'edges'): number[] =>
     s.query<{ seq: number | null }>(`SELECT seq FROM ${table} ORDER BY id`).map((r) => r.seq!);
 

@@ -75,8 +75,7 @@ export interface BulkVertex {
   readonly labels: readonly string[];
   readonly properties?: readonly BulkProperty[];
   /** Global identity (§6·1), a 32-char hex uuid_v7. Present → PRESERVED verbatim (a replicated element
-   *  keeps its gid across peers); absent → a fresh one is minted at load. Same preserve-or-mint policy
-   *  the document `id` follows. */
+   *  keeps its gid across peers); absent → the refresh mints one once replication is on (`refresh.ts`). */
   readonly gid?: string | null;
   /** The rev (§5·1) as JSON TEXT (`{"gen":N,"hash":"…"}`). Present → PRESERVED verbatim so an `io()`
    *  round-trip (and replication replay) is idempotent — the element keeps its generation and lineage;
@@ -198,7 +197,7 @@ export class BulkLoader {
    *  vertices land. `uid` is carried rather than re-derived: it is `idOf`'s output, so it already
    *  reflects the id POLICY (under `'remap'` a numeric source id becomes a uid, under `'renumber'`
    *  nothing does), which a second `typeof edge.id === 'string'` test at flush time cannot know. */
-  private pendingEdges: Array<{ edge: BulkEdge; id: number; uid: string | null; gid: string }> = [];
+  private pendingEdges: Array<{ edge: BulkEdge; id: number; uid: string | null; gid: string | null }> = [];
   /** Under `onCollision: 'replace'` the elements are buffered RAW and resolved at `flush`: a rowid
    *  cannot be assigned until a batched read has decided which keys already exist, and an in-batch
    *  duplicate must collapse to its LAST definition before anything is materialized. The append modes
@@ -275,14 +274,14 @@ export class BulkLoader {
    *  false for a REPLACE match, whose `nodes` row already exists and is kept (rowid + edges survive) —
    *  only its owned property rows are wiped and re-landed. */
   private bufferVertex(rowid: number, uid: string | null, v: BulkVertex, pushRow: boolean): void {
-    // gid is minted only for a fresh row; a REPLACE match keeps its existing gid (immutable identity),
-    // so no gid is recomputed when the `nodes` row is not re-pushed. gid is preserve-or-mint INLINE, so
-    // it is always present; `rev` is preserve-or-COMPUTE: an ABSENT rev lands NULL born dirty=1 (a
+    // A carried gid lands; an absent one is minted by the refresh, and only once replication is on
+    // (`refresh.ts`). A REPLACE match keeps its existing gid (immutable identity), since its `nodes` row
+    // is not re-pushed. `rev` is preserve-or-COMPUTE: an ABSENT rev lands NULL born dirty=1 (a
     // CREATE), so `flush`'s `refreshElements` computes `{gen:1, hash}` from content — the SAME authority
     // the compiled path uses, so identical content converges (§5·1). A CARRIED rev lands verbatim born
     // dirty=3 (PRESERVE): the refresh keeps the rev but still assigns a fresh LOCAL seq (§5·2 — a load is
     // a local write event, so the element must enter this graph's `_changes` feed).
-    if (pushRow) this.nodeRows.push([rowid, uid, v.gid ?? mintGid(), v.rev ?? null, v.rev == null ? 1 : 3]);
+    if (pushRow) this.nodeRows.push([rowid, uid, v.gid ?? null, v.rev ?? null, v.rev == null ? 1 : 3]);
     if (v.id !== null && v.id !== undefined) this.vertexIds.set(String(v.id), rowid);
     for (const name of new Set(v.labels)) this.vertexLabelRows.push([rowid, this.labelId(name)]);
     for (const p of v.properties ?? [])
@@ -304,11 +303,10 @@ export class BulkLoader {
   private bufferEdge(rowid: number, uid: string | null, e: BulkEdge): void {
     const src = this.vertexIds.get(String(e.src));
     const tgt = this.vertexIds.get(String(e.tgt));
-    // Mint the gid ONCE here (not at flush) so the deferred path carries the same value it would land.
-    // `rev` is preserve-or-compute exactly as a vertex's (see `bufferVertex`): an absent rev born dirty=1
+    // A carried gid lands; an absent one is the refresh's to mint, as a vertex's. `rev` is preserve-or-compute exactly as a vertex's (see `bufferVertex`): an absent rev born dirty=1
     // (a CREATE, refresh computes), a carried one born dirty=3 (PRESERVE, refresh keeps the rev + assigns
     // a local seq). The refresh reads the endpoints' minted gids, so it runs AFTER the vertices' (§6·5).
-    const gid = e.gid ?? mintGid();
+    const gid = e.gid ?? null;
     const dirty = e.rev == null ? 1 : 3;
     if (src !== undefined && tgt !== undefined) this.edgeRows.push([rowid, uid, src, this.labelId(e.label), tgt, gid, e.rev ?? null, dirty]);
     else this.pendingEdges.push({ edge: e, id: rowid, uid, gid });

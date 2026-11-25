@@ -22,6 +22,11 @@
 // it is a local write event). A PRESERVE row needs no content, so only 1/2 rows read labels/properties.
 // Vertices are refreshed BEFORE edges, so an edge's endpoint gids are already minted when its rev (which
 // references them, §6·5) is computed, and a write's node seqs precede its edge seqs (§6·2 order).
+//
+// ON DEMAND (docs/2026-11-25-storage-density-plan.md S3): all of the above runs only once the graph has
+// first EXPOSED identity — a replication call or a GraphSON export (`exposeIdentity`). Until then a write
+// mints no gid, hashes no content and takes no seq (`refreshOff`), so a graph that never replicates or
+// exports stores none of them. Enabling backfills the earlier elements in resumable rowid pages.
 
 import type { GraphStore } from './storage.ts';
 import { mintGid } from './uuid.ts';
@@ -45,41 +50,93 @@ const nextRev = (dirty: number, rev: string | null, content: string): Rev =>
   dirty === PRESERVE ? parseRev(rev)! : computeRev(parseRev(rev), content);
 const PRESERVE = 3;
 
-/** Refresh dirty vertices: mint gid where absent, (re)compute or keep rev per the dirty enum, assign a
- *  fresh local seq, clear dirty — all in one set-based statement. A no-op (one index-served read) when
- *  nothing is dirty. Only rows that need a rev (dirty 1/2) read labels/properties. */
-function refreshNodes(store: GraphStore): void {
-  const rows = store.query<{ id: number; gid: string; rev: string | null; dirty: number }>(
-    'SELECT id, hex(gid) AS gid, json(rev) AS rev, dirty FROM nodes WHERE dirty ORDER BY id');
-  if (!rows.length) return;
-  const contentIds = rows.filter((r) => r.dirty !== PRESERVE).map((r) => r.id);
-  const labels = labelsForOwners(store, contentIds);
-  const props = vertexPropsForOwners(store, contentIds, true); // collection values as json() TEXT, so JSON.stringify is stable
-  const base = store.nextSeqBlock(rows.length);
-  const updates = rows.map((r, i) => {
-    const content = r.dirty === PRESERVE ? '' : vertexContent((labels.get(r.id) ?? []).map((l) => l.name), props.get(r.id) ?? []);
-    return [r.id, r.gid || mintGid(), nextRev(r.dirty, r.rev, content), base + i + 1, 0];
-  });
-  updateSet(store, 'nodes', 'id', [GID, REV, SEQ, DIRTY], updates);
+type Elem = 'node' | 'edge';
+interface ElemRow { id: number; gid: string; rev: string | null; dirty: number; label?: string; srcgid?: string; tgtgid?: string }
+
+/** The rows to recompute, as `x` (a vertex, or an edge joined to its label and endpoint gids). `dirty` is
+ *  the enum expression: the stored flag for a refresh, derived from `rev` for a backfill page. */
+function selectRows(store: GraphStore, elem: Elem, where: string, dirty: string, tail = '', binds: unknown[] = []): ElemRow[] {
+  return store.query<ElemRow>(elem === 'node'
+    ? `SELECT x.id AS id, hex(x.gid) AS gid, json(x.rev) AS rev, ${dirty} AS dirty FROM nodes x WHERE ${where} ORDER BY x.id ${tail}`
+    : `SELECT x.id AS id, hex(x.gid) AS gid, json(x.rev) AS rev, ${dirty} AS dirty, l.name AS label,
+              hex(sv.gid) AS srcgid, hex(tv.gid) AS tgtgid
+       FROM edges x JOIN labels l ON l.id = x.label JOIN nodes sv ON sv.id = x.src JOIN nodes tv ON tv.id = x.tgt
+       WHERE ${where} ORDER BY x.id ${tail}`, binds);
 }
 
-/** Refresh dirty edges: mint gid where absent, (re)compute or keep rev, assign a fresh local seq, clear
- *  dirty. Runs AFTER `refreshNodes`, so both endpoint gids are set and edge seqs follow node seqs. */
-function refreshEdges(store: GraphStore): void {
-  const rows = store.query<{ id: number; gid: string; rev: string | null; dirty: number; label: string; srcgid: string; tgtgid: string }>(
-    `SELECT e.id AS id, hex(e.gid) AS gid, json(e.rev) AS rev, e.dirty AS dirty, l.name AS label,
-            hex(sv.gid) AS srcgid, hex(tv.gid) AS tgtgid
-     FROM edges e JOIN labels l ON l.id = e.label
-       JOIN nodes sv ON sv.id = e.src JOIN nodes tv ON tv.id = e.tgt
-     WHERE e.dirty ORDER BY e.id`);
+/** Recompute `rows` in ONE `updateSet`. `full` (replication on): mint a missing gid, compute or keep the
+ *  rev per the dirty enum, assign a fresh local seq, clear dirty. Not `full` (off): keep an EXISTING rev
+ *  current — the caller selects only rows that have one — with no gid mint and no seq. Only a row whose
+ *  rev is computed (not PRESERVE) reads labels/properties. */
+function recompute(store: GraphStore, elem: Elem, rows: readonly ElemRow[], full: boolean): void {
   if (!rows.length) return;
-  const props = edgePropsForOwners(store, rows.filter((r) => r.dirty !== PRESERVE).map((r) => r.id), true);
+  const contentIds = rows.filter((r) => r.dirty !== PRESERVE).map((r) => r.id);
+  // collection values as json() TEXT, so JSON.stringify is stable
+  const props = elem === 'node' ? vertexPropsForOwners(store, contentIds, true) : edgePropsForOwners(store, contentIds, true);
+  const labels = elem === 'node' ? labelsForOwners(store, contentIds) : undefined;
+  const rev = (r: ElemRow): Rev => nextRev(r.dirty, r.rev, r.dirty === PRESERVE ? ''
+    : labels ? vertexContent((labels.get(r.id) ?? []).map((l) => l.name), props.get(r.id) ?? [])
+    : edgeContent(r.label!, r.srcgid!, r.tgtgid!, props.get(r.id) ?? []));
+  const table = elem === 'node' ? 'nodes' : 'edges';
+  if (!full) return void updateSet(store, table, 'id', [REV, DIRTY], rows.map((r) => [r.id, rev(r), 0]));
   const base = store.nextSeqBlock(rows.length);
-  const updates = rows.map((r, i) => {
-    const content = r.dirty === PRESERVE ? '' : edgeContent(r.label, r.srcgid, r.tgtgid, props.get(r.id) ?? []);
-    return [r.id, r.gid || mintGid(), nextRev(r.dirty, r.rev, content), base + i + 1, 0];
-  });
-  updateSet(store, 'edges', 'id', [GID, REV, SEQ, DIRTY], updates);
+  updateSet(store, table, 'id', [GID, REV, SEQ, DIRTY], rows.map((r, i) => [r.id, r.gid || mintGid(), rev(r), base + i + 1, 0]));
+}
+
+/** Replication ON: today's refresh of every dirty row, vertices before edges. First, each UN-SEQUENCED
+ *  endpoint of a dirty edge (a vertex written before enable, not yet reached by the backfill) is marked
+ *  dirty, so it takes its gid, rev and a seq BELOW the edge's: the edge's rev sees a gid, and the feed
+ *  keeps vertex-before-edge (§6·2). */
+function refreshOn(store: GraphStore): void {
+  store.query(`UPDATE nodes SET dirty = CASE WHEN rev IS NULL THEN 1 ELSE 3 END
+    WHERE seq IS NULL AND NOT dirty AND id IN (SELECT src FROM edges WHERE dirty UNION SELECT tgt FROM edges WHERE dirty)`);
+  for (const elem of ['node', 'edge'] as const) recompute(store, elem, selectRows(store, elem, 'x.dirty', 'x.dirty'), true);
+}
+
+/** Replication OFF: a write computes no gid, rev or seq — except that a rev, once it exists (a dump's
+ *  preserved lineage), is kept current, so a peer holding the old rev later receives the change. A
+ *  rev-less row stays rev-less and is not hashed. Every dirty flag is cleared. */
+function refreshOff(store: GraphStore): void {
+  for (const elem of ['node', 'edge'] as const) {
+    recompute(store, elem, selectRows(store, elem, 'x.dirty AND x.dirty <> 3 AND x.rev IS NOT NULL', 'x.dirty'), false);
+    store.query(`UPDATE ${elem === 'node' ? 'nodes' : 'edges'} SET dirty = 0 WHERE dirty`);
+  }
+}
+
+const replicationOn = (store: GraphStore): boolean =>
+  store.query<{ enabled: number }>('SELECT enabled FROM replication')[0]!.enabled === 1;
+
+/** Elements per backfill statement when the caller sets no bound — one page of content in memory. */
+const BACKFILL_PAGE = 1000;
+
+/**
+ * Turn replication metadata ON (idempotent) and BACKFILL the elements written before that. Per page, one
+ * `updateSet` over the next rowid range of rows with `seq IS NULL` — vertices, then edges (an edge's rev
+ * references its endpoints' gids) — mints a missing gid, computes a missing rev (an existing one is
+ * current, by `refreshOff`) and assigns a fresh seq. A row written after enable already has a seq, so it
+ * is skipped without a high-water mark. The cursor lives in the `replication` row, so a large graph
+ * drains across calls. `limit` bounds this call's elements (absent = drain fully). Returns whether the
+ * backfill is COMPLETE.
+ *
+ * The one entry for every store-tier call that exposes identity: the replication endpoints
+ * (`changesFeed`, `revsDiff`, `applyWire`, `matchSetGids`) and the GraphSON export (`graphsonLines`).
+ */
+export function exposeIdentity(store: GraphStore, limit?: number): boolean {
+  store.query('UPDATE replication SET enabled = 1 WHERE NOT enabled');
+  let { kind, after } = store.query<{ kind: string; after: number }>(
+    'SELECT backfill_kind AS kind, backfill_after AS after FROM replication')[0]!;
+  let budget = limit ?? Infinity;
+  while (kind !== 'done' && budget > 0) {
+    const page = Math.min(budget, BACKFILL_PAGE);
+    const elem: Elem = kind === 'vertex' ? 'node' : 'edge';
+    const rows = selectRows(store, elem, 'x.id > ? AND x.seq IS NULL', 'CASE WHEN x.rev IS NULL THEN 1 ELSE 3 END', 'LIMIT ?', [after, page]);
+    recompute(store, elem, rows, true);
+    budget -= rows.length;
+    if (rows.length < page) { kind = kind === 'vertex' ? 'edge' : 'done'; after = 0; }
+    else after = rows[rows.length - 1]!.id;
+    store.query('UPDATE replication SET backfill_kind = ?, backfill_after = ?', [kind, after]);
+  }
+  return kind === 'done';
 }
 
 /** Assign a fresh local seq to every tombstone a `drop()` just recorded (`seq IS NULL`, §6·4), so a
@@ -124,7 +181,7 @@ function ftsRowsForDirty(store: GraphStore, ownerElem: OwnerElem, props: Map<num
 }
 
 /** Index the runtime-written properties of the elements this write touched — `property(k, __.trav)`,
- *  whose value text is only knowable once stored. Runs BEFORE `refreshNodes`/`refreshEdges` clear the
+ *  whose value text is only knowable once stored. Runs BEFORE `refreshOn`/`refreshOff` clear the
  *  dirty flag, so `WHERE dirty` is still this write's touched set. A no-op (two index-served reads)
  *  when nothing is dirty. */
 function refreshFts(store: GraphStore): void {
@@ -137,14 +194,14 @@ function refreshFts(store: GraphStore): void {
   insertSet(store, 'property_fts', FTS_SET_COLS, rows);
 }
 
-/** Refresh the replication metadata (gid + rev + seq) of the elements a write just touched, and assign
- *  seqs to any new tombstones — called by `frameResolved` after a write program commits
+/** Refresh the replication metadata (gid + rev + seq; only a kept-current rev while replication is off)
+ *  of the elements a write just touched, and assign seqs to any new tombstones — called by `frameResolved` after a write program commits
  *  (`plan.kind === 'program'`). FTS first (it reads `WHERE dirty`, which the metadata refresh clears),
  *  then vertices before edges (an edge's rev sees its endpoints' minted gids), then tombstones (a
  *  delete's seq follows the same write's live seqs, §6·2). */
 export function refreshElements(store: GraphStore): void {
   refreshFts(store);
-  refreshNodes(store);
-  refreshEdges(store);
+  if (replicationOn(store)) refreshOn(store);
+  else refreshOff(store);
   refreshTombstones(store);
 }
