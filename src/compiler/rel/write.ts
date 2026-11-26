@@ -24,7 +24,7 @@ import {
   LABEL_ITEM_NAME, LABEL_MEMBER_NAME, LABEL_NAME, type NameRules, validateLabel, validatePropertyKey,
 } from '../../gremlin/validate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
-import { and, carriedCols, eq, explodeMembers, fenced, LABEL_OWNERS, existsOf, meta, PROPERTIES, propertyRows, propertyScan, storedForm, presenceFenced, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
+import { and, carriedCols, eq, explodeMembers, fenced, LABEL_OWNERS, existsOf, meta, ones, PROPERTIES, propertyRows, propertyScan, storedForm, presenceFenced, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
 import { substRelId } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import { scanColumnOf } from './source.ts';
@@ -3976,13 +3976,14 @@ function propertyHits(elem: Elem, key: Expr, valueKey: Expr, fresh: Minter): Rel
   const scan = propertyScan(elem, fresh, ['cc', 'rcc']);
   return make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: and(eq(col(scan.id, 'key'), key), eq(col(scan.id, 'value'), valueKey)) });
 }
-/** The vertices carrying the label NAMED `name` — none for a name never interned (`nameId` reads NULL). */
-function labelHits(name: Expr, fresh: Minter): Rel {
-  const owners = labelOwners('vertex', fresh);
+/** The vertices carrying the label NAMED `name` — none for a name never interned (`nameId` reads NULL).
+ *  With `of`, only that vertex's row, if it carries the label (a `vertex_labels` PRIMARY KEY seek). */
+function labelHits(name: Expr, fresh: Minter, of?: Expr): Rel {
+  const owners = labelOwners('vertex', fresh, of);
   return make.filter({ id: fresh('f'), input: owners, channels: [], type: owners.type, pred: eq(col(owners.id, 'label'), nameId('labels', name, fresh)) });
 }
 function cappedCount(hits: Rel, fresh: Minter): Expr {
-  const one = make.project({ id: fresh('p'), input: hits, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+  const one = ones(hits, fresh);
   const capped = make.limit({ id: fresh('li'), input: one, channels: [], type: one.type, count: compilerInt(SELECTIVITY_CAP) });
   return { kind: 'scalar', plan: make.aggregate({
     id: fresh('ag'), input: capped, channels: [], type: typeOf(meta('n', 'int')), groupBy: [],
@@ -5332,11 +5333,11 @@ export function mergeVFromMap(
         typedValueEq(col(vp.id, 'value'), col(vp.id, 'vtype'), valV(pairs), valT(pairs))),
     });
     // A `T.label` NAME satisfied by the candidate carrying it (hasLabel over vertex_labels) — every name
-    // of a collection label, `searchVerticesLabelConstraint`'s AND (`mapLabelNames`).
+    // of a collection label, `searchVerticesLabelConstraint`'s AND (`mapLabelNames`). `vlMatch` sits
+    // under NOT EXISTS of an UNSATISFIED pair, so its `nameId` stays a positive `=` (names.ts): a name
+    // never interned reads NULL, the inner row drops, and the pair counts as unsatisfied — the right answer.
     const names = mapLabelNames(col(driver, MAP_COL), fresh);
-    const vl = labelOwners('vertex', fresh, candId);
-    const vlMatch = make.filter({ id: fresh('f'), input: vl, channels: [], type: vl.type,
-      pred: eq(col(vl.id, 'label'), nameId('labels', col(names.id, 'name'), fresh)) });
+    const vlMatch = labelHits(col(names.id, 'name'), fresh, candId);
     // A pair the candidate FAILS: a string property it lacks; a label name it does not carry. (A T.id
     // pair cannot reach here — the guard above refused any map holding one.) `allMatch` = neither.
     const unsat = make.filter({

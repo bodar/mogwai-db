@@ -271,10 +271,15 @@ export const EDGE_COLS = [meta('id', 'int'), meta('uid', 'text', true), meta('sr
 export type Minter = (hint: string) => RelId;
 export const minter = (): Minter => { let n = 0; return (hint) => relId(`${hint}${n++}`); };
 
+/** `SELECT 1 AS one FROM rel` — `rel`'s rows with every column dropped, for a question about PRESENCE or
+ *  COUNT only (`existsOf`, a capped count). */
+export const ones = (rel: Rel, fresh: Minter): Rel =>
+  make.project({ id: fresh('p'), input: rel, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+
 /** `[NOT] EXISTS (SELECT 1 FROM matched)` — the one existence probe. The projection drops `matched`'s
  *  columns so the subquery says what it tests (presence) and nothing else; SQLite stops at the first row. */
 export const existsOf = (matched: Rel, fresh: Minter, negated = false): Expr =>
-  ({ kind: 'exists', negated, plan: make.project({ id: fresh('p'), input: matched, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] }) });
+  ({ kind: 'exists', negated, plan: ones(matched, fresh) });
 
 /**
  * The two element tables' property side-tables: the table, the column each keys its owner by, and the

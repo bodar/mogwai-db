@@ -119,6 +119,13 @@ describe('nameId — one name as its id, per merge driver', () => {
     expect(values(run(store, "g.inject([(T.label):['person','x'],name:'marko']).mergeV().label()"))).toEqual(['person']);
   });
 
+  test('a known and an unknown label decide per driver, inside a union arm', () => {
+    const store = seededStore();
+    const q = "g.inject(1).union(constant([(T.label):'person',name:'vadas']), constant([(T.label):'nope',name:'vadas'])).mergeV()";
+    expect(values(run(store, `${q}.id()`))).toEqual([2, 7]);
+    expect(values(run(store, "g.V().has('name','vadas').label()")).sort()).toEqual(['nope', 'person']);
+  });
+
   test('a map label that is not a string is one name, written once and found again', () => {
     const store = seededStore();
     expect(values(run(store, 'g.inject([(T.label):5,k:1]).mergeV().label()'))).toEqual(['5']);
