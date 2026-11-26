@@ -2307,6 +2307,7 @@ function substChildValue(value: ChildValue, from: RelId, to: RelId): ChildValue 
   return {
     ...value, expr: substRelId(value.expr, from, to), present,
     ...(value.vtype ? { vtype: substRelId(value.vtype, from, to) } : {}), ...(value.node ? { node: substRelId(value.node, from, to) } : {}),
+    ...(value.comparable ? { comparable: () => substRelId(value.comparable!(), from, to) } : {}),
   };
 }
 

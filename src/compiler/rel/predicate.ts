@@ -1,5 +1,5 @@
 import { always, and, col, compilerInt, compilerNull, compilerReal, compilerText, disjoin, param, type Expr } from '../../rel/expr.ts';
-import { comparableOf, jsonEachSet, meta, storedForm, typeOf, wholeNumber, type Minter } from './build.ts';
+import { comparableOf, jsonEachSet, meta, typeOf, wholeNumber, type Minter } from './build.ts';
 import * as make from '../../rel/factory.ts';
 import { inferredVtype } from './tag.ts';
 import type { SqlType } from '../../rel/types.ts';
@@ -8,7 +8,6 @@ import { gtypeName, arg, collectionMembers, isNested, type Arg } from '../../gre
 import { assignable, assignableFrom, BigDecimal, Duration, flatType, gtypeOf, isBinaryCarrier, normalizeTypeName, STORAGE_CLASS, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
 import { constLit } from './const.ts';
 import { likeEscaped } from '../../rel/like.ts';
-import { exprHasSubquery } from '../../rel/walk.ts';
 
 /**
  * `P`/`TextP` AS RelIR EXPRESSIONS — the predicate vocabulary, re-expressed in the algebra.
@@ -764,7 +763,7 @@ export const typedValueEq = (aValue: Expr, aVtype: Expr, bValue: Expr, bVtype: E
   return {
     kind: 'case',
     whens: [
-      [and(numeric(aVtype), numeric(bVtype)), binary('=', comparableNumber(aValue, aVtype), comparableNumber(bValue, bVtype))],
+      [and(numeric(aVtype), numeric(bVtype)), binary('=', comparableOf(aValue, aVtype), comparableOf(bValue, bVtype))],
       [binary('=', aVtype, bVtype), binary('=', aValue, bValue)],
     ],
     else: compilerFalse,
@@ -842,7 +841,13 @@ export const valueTheta = (op: string, lhs: TypedOperand, rhs: TypedOperand, fre
 /** One side of a `valueTheta` — a value and its Gremlin tag (`null` where unknown: the value's own
  *  inference is its tag). `inferNullTag` marks a RAW per-row tag (a label's recorded `t`) that is NULL where
  *  the type must be read off the value. */
-export interface TypedOperand { readonly value: Expr; readonly tag: Expr | null; readonly inferNullTag?: boolean }
+export interface TypedOperand {
+  readonly value: Expr; readonly tag: Expr | null; readonly inferNullTag?: boolean;
+  /** The operand as a stored row's own `value` column — already the comparable form a stored subject holds —
+   *  set only where the producer reads a stored row (a bare `values(k)`). A stored subject compares against it
+   *  as it is (`storedComparable`). */
+  readonly comparable?: Expr;
+}
 
 /** A predicate subject as a `valueTheta` operand — its tag already settled by its `SubjectType`. */
 export const subjectOperand = (value: Expr, type: SubjectType): TypedOperand => ({ value, tag: vtypeOf(type) });
@@ -854,7 +859,7 @@ export const subjectOperand = (value: Expr, type: SubjectType): TypedOperand => 
  * `vp_key_value`).
  *
  * It is `typedValueEq`'s two arms read as one partition: every `Number` vtype is ONE family (the
- * `numeric` arm — `NumberHelper` compares across int/real), keyed by `comparableNumber` (the same form
+ * `numeric` arm — `NumberHelper` compares across int/real), keyed by `comparableOf` (the same form
  * the arm compares, which pulls a decimal/bigint TEXT tail to the number a stored row holds);
  * every other vtype is its own family keyed by the raw value (the same-vtype arm). A `NULL` vtype or
  * value keys `NULL`, which no `=` meets — `typedValueEq` is false there too. The family sentinel is not
@@ -864,33 +869,94 @@ export const typedValueKey = (value: Expr, vtype: Expr): readonly [Expr, Expr] =
   const numeric: Expr = { kind: 'in-list', expr: vtype, values: NUMERIC_VTYPES.map(compilerText) };
   return [
     { kind: 'case', whens: [[numeric, compilerText('#number')]], else: vtype },
-    { kind: 'case', whens: [[numeric, comparableNumber(value, vtype)]], else: value },
+    { kind: 'case', whens: [[numeric, comparableOf(value, vtype)]], else: value },
   ];
 };
 
-/** A NUMBER as the comparable form a stored property row holds in `value` (`storedForm`): a decimal-TEXT
- *  BigDecimal as its REAL, a decimal-TEXT long/bigint as its INTEGER inside int64 (its REAL past it), any
- *  other number as itself. So a value read off a stream equals a stored row of the same number by a plain
- *  `=`, which is what lets a merge seek `(key, value)` for every numeric criterion. SQLite's own `=` then
- *  bridges INTEGER and REAL (`30` and `30.0`), which is `NumberHelper`'s one number space. */
-const comparableNumber = (value: Expr, vtype: Expr): Expr => storedForm(value, vtype).value;
+/** Is `e` cheap to spell more than once — a column or a literal? */
+const cheap = (e: Expr): boolean => e.kind === 'col' || e.kind === 'lit';
 
-/** `subject <op> operand` with the operand in a stored row's comparable form (`comparableOf`), decided in ONE
- *  `VALUES` row that holds the subject, the operand's value and its tag: a correlated read spelled in each arm
- *  of the conversion would re-run per arm. `subject` is `null` for the operand's comparable form alone. A bare
- *  column subject is a value there (the emitter writes it `+col`), never a column a range index is chosen on. */
-const comparedOnce = (op: Extract<Expr, { kind: 'binary' }>['op'] | null, subject: Expr | null, operand: TypedOperand, fresh: Minter): Expr => {
-  const one = make.values({
-    id: fresh('cno'), channels: [], type: typeOf(meta('s', 'any', true), meta('v', 'any', true), meta('t', 'text', true)),
-    rows: [[subject ?? compilerNull(), operand.value, operand.tag ?? compilerNull('text')]],
-  });
-  const value = col(one.id, 'v');
-  const comparable = operand.tag ? comparableOf(value, col(one.id, 't')) : value;
+/** `use(value, tag)` over a nested operand, with the value and its tag bound ONCE as the one row of a `VALUES`
+ *  where either is computed work (a correlated read, a label's history read) — each arm of a CASE over them
+ *  would otherwise re-run it. Inline where both are cheap. */
+function overOperand(operand: TypedOperand, use: (value: Expr, tag: Expr | null) => Expr, fresh: Minter): Expr {
+  const { value, tag } = operand;
+  if (cheap(value) && (!tag || cheap(tag))) return use(value, tag);
+  const node = tag ? sharedNode(value, tag) : null;
+  if (node) {
+    const one = make.values({ id: fresh('cno'), channels: [], type: typeOf(meta('n', 'json', true)), rows: [[node]] });
+    const field = (name: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [col(one.id, 'n'), compilerText(`$.${name}`)] });
+    return { kind: 'scalar', plan: make.project({
+      id: fresh('cnp'), input: one, channels: [], type: typeOf(meta('k', 'any', true)), exprs: [['k', use(field('v'), field('t'))]],
+    }) };
+  }
+  const one = make.values({ id: fresh('cno'), channels: [], type: typeOf(meta('v', 'any', true), meta('t', 'text', true)), rows: [[value, tag ?? compilerNull('text')]] });
   return { kind: 'scalar', plan: make.project({
     id: fresh('cnp'), input: one, channels: [], type: typeOf(meta('k', 'any', true)),
-    exprs: [['k', op && subject ? binary(op, col(one.id, 's'), comparable) : comparable]],
+    exprs: [['k', use(col(one.id, 'v'), tag ? col(one.id, 't') : null)]],
   }) };
-};
+}
+
+/** A value and its tag read as the `v` and `t` fields of ONE JSON node — `json_extract(doc, '<p>.v')` beside
+ *  `json_extract(doc, '<p>.t')`, the shape a value label's history read has (`aliasValueAt`/`aliasTypeAt`) — as
+ *  that node, `jsonb_extract(doc, '<p>')`, so the document is built and walked once rather than per field. A
+ *  number keeps its spelling: the node is the entry the label wrote (`aliasEntryNode`'s reason). `null` for
+ *  any other pair. */
+function sharedNode(value: Expr, tag: Expr): Expr | null {
+  // The read's document and the path of its parent node, where it is a `json_extract` of field `field`.
+  const read = (e: Expr, field: string): { readonly doc: Expr; readonly at: string } | undefined => {
+    const path = e.kind === 'call' && e.fn === 'json_extract' && e.args.length === 2 ? e.args[1]! : undefined;
+    return path?.kind === 'lit' && typeof path.value === 'string' && path.value.endsWith(`.${field}`)
+      ? { doc: (e as Extract<Expr, { kind: 'call' }>).args[0]!, at: path.value.slice(0, -field.length - 1) } : undefined;
+  };
+  const [v, t] = [read(value, 'v'), read(tag, 't')];
+  return v && t && v.at === t.at && JSON.stringify(v.doc) === JSON.stringify(t.doc)
+    ? { kind: 'call', fn: 'jsonb_extract', args: [v.doc, compilerText(v.at)] } : null;
+}
+
+/**
+ * A nested operand as the COMPARABLE form a stored row holds in `value`. A stored operand already IS that
+ * form (`TypedOperand.comparable`), so it is read as it is: no tag, no conversion. A stream operand converts by
+ * its own tag (`comparableOf`), its payload and tag bound once (`overOperand`). Either way the result is one
+ * expression of the outer row, so `value = <it>` and `value > <it>` keep their `(key, value)` seek (measured:
+ * `SEARCH … vp_key_value (key=? AND value=?)` with the operand a scalar subquery).
+ */
+const storedComparable = (operand: TypedOperand, fresh: Minter): Expr =>
+  operand.comparable ?? (operand.tag ? overOperand(operand, (value, tag) => comparableOf(value, tag!), fresh) : operand.value);
+
+/** The `comparableTheta` buckets an ordering is defined within: every Number tag is one bucket, String and
+ *  char one, and each of these one tag on its own. */
+const TEXT_VTYPES: readonly string[] = ['string', 'char'];
+const OWN_BUCKET_VTYPES: readonly string[] = ['datetime', 'duration', 'boolean', 'uuid', 'binary'];
+
+/**
+ * COMPARABILITY'S TYPE GUARD for an ordering between a STORED row (its `vtype` column) and a nested operand:
+ * TRUE only where both sit in one `comparableTheta` bucket. An incomparable pair is FALSE, never SQLite's
+ * cross-storage-class order (TEXT after every number): `comparable()` is `ft == st`, checked before `compare`
+ * would throw (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java:314-363`).
+ *
+ * It is a SEPARATE conjunct, never a CASE around the comparison: `value > <operand>` stays a plain range term
+ * the property seek drives (`semijoin.ts`), and this is a residual on the rows the range selected. The
+ * operand's tag is read once (`overOperand`); a NULL tag is the value's own inference (`inferredVtype`), as for
+ * every per-row tag that may be NULL.
+ */
+function sameBucket(vtype: Expr, operand: TypedOperand, fresh: Minter): Expr {
+  const inList = (e: Expr, names: readonly string[]): Expr => ({ kind: 'in-list', expr: e, values: names.map(compilerText) });
+  const guard = (t: Expr): Expr => ({
+    kind: 'case',
+    whens: [
+      [inList(vtype, NUMERIC_VTYPES), inList(t, NUMERIC_VTYPES)],
+      [inList(vtype, TEXT_VTYPES), inList(t, TEXT_VTYPES)],
+      [inList(vtype, OWN_BUCKET_VTYPES), binary('=', t, vtype)],
+    ],
+    else: compilerFalse,
+  });
+  // Only the tag is needed where it is known for every row; the value only where the tag may be inferred.
+  const tagOnly: TypedOperand | null = operand.tag && !operand.inferNullTag ? { value: operand.tag, tag: null } : null;
+  if (tagOnly) return overOperand(tagOnly, (t) => guard(t), fresh);
+  return overOperand(operand, (value, tag) =>
+    guard(!tag ? inferredVtype(value) : { kind: 'call', fn: 'coalesce', args: [tag, inferredVtype(value)] }), fresh);
+}
 
 /** `TextP` -> a LIKE pattern with the user's metacharacters escaped (`likeEscaped`). A wire parameter stays a
  * parameter through the pattern; interpolating its current value here would silently make it a
@@ -1122,19 +1188,33 @@ export function predicateExpr(
   resolveScalar?: NestedScalar,
 ): Expr | null {
   // A NESTED operand against a STORED row compares in the row's COMPARABLE form: the row holds a BigDecimal
-  // as its REAL and a wide long as its INTEGER (`storedForm`), while the operand hands on its PAYLOAD — a
+  // as its REAL and a wide long as its INTEGER (`storedForm`), while a stream operand hands on its PAYLOAD — a
   // BigDecimal's or a wide long's decimal TEXT — so a raw compare would miss a row equal to itself
-  // (`has('price', eq(__.values('price')))`). The operand converts by its own tag (`comparableOf`, an
-  // expression of the outer row, so a correlated equality still seeks `(key, value)`); the compare itself
-  // stays the direct one every nested operand takes. `null` declines.
+  // (`has('price', eq(__.values('price')))`). A stored operand is already in that form; a stream operand
+  // converts by its own tag (`storedComparable`). An ORDERING is also confined to one type bucket
+  // (`sameBucket`), as a separate conjunct so the comparison stays a range the `(key, value)` seek can drive.
+  // Its subject is read UNINDEXED, as `storedRange`'s is: inside a correlated check SQLite would otherwise
+  // seek `(key, value > ?)` and re-read the range per element, where `(node, key)` is one row; the lifted
+  // owner seek (`semijoin.ts` `indexable`) makes it a range again. `null` declines.
   const comparableAt = isStoredRow(type) && fresh ? fresh : null;
+  /** The operand's first value, in the stored row's comparable form over a stored subject. */
   const nestedValue = (nested: unknown): Expr | null => {
     const resolved = resolveScalar?.(nested, comparableAt !== null);
-    if (!resolved || !comparableAt || !resolved.tag) return resolved?.value ?? null;
-    // A correlated READ (a scalar subquery) converts once (`comparedOnce`); an expression of the outer row
-    // converts inline, so the equality keeps its `(key, value)` seek.
-    return exprHasSubquery(resolved.value) || exprHasSubquery(resolved.tag)
-      ? comparedOnce(null, null, resolved, comparableAt) : comparableOf(resolved.value, resolved.tag);
+    return resolved ? (comparableAt ? storedComparable(resolved, comparableAt) : resolved.value) : null;
+  };
+  /** `subject <name> operand` for a nested operand, `name` a Gremlin comparison (`eq`, `gt`, …). */
+  const nestedCompare = (name: string, nested: unknown): Expr | null => {
+    const op = COMPARISON[name]!;
+    if (name === 'eq') {
+      const bound = nestedValue(nested);
+      return bound && binary(op, subject, bound);
+    }
+    // A STREAM subject keeps the direct compare (`nested-stream-ordering-guard`, docs/outstanding-work.md).
+    const resolved = resolveScalar?.(nested, comparableAt !== null);
+    const ordered = (operand: TypedOperand): Expr => !comparableAt || type.kind !== 'perRow'
+      ? binary(op, subject, operand.value)
+      : and(binary(op, { kind: 'unary', op: 'unindexed', arg: subject }, storedComparable(operand, comparableAt)), sameBucket(type.vtype, operand, comparableAt));
+    return resolved ? ordered(resolved) : null;
   };
   // `has(key)` with no value: presence, not comparison.
   if (pred === undefined) return binary('is not', subject, compilerNull());
@@ -1147,10 +1227,7 @@ export function predicateExpr(
   if (!isPred(pred)) {
     // A BARE TRAVERSAL value is `is(P.eq(traversal))` (`GraphTraversal.is(Object)` wraps a non-`P` in
     // `P.eq`), so it takes the same FIRST-value resolution a `P.eq(traversal)` operand does below.
-    if (isNested(pred)) {
-      const nested = nestedValue(pred);
-      return nested && binary('=', subject, nested);
-    }
+    if (isNested(pred)) return nestedCompare('eq', pred);
     // The BARE value — the one operand that can be a top-level parameter (`has(k, $x)`, `is($x)`), so it
     // alone carries the declared type and the param name; a `P.gt(x)` operand is nested and inlines.
     const value = operand(pred, opType, opParam, type);
@@ -1212,15 +1289,7 @@ export function predicateExpr(
     // pairs one, and mis-answering an empty operand is worse than a gap).
     if (isNested(operands[0].value)) {
       if (op === 'neq') return null;
-      // An ORDERING against a stored row is decided inside the operand's once-evaluated row, so the row's
-      // `value` there is no range bound: SQLite would otherwise seek `(key, value > ?)` and scan every row
-      // past the bound once per element — quadratic — where the element's own `(node, key)` row is one seek.
-      if (comparableAt && ORDERING.has(op)) {
-        const resolved = resolveScalar?.(operands[0].value, true);
-        return resolved ? comparedOnce(comparison, subject, resolved, comparableAt) : null;
-      }
-      const nested = nestedValue(operands[0].value);
-      return nested && binary(comparison, subject, nested);
+      return nestedCompare(op, operands[0].value);
     }
     // The operand inlines as a TYPED literal, storage class following its declared canonical type —
     // the thesis's "we know the type, stop throwing it away" (an integer-valued `P.gt(2.0)` renders

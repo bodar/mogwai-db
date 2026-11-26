@@ -1455,10 +1455,24 @@ Building blocks that unblock many other items. Do these before the items that de
 - **Fix:** Owner decision (2026-11-05): a typed value is one carrier, with a total per-row type tag. NaN uses the same carrier. Build the plan as written (P1 is done; T1–T8 remain). It absorbs `r4-fu4`, `rf3-project-null-label`, `S9.9`, `rf3-static-null-is`, the null-bound branch label and the NaN wall.
 - **Where:** `docs/2026-11-05-typed-value-carrier-plan.md`
 
+#### Type guard for a nested-operand equality (`nested-eq-type-guard`)
+- **Area:** values
+- **Reach:** rare
+- **Problem:** A nested-operand ORDERING is confined to one type bucket (`sameBucket`, `src/compiler/rel/predicate.ts`). A nested-operand EQUALITY is not. It compares the stored `value` directly, so a stored Boolean `true` (stored as 1) equals an operand Integer `1`, and a Date equals a Long with the same epoch. Reference: `Compare.eq` is false across types (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java`). It needs one key to hold a Boolean or a Date beside numbers.
+- **Fix:** AND the same `sameBucket` guard to the equality, as a separate conjunct so the `(key, value = ?)` seek stays. Measure the value-join cost first: for a stored operand the guard reads the operand row's `vtype`, a second seek.
+- **Where:** `src/compiler/rel/predicate.ts` `predicateExpr` (`nestedCompare`)
+
+#### Type guard for a nested-operand ordering over a stream (`nested-stream-ordering-guard`)
+- **Area:** values
+- **Reach:** rare
+- **Problem:** Over a STORED subject a nested-operand ordering is confined to one type bucket (`sameBucket`). Over a STREAM subject it is not: `g.V().values('s').is(P.gt(__.V().has('k','e').values('s')))` over `s` in {'10', 10, 10.00m, 'x', 3} also returns '10' and 'x' (SQLite orders TEXT after every number). The reference answers 10 and 10.00 only.
+- **Fix:** Compare through `valueTheta` (`src/compiler/rel/predicate.ts`), the typed comparison an alias compare already uses. Measured: it works, but the typed rooted operand put a label probe under a correlated subquery in `choose(__.is(P.gte(__.V()…mean())), …)`, which `mise run sql-plan` gates, and it grows that SQL by about 5 KB. Find a form without both costs first.
+- **Where:** `src/compiler/rel/predicate.ts` `predicateExpr` (`nestedCompare`)
+
 #### Store a duration comparable in `value` (`duration-stored-comparable`)
 - **Area:** values, storage
 - **Reach:** rare
-- **Problem:** A `duration` property stores its nanos as decimal TEXT in `value`. It is the one exception to the `storage.ts` rule that `value` is the comparable form. So a stored sort key cannot read `value` alone. It goes through `storedOrderKey`, a per-row `CASE` on `vtype = 'duration'`.
+- **Problem:** A `duration` property stores its nanos as decimal TEXT in `value`. It is the one exception to the `storage.ts` rule that `value` is the comparable form. So a stored sort key cannot read `value` alone. It goes through `storedOrderKey`, a per-row `CASE` on `vtype = 'duration'`. A nested-operand ordering between two stored durations (`has('d', gt(__.values('d')))`, `predicateExpr`'s nested arm) compares that TEXT lexically, so `duration(9) > duration(10)`. The fix below also fixes it.
 - **Fix:** Move `duration` into the comparable/exact tail of `storedForm`: store its number in `value` and its digits in `exact`. Then `storedOrderKey` is `value` with no `CASE`, and the `storage.ts` rule has no exception. The duration readers in `execute.ts`, the GraphSON and CSV formats and `predicate.ts` must read `exact` first.
 - **Where:** `src/compiler/rel/build.ts` `storedForm`, `storedOrderKey`; `src/storage.ts` (the `vertex_properties` comment)
 

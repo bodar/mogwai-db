@@ -456,6 +456,27 @@ export function scanColumnOf(
   return row && resolve(row, ref);
 }
 
+/** The FIRST stored property row at `key` of the element at `id` — a vertex key may hold several values and
+ *  INSERTION ORDER (the rowid) names the first (`PropertyValueStep`) — read as `pick` of the row's columns. */
+function firstPropertyRow(kind: Elem, id: Expr, key: string, fresh: Minter, pick: (value: Expr, vtype: Expr, exact: Expr) => Expr): Expr {
+  const { table, owner } = PROPERTIES[kind];
+  const scan = make.scan({
+    id: fresh('vp'), table, alias: fresh('rp'), channels: [],
+    type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),
+  });
+  const mine = make.filter({
+    id: fresh('f'), input: scan, channels: [], type: scan.type,
+    pred: and(eq(col(scan.id, owner), id), eq(col(scan.id, 'key'), compilerText(key))),
+  });
+  return firstOf(mine, pick(col(mine.id, 'value'), col(mine.id, 'vtype'), col(mine.id, 'exact')), col(mine.id, 'id'), fresh);
+}
+
+/** A base-table property's first STORED `value` — the comparable form a stored row holds (`storedForm`), which
+ *  a stored subject compares against as it is (`TypedOperand.comparable`). Base tables only: another source
+ *  answers its own `propertyScalar`. */
+export const storedFirstValue = (kind: Elem, id: Expr, key: string, fresh: Minter): Expr =>
+  firstPropertyRow(kind, id, key, fresh, (value) => value);
+
 /** THE BASE GRAPH — the SQLite physical schema. Every method is the CURRENT inline SQL the traversal
  *  algebra used to spell, moved behind the interface so the vocabulary no longer names a table. */
 export const BaseGraph: GraphSource = {
@@ -716,24 +737,11 @@ export const BaseGraph: GraphSource = {
     });
   },
 
-  propertyScalar: (kind, id, key, ordering, fresh) => {
-    // A property scan declaring `id` as well as the payload: a VERTEX key may hold several values and
-    // INSERTION ORDER (the rowid) names the first — `PropertyValueStep`'s semantics.
-    const { table, owner } = PROPERTIES[kind];
-    const scan = make.scan({
-      id: fresh('vp'), table, alias: fresh('rp'), channels: [],
-      type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),
-    });
-    const mine = make.filter({
-      id: fresh('f'), input: scan, channels: [], type: scan.type,
-      pred: and(eq(col(scan.id, owner), id), eq(col(scan.id, 'key'), compilerText(key))),
-    });
-    // An ORDERING read is a sort key, so it reads the comparable `value` (`storedOrderKey` — a BigDecimal or a
-    // long past int64 sorts by its number, not as TEXT after every number); any other read is the payload the
-    // stream hands onward.
-    const value = ordering ? storedOrderKey(col(mine.id, 'value'), col(mine.id, 'vtype')) : storedPayload(col(mine.id, 'value'), col(mine.id, 'exact'));
-    return firstOf(mine, value, col(mine.id, 'id'), fresh);
-  },
+  // An ORDERING read is a sort key, so it reads the comparable `value` (`storedOrderKey` — a BigDecimal or a
+  // long past int64 sorts by its number, not as TEXT after every number); any other read is the payload the
+  // stream hands onward.
+  propertyScalar: (kind, id, key, ordering, fresh) =>
+    firstPropertyRow(kind, id, key, fresh, (value, vtype, exact) => ordering ? storedOrderKey(value, vtype) : storedPayload(value, exact)),
 
   valueMapPairs: (kind, id, keys, fresh) => {
     const { table, owner } = PROPERTIES[kind];

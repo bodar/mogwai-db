@@ -234,3 +234,33 @@ describe('an ordered predicate on a stored key seeks a (key, value) range', () =
     });
   }
 });
+
+// A NESTED-TRAVERSAL OPERAND keeps the same two access paths (`predicateExpr`'s nested arm,
+// src/compiler/rel/predicate.ts). Its comparability guard is a SEPARATE conjunct, never a CASE around the
+// comparison, so an operand read off an OUTER row (a label, a re-rooted `select('a').values(k)`) still drives
+// `(key, value)` — a CASE would read the key's every row per outer row, N × |key|. And an operand of the
+// element ITSELF stays on the element's `(node, key)` row.
+describe('a nested operand keeps the (key, value) seek', () => {
+  const OUTER: Readonly<Record<string, readonly [string, string]>> = {
+    'label eq': ["g.V().hasLabel('software').values('lang').as('e').V().has('lang', select('e')).count()", '(key=? AND value=?)'],
+    'label gt': ["g.V().has('name', 'p5').values('age').as('e').V().has('age', gt(select('e'))).count()", '(key=? AND value>?)'],
+    're-rooted gt': ["g.V().has('name', 'p5').as('x').V().has('age', gt(__.select('x').values('age'))).count()", '(key=? AND value>?)'],
+  };
+  for (const [name, [gremlin, seek]] of Object.entries(OUTER)) {
+    test(`${name}: vp_key_value is searched on ${seek}, cold and warm`, () => {
+      const { sql, binds } = read(gremlin);
+      for (const store of [noStats, withStats]) {
+        const details = (store.query(`EXPLAIN QUERY PLAN ${sql}`, [...binds]) as { detail: string }[]).map((r) => r.detail);
+        expect(details.some((d) => d.includes('vp_key_value') && d.includes(seek))).toBe(true);
+      }
+    });
+  }
+  test('an operand of the element itself stays on the (node, key) owner lookup, cold and warm', () => {
+    const { sql, binds } = read("g.V().has('age', gt(__.values('age'))).count()");
+    for (const store of [noStats, withStats]) {
+      const details = (store.query(`EXPLAIN QUERY PLAN ${sql}`, [...binds]) as { detail: string }[]).map((r) => r.detail);
+      expect(details.filter((d) => d.includes('vp_key_value'))).toEqual([]);
+      expect(details.some((d) => d.includes('vp_node_key (node=? AND key=?)'))).toBe(true);
+    }
+  });
+});

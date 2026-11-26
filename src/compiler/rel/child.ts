@@ -231,6 +231,13 @@ export interface ChildValue {
    */
   readonly node?: Expr;
   /**
+   * The value as the stored row's own COMPARABLE `value` column (`storedForm`) — set only where the producer
+   * reads a stored base-table row (a bare stored `values(k)`), so a predicate over a stored subject compares
+   * against it as it is, with no tag read and no conversion (`TypedOperand.comparable`). A thunk, so a consumer
+   * that does not compare mints no read.
+   */
+  readonly comparable?: () => Expr;
+  /**
    * DID THIS BODY PRODUCE ANYTHING for this host row — the productivity signal, stated by the arm that
    * built the expression.
    *

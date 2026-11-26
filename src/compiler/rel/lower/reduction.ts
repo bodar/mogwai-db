@@ -37,7 +37,7 @@ import { evidenceOf } from '../tag.ts';
 import { recordNode, recordToMap } from '../record.ts';
 import { isReducer } from '../reducer.ts';
 import { sackTagOf } from '../sack.ts';
-import { BaseGraph, type GraphSource } from '../source.ts';
+import { BaseGraph, storedFirstValue, type GraphSource } from '../source.ts';
 import { REL_TRANSFORMS, transformExpr } from '../transform.ts';
 import { BRANCH_HOSTS, ensureBulk } from './branch.ts';
 import { RANDOM_ORDER } from './slice.ts';
@@ -579,7 +579,9 @@ export function nestedFirstValue(operand: unknown, host: ElementSubject | null, 
   // against the element host exactly as before (the `row` is inert for it).
   const value = scalarChild(body, { kind: 'element', elem: host.elem, id: host.id, row: { rel: host.rel, aliases } }, ctx, fresh);
   return value && value.framing.kind === 'scalar'
-    ? { value: value.expr, tag: typed ? hostTag(value.framing.type, value.vtype) ?? null : null } : null;
+    ? { value: value.expr, tag: typed ? hostTag(value.framing.type, value.vtype) ?? null : null,
+      ...(typed && value.comparable ? { comparable: value.comparable() } : {}) }
+    : null;
 }
 
 /**
@@ -2070,7 +2072,10 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
   // A BARE stored read's member node is the `by(k)` node: value and tag off ONE row (`ChildValue.node`).
   const key = body.length === 1 && leading?.name === 'values' ? leading.args[0]?.value : undefined;
   const node = run && typeof key === 'string' ? byNode({ key: { kind: 'property', key } }, host, ctx.source, fresh) : null;
-  return run && node ? { ...run, node } : run;
+  // …and its comparable form: the same row's stored `value`, where that row is a base-table one.
+  const comparable = node && host.kind === 'element' && ctx.source === BaseGraph && typeof key === 'string'
+    ? () => storedFirstValue(host.elem, host.id, key, fresh) : null;
+  return run && node ? { ...run, node, ...(comparable ? { comparable } : {}) } : run;
 }
 
 function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind: 'scalar' }> & { readonly entry: NonNullable<Extract<ChildHost, { kind: 'scalar' }>['entry']> }, ctx: ChainCtx, fresh: Minter): ChildValue | null {
@@ -2584,7 +2589,8 @@ function selectedNodeChild(
     const rerooted = scalarChild(body.slice(1), { kind: 'scalar', value, vtype, row }, ctx, fresh);
     if (!rerooted) return null;
     const gate = (e: Expr): Expr => caseWhen(held, e);
-    const gated = { ...rerooted, expr: gate(rerooted.expr), ...(rerooted.vtype ? { vtype: gate(rerooted.vtype) } : {}), ...(rerooted.node ? { node: gate(rerooted.node) } : {}) };
+    const gated = { ...rerooted, expr: gate(rerooted.expr), ...(rerooted.vtype ? { vtype: gate(rerooted.vtype) } : {}), ...(rerooted.node ? { node: gate(rerooted.node) } : {}),
+      ...(rerooted.comparable ? { comparable: () => gate(rerooted.comparable!()) } : {}) };
     const present = rerooted.present;
     if (present === 'unknown') return null;
     if (present === 'value-nullness') return { ...gated, present };
