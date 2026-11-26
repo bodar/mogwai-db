@@ -2,7 +2,9 @@
 
 **Status: Stage A LANDED (2026-11-26). Gate A PASSED (owner, 2026-11-26): a sane path. The Stage A
 finish round landed A-f1, A-f2, A-f3, A-f5, N1–N3 (648eec92, e24da098) and merge-map-null-token
-(420e020f, 6be6de05: A-w1–A-w3, A-f4, A-f6). Next: the reuse items N4–N7, then Stage B.**
+(420e020f, 6be6de05: A-w1–A-w3, A-f4, A-f6). The reuse round landed N4–N7, F-a, F-b, F-d and
+`merge-map-label-seek` (b293d5c3, 45ca76bd, 27d3df31, 8f83775b, d1dc2695). Next: the round in
+"Next round — pre-B1 (from the 2026-11-26 reuse round)" (P1 first), then Stage B.**
 
 **How a gate works (owner, 2026-11-26).** A gate asks one question: is this a sane path? The numbers
 (line counts, stop rules) are evidence for that judgement, not automatic stops. If the path is sane,
@@ -302,6 +304,86 @@ Plan items, in order:
   **Remains:** nothing for N7.
 
 **Needs-human questions from this round:** none.
+
+### Next round — pre-B1 (from the 2026-11-26 reuse round)
+
+**Deferred.**
+- **F-c. An edge label read re-seeks the `edges` row already in scope.** Deferred: not a defect (linear,
+  3.8× from 1k to 8k), and a local `ownScan` fix in `labelScalar`/`hasLabelPredicate` is a
+  (consumer, shape) special case. Root cause: no rewrite removes a correlated scalar seek of a table
+  on a rowid whose row is already in scope. The same cause gives `label-probe-edge-col`
+  (`docs/outstanding-work.md` §2), so one substrate item serves both.
+  - **SS1 (prerequisite, before F-c).** Add one `src/rel` pass that replaces a correlated scalar
+    self-seek (`(SELECT c FROM T WHERE rowid = outer.T.rowid)`) with `outer.c`, after Calcite's
+    removable self-join (`vendor/calcite/core/src/main/java/org/apache/calcite/rel/rules/LoptOptimizeJoinRule.java`,
+    "removable self-join"). One rule per RelIR node kind. Acceptance: `g.V().outE().label()` and
+    `g.E().order().by(T.label)` plans lose the `edges` seek; SQL bytes the same or smaller.
+  - **F-c (after SS1).** Delete the per-consumer fix line in `label-probe-edge-col`; check that both
+    witnesses take the pass. No resume branch (nothing was built).
+
+**Follow-ups from review (major first; all minor, no answer changes).**
+- **P1. Finish the `PROPERTIES` authority (from the N4 review, and the first reuse proposal below).**
+  N4 made `PROPERTIES` the physical authority for property tables, but four sites still name the table
+  by hand: `src/compiler/rel/element.ts` `vertexProps` (`table: 'vertex_properties'`, about line 136)
+  and `edgeProps` (`'edge_properties'`, about line 179), and `src/services/catalog/schema.ts`
+  `scanAs('vertex_properties'…)`/`scanAs('edge_properties'…)` (about lines 126 and 209). Nothing guards
+  them. Route them through `PROPERTIES[kind]`, then extend the `scripts/arch-check.ts` label-table rule
+  to property-table literals (`build.ts` only). Do P1 before B1: Stage B touches every one of these
+  scans. `src/rel/passes/semijoin.ts` `SEEK_PROPERTIES`/`PROPERTY_OWNER` stays (clean-room boundary).
+- **P2. `merge-map-label-seek` cleanups.** (a) In `test/compiler/merge-scale.exec.test.ts`, move the
+  describe "a map driver seeking by its label answers as by its name" above the mergeE comment block
+  ("A mergeE SEARCH JOINS ITS OWN EDGE READ …"). That comment now reads as the header of the wrong
+  describe. (b) The `mapEntrySeeks` doc in `src/compiler/rel/write.ts` says it seeks the "first STRING
+  entry"; it seeks the picked entry (`SEEK_ORD`). Fix the wording.
+- **P3. `docs/outstanding-work.md` row fixes (from the F-d review).**
+  - `label-arm-string-constant`: change Reach to plausible. Add the witnesses
+    `g.V().project('l').by(coalesce(outE().label(), constant('none')))`,
+    `g.E().union(label(), constant('x'))`, `g.V().union(label(), constant('x')).dedup()`. Add the
+    contrast `label().fold().unfold()` beside the same constant answers: the cause is the label-scalar
+    column shape in the arm merge, not the host. Add the Where path `src/compiler/rel/boundgraph.ts`
+    (`labelScalar`, `hasLabelPredicate`).
+  - `token-regex`: the `T.id` resume is `has(T.id, within(…))`, not `T.label`. Name the cheaper label
+    head: run the regex over the distinct `labels` dictionary (O(distinct labels), not O(rows)).
+  - `label-probe-edge-col`: add a Where line (`src/compiler/rel/boundgraph.ts`). Point the Fix at SS1.
+  - The Contents section counts are wrong (§1, §2, §3, §4). Recount at the next
+    `update-outstanding-work` compaction.
+- **P4. Depth gaps seen in review (pre-existing, clean `UnsupportedTraversal`, not this plan's scope).**
+  Record each as a `docs/outstanding-work.md` §3 row if it is not there yet:
+  - Map drivers that come from `unfold()` of an injected list, from `project().by()` or
+    `valueMap().by(unfold())`, or that sit inside `local(mergeV())`/`optional(mergeV())`; and `mergeV`
+    over several traversers with `onMatch` (`RaisedByQuery`). Example:
+    `g.V().hasLabel('person').project('name').by('name').mergeV()`.
+  - `call('schema')` under `group().by(select('kind')).by(count())`, `order().by(select('kind'))` and
+    `project(…).by(select(…))`. `filter`/`where`/`select`/`dedup`/`fold`/`union`/`count` answer.
+- **Noted, no action.** Each vertex map driver now pays one capped `vl_label` probe (+3% to +14% at 8k,
+  far under 2×; the commit names the reason). The two-unselective-criteria grid
+  (`[(T.label):'l'+i%s, name:'n'+i/s]`) stays N^1.5, as on the parent commit.
+
+**Reuse proposals.**
+- **R1. One property-row scan builder (goes with P1).** `src/compiler/rel/write.ts` `PROPERTY_TABLE`
+  (about line 515) re-declares the table and owner beside `OWNED_BY`, which already spreads
+  `PROPERTIES`. About 14 hand-written `make.scan({ … table: spec.table … })` copies are in `write.ts`;
+  the property column list is typed again in `element.ts` `vertexProps`/`edgeProps`, `source.ts`
+  (`hasPropertyPredicate`, the values scan, about line 589), `modulator.ts` (about line 972) and
+  `property.ts` `propCols`. Spread `PROPERTIES[kind]` into `PROPERTY_TABLE` (or move `cols` into
+  `PROPERTIES` and delete `PROPERTY_TABLE`). Add `propertyRows(kind, fresh, hint?)` in `build.ts`,
+  shaped like `labelOwners`. Delete the five no-op `PROPERTY_TABLE[elem === 'edge' ? 'edge' : 'vertex']`
+  ternaries. Expect about 30–40 lines removed. **Check by a SQL diff:** `write.ts` declares `meta` as
+  `'blob'`, `propCols` as `'json'`, and `write.ts` (about line 4912) branches on `column.type === 'json'`.
+  Keep each consumer's meta type, or prove the SQL does not change.
+- **R2. `labelHits(name, fresh, of?)`.** `write.ts` `labelHits` (about line 3988) and the mergeV
+  allMatch `vlMatch` (about line 5344) build the same "vertices with the label named x" relation. Give
+  `labelHits` the optional owner `of`, like `labelOwners`, and use it in both. The "`nameId` is NULL
+  for an unknown name" rule is then in one place. SQL the same apart from relation ids.
+- **R3. The catalog edge-triple endpoint is `ownedNames('vertex')`.** `src/services/catalog/schema.ts`
+  `endpoint` (about line 165) is `withNames('labels', labelOwners('vertex', fresh), 'label', fresh)`, the
+  body of `ownedNames`. Use it. SQL unchanged. Do it with P1.
+- **R4. `ones(rel, fresh)` beside `existsOf` (low priority).** `write.ts` `cappedCount` (about line
+  3992) builds the same `SELECT 1` projection as `build.ts` `existsOf`. Export `ones` and use it in
+  both. Do NOT extend it to the bare-plan `{kind:'exists', plan}` sites or `lower/exists.ts`
+  (about lines 99 and 153): they project the tail's own column on purpose.
+
+**Needs-human questions from the reuse round:** none.
 
 **Gate A (owner review) — PASSED 2026-11-26.** Evidence: the A1–A6 refactors are net −20 production
 lines (A1 +26, A2+A3 −6, A4 −7, A5 −31, A6 −2); A4 is −1,873 SQL bytes over the corpus; `sql-plan`
