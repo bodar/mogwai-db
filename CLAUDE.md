@@ -141,7 +141,7 @@ free upgrade.
 | `bun scripts/rename-batch.ts <plan.tsv> [--dry] [--keep-going]` | a vocabulary campaign, one session | tool |
 | `bun scripts/move.ts <from> <to> [--dry]` | move a FILE + rewrite every importer | tool |
 | `bun scripts/fix.ts [--organize] [--unused] [--dry] [paths…]` | TypeScript's own `source.*` code actions | tool |
-| `mise run arch` (`scripts/arch-check.ts`) | no Pass reaches `ChainFacts`/fast paths | **CI gate**, at zero |
+| `mise run arch` (`scripts/arch-check.ts`) | no Pass reaches `ChainFacts`/fast paths; only `rel/names.ts` scans `labels` | **CI gate**, at zero |
 | `mise run lint` (`scripts/lint.ts`) | unused locals/params/value-position type imports | **CI gate**, at zero |
 | `mise run binds` (`scripts/binds-check.ts`) | no bind list sized by ROW COUNT — no hand-rolled `?` synthesis | **CI gate**, at zero |
 | `mise run orphans` (`scripts/orphans.ts`) | exports nothing imports | instrument — findings need judgement |

@@ -457,8 +457,6 @@ export function or(left: Expr | undefined, right: Expr): Expr {
 export const notProduced = (pred: Expr): Expr =>
   ({ kind: 'binary', op: 'is not', left: pred, right: compilerInt(1) });
 
-/** `SELECT id FROM labels WHERE name IN (…)` — the name→id indirection every label-aware step
- *  reaches through, and the reason `labels` is a `Scan` table rather than a string in an emitter. */
 /**
  * DATA CROSSES AS A `json_each` RELATION — the ONE builder for a set whose size is a function of DATA (root
  * `CLAUDE.md`: such a set crosses the seam as ONE JSON value, exploded in-query, never as N binds or as
