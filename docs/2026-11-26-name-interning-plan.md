@@ -93,11 +93,11 @@ rows (2.5 MB). The key is stored three times per row (table and two indexes): ab
    **Pre-A2 fix landed (7b71ba45), answer-changing, its own commit.** A Map-valued `mergeV`/`mergeE`
    reads a list `T.label` as several labels. It no longer refuses a batch whose drivers differ by
    `T.label`. Mechanism: `mapLabelNames` in `src/compiler/rel/write.ts` explodes the label; the creation
-   path writes through `bindLabels`. **Remains:** one open item, `merge-map-label-seek`. A re-upsert of a
-   batch whose maps share a property value but differ by label is quadratic in the search (321 s at
-   8k). The cost was there before this commit; `docs/outstanding-work.md` logs it. Fix: rank the label
-   beside the string entries in `mapDrivers`, and seek through `labelSeek` when the label is more
-   selective.
+   path writes through `bindLabels`. **`merge-map-label-seek` landed (8f83775b).** A vertex map driver
+   ranks its `T.label` as one more candidate in the one per-driver pick, and seeks through `labelSeek`
+   only when the label is strictly more selective. Mechanism: `mapDrivers`/`mergeVFromMap` in
+   `src/compiler/rel/write.ts` (`LABEL_PICK`; `without` reads the retained pick). Re-upsert is 37 ms at
+   1k and 308 ms at 8k (8.3×; before, 321 s). No baseline moved. **Remains:** nothing.
 2. **A2. Route the five `write.ts` resolve copies through `nameIds`/`nameId`.** Delete `namedLabelIds`.
    Acceptance: bytes the same or smaller; no `sql-plan` regression; merge, `dropLabel` and scale tests
    green. After A1.
@@ -172,7 +172,7 @@ points at it. `ScanHints` is gone from the `names.ts` signatures (SQL aliases on
 A new test in `test/compiler/name-dict.exec.test.ts` covers mergeE with an unknown label. **Remains:**
 nothing for these items. A-f2, A-f4 and the A-f6 `labelListed` lambda are separate items.
 
-**Open item from 7b71ba45:** `merge-map-label-seek` (see A1 above and `docs/outstanding-work.md`).
+**Item from 7b71ba45:** `merge-map-label-seek` landed (8f83775b, see A1 above). **Remains:** nothing.
 
 **Depth gaps seen in review (pre-existing, not Stage A scope).** These decline on trunk before and after
 Stage A: `label()` as a `choose`/`coalesce` arm (`g.V().coalesce(outE().label(), constant('none'))`),

@@ -327,13 +327,6 @@ Queries that answer correctly but grow faster than linear with data or query siz
 - **Problem:** A write fed by `order().by(…).V().has(…)`, or the label filter of a write-body `V()` re-source, renumbers holders × V first. Also tracked as r4-fu0.
 - **Fix:** Run `fuse` on the write path too.
 
-#### A map-driver search seeks a shared value, not its label (`merge-map-label-seek`)
-- **Area:** writes
-- **Reach:** plausible
-- **Problem:** A map driver seeks by its most selective string entry and never by its `T.label`. Re-upserting N maps that share a name under N labels (`[(T.label):'l<i>',name:'paris']`) finds N candidates per driver. Measured: 4.9 s at 1k drivers, 321 s at 8k (65×). The first run (all creations) is linear.
-- **Fix:** Rank the label beside the string entries in `mapDrivers`' pick, and seek through `labelSeek` when it is the most selective.
-- **Where:** `src/compiler/rel/write.ts` (`mapDrivers`, `mergeVFromMap`)
-
 #### K-entry map driver and related shapes (`r7-fu9`)
 - **Area:** writes
 - **Reach:** plausible
