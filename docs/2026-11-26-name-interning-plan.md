@@ -250,6 +250,8 @@ Plan items, in order:
 - **F-a. The `dictScan` docstring overclaims.** It says no caller outside `names.ts` reads `labels`
   directly. `src/formats/csv.ts` `fill(store, 'labels', …)` (CSV edge export) does. Say "no RelIR
   caller". The raw-SQL site itself goes to B5. Cheap; do it with the next commit that touches `names.ts`.
+  **LANDED as `45ca76bd` (with N5, `CI passed`).** Mechanism: the `dictScan` docstring in `names.ts` now
+  says "no RelIR caller". **Remains:** nothing for F-a (the CSV raw-SQL site is B5).
 - **F-b. Physical label facts live in two compiler tables.** `LABEL_OWNERS.vertex`/`.edge`
   (`src/compiler/rel/build.ts`) repeat `OWNED_BY.vertexLabels`/`.edges` (`src/compiler/rel/write.ts`).
   Reads use the first, writes the second. A third copy is `src/sql/schema.ts`. N6 below removes the
@@ -276,6 +278,9 @@ Plan items, in order:
   a vertex with no labels. Add `ownedNames(kind, fresh, of)` = `withNames('labels', labelOwners(kind,
   fresh, of), 'label', fresh)` in `names.ts`; it replaces four written-out copies (`hasTokenPredicate`,
   `labelScalar`, `vertexLabels`, `labelArray`). Finishes N2.
+  **LANDED as `45ca76bd` (`CI passed`, no baseline moves).** Mechanism: `ownedNames` in `names.ts`;
+  `element.ts` `labelArrayOf(kind, owner, fresh)` serves `BaseGraph.labelArray` for both kinds.
+  **Remains:** nothing for N5.
 - **N6. Derive `OWNED_BY` table and owner from `LABEL_OWNERS`/`PROPERTIES`.** For example
   `vertexLabels: { ...LABEL_OWNERS.vertex, cols: [...] }`, and the same for `vertexProps`/`edgeProps`
   from `PROPERTIES`. Removes three duplicate facts (F-b); no SQL change. Leave
