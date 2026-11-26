@@ -330,6 +330,10 @@ Plan items, in order:
   them. Route them through `PROPERTIES[kind]`, then extend the `scripts/arch-check.ts` label-table rule
   to property-table literals (`build.ts` only). Do P1 before B1: Stage B touches every one of these
   scans. `src/rel/passes/semijoin.ts` `SEEK_PROPERTIES`/`PROPERTY_OWNER` stays (clean-room boundary).
+  **LANDED as `767bf29c` with R1 and R3 (`CI passed`, no answer changes, no baseline moves).**
+  Mechanism: `PROPERTIES` in `src/compiler/rel/build.ts` holds each property table's columns, and
+  `propertyScan`/`propertyRows` are the one scan of it. `scripts/arch-check.ts` allows a
+  property-table literal only in `build.ts`. **Remains:** nothing.
 - **P2. `merge-map-label-seek` cleanups.** (a) In `test/compiler/merge-scale.exec.test.ts`, move the
   describe "a map driver seeking by its label answers as by its name" above the mergeE comment block
   ("A mergeE SEARCH JOINS ITS OWN EDGE READ …"). That comment now reads as the header of the wrong
@@ -379,6 +383,9 @@ Plan items, in order:
   ternaries. Expect about 30–40 lines removed. **Check by a SQL diff:** `write.ts` declares `meta` as
   `'blob'`, `propCols` as `'json'`, and `write.ts` (about line 4912) branches on `column.type === 'json'`.
   Keep each consumer's meta type, or prove the SQL does not change.
+  **LANDED as `767bf29c` with P1.** Mechanism: `PROPERTY_TABLE` and `propCols` are deleted; every
+  property scan goes through `propertyScan`/`propertyRows` in `build.ts`. The SQL changes only in
+  select-list column order (`meta` stays `'blob'`). **Remains:** nothing.
 - **R2. `labelHits(name, fresh, of?)`.** `write.ts` `labelHits` (about line 3988) and the mergeV
   allMatch `vlMatch` (about line 5344) build the same "vertices with the label named x" relation. Give
   `labelHits` the optional owner `of`, like `labelOwners`, and use it in both. The "`nameId` is NULL
@@ -386,6 +393,8 @@ Plan items, in order:
 - **R3. The catalog edge-triple endpoint is `ownedNames('vertex')`.** `src/services/catalog/schema.ts`
   `endpoint` (about line 165) is `withNames('labels', labelOwners('vertex', fresh), 'label', fresh)`, the
   body of `ownedNames`. Use it. SQL unchanged. Do it with P1.
+  **LANDED as `767bf29c` with P1.** Mechanism: the catalog's edge endpoint is
+  `ownedNames('vertex', fresh)`. **Remains:** nothing.
 - **R4. `ones(rel, fresh)` beside `existsOf` (low priority).** `write.ts` `cappedCount` (about line
   3992) builds the same `SELECT 1` projection as `build.ts` `existsOf`. Export `ones` and use it in
   both. Do NOT extend it to the bare-plan `{kind:'exists', plan}` sites or `lower/exists.ts`
