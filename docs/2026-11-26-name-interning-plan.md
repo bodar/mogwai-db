@@ -256,6 +256,8 @@ Plan items, in order:
   (`src/compiler/rel/build.ts`) repeat `OWNED_BY.vertexLabels`/`.edges` (`src/compiler/rel/write.ts`).
   Reads use the first, writes the second. A third copy is `src/sql/schema.ts`. N6 below removes the
   compiler duplicate. `src/services/catalog/schema.ts` still scans `vertex_labels` by hand; N4 removes it.
+  **LANDED as `27d3df31` (with N4 + N6, `CI passed`).** Mechanism: `OWNED_BY` spreads `LABEL_OWNERS`/
+  `PROPERTIES`; the catalog reads through `labelOwners`. **Remains:** nothing for F-b.
 - **F-c. `labelScalar` re-reads `edges` for an edge already in scope** (`g.V().outE().label()`,
   `g.E().order().by(T.label)`): one rowid seek per row. It existed before this round and scales
   linearly (1.82 ms at 1k, 6.91 ms at 8k, 3.8×). Not a defect. **Recorded** in `docs/outstanding-work.md`
@@ -272,6 +274,9 @@ Plan items, in order:
   Use `labelOwners('vertex', fresh)`. Then `LABEL_OWNERS` is the one place that names the physical label
   table and owner column. No column clash (the other scans already rename). One Project node less per
   scan; same rows, so no answer change.
+  **LANDED as `27d3df31` (`CI passed`, no baseline moves).** Mechanism: `src/services/catalog/schema.ts`
+  reads `(owner, label)` rows through `labelOwners`; `scripts/arch-check.ts` confines a `vertex_labels`
+  literal to `build.ts`. **Remains:** nothing for N4.
 - **N5. One `labelArray` path for both kinds.** `BaseGraph.labelArray` (`source.ts`) has a kind ternary;
   `element.ts` `vertexLabels` hard-codes `'vertex'`. Give `vertexLabels` a `kind`. An edge has one
   `labelOwners` row, so `json_group_array` gives the same one-name array; `COALESCE(…, '[]')` still covers
@@ -286,6 +291,8 @@ Plan items, in order:
   from `PROPERTIES`. Removes three duplicate facts (F-b); no SQL change. Leave
   `src/rel/passes/semijoin.ts` `SEEK_PROPERTIES`/`PROPERTY_OWNER` alone: `src/rel` must not import
   `src/compiler`.
+  **LANDED as `27d3df31` (`CI passed`, no baseline moves).** Mechanism: `OWNED_BY` in `write.ts` spreads
+  `LABEL_OWNERS.vertex` and `PROPERTIES`; `edges` stays literal (by rowid). **Remains:** nothing for N6.
 - **N7. One `existsOf` (the `SELECT 1` probe) in `build.ts`.** Two private copies
   (`decorate.ts`, `boundgraph.ts`) and about 18 inline `make.project(… [['one', compilerInt(1)]])` +
   `{kind:'exists'}` sites (`source.ts` ×6, `write.ts` ×5, `map.ts` ×2, `list.ts`, `lower.ts`,
