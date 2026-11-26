@@ -1,7 +1,7 @@
 import * as make from '../../rel/factory.ts';
 import { col, compilerText, type Expr } from '../../rel/expr.ts';
-import { jsonMember, meta, typeOf, type Minter } from '../../compiler/rel/build.ts';
-import { withNames } from '../../compiler/rel/names.ts';
+import { jsonMember, LABEL_OWNERS, meta, typeOf, type Minter } from '../../compiler/rel/build.ts';
+import { labelOwners, withNames } from '../../compiler/rel/names.ts';
 import type { Service, RelCallSite, RelContribution } from '../spi/types.ts';
 import type { Rel, Table } from '../../rel/rel.ts';
 
@@ -70,11 +70,11 @@ const asMapRows = (input: Rel, map: Expr, fresh: Minter): Rel =>
 /**
  * A table scan whose columns are RENAMED to unique names up front — a `Join` emits both sides'
  * columns POSITIONALLY and REFUSES a duplicate output name (`§3.3`), so the same physical column
- * (`node`, `label`, `id`, `name`) read from two tables in one join tree would collide. Renaming at the
- * scan is the collision-free discipline: every edge-triple join reads two `vertex_labels`, and each gets
- * its own prefix. `withNames` decodes a label NAME and appends `lid`/`name` to its prefixed input. `cols`
- * maps `physical → output` name; the scan reads the physical columns and the projection emits the output
- * ones.
+ * (`node`, `label`, `id`, `name`) read from two tables in one join tree would collide. The property
+ * tables and `edgeTriples`' `edges(src, label, tgt)` are renamed here; a `labelOwners` relation keeps
+ * its physical `(owner, label)` names, which no renamed side reuses. `withNames` decodes a label NAME and
+ * appends `lid`/`name` to its input. `cols` maps `physical → output` name; the scan reads the physical
+ * columns and the projection emits the output ones.
  */
 const scanAs = (
   table: Table, cols: readonly (readonly [physical: string, out: string, type: 'int' | 'text'])[], fresh: Minter,
@@ -91,19 +91,20 @@ const innerJoin = (left: Rel, right: Rel, on: Expr, fresh: Minter): Rel =>
   make.join({ id: fresh('sj'), left, right, join: 'inner', on, channels: [], type: typeOf(...left.type.cols, ...right.type.cols) });
 
 const eqExpr = (a: Expr, b: Expr): Expr => ({ kind: 'binary', op: '=', left: a, right: b });
+const { owner: VERTEX_OWNER } = LABEL_OWNERS.vertex;
 
 /** VERTEX LABELS — one `{kind:'vertexLabel', name, count}` per label that at least one vertex carries.
- *  `vertex_labels` GROUP BY label, joined to `labels` for the name. */
+ *  The vertex `labelOwners` relation GROUP BY label, joined to `labels` for the name. */
 function vertexLabels(fresh: Minter): Rel {
-  const vl = scanAs('vertex_labels', [['node', 'vlNode', 'int'], ['label', 'vlLabel', 'int']], fresh);
+  const vl = labelOwners('vertex', fresh);
   // The GROUP KEY is the first type column, its value supplied by `groupBy`; `aggs` lists only the
   // aggregates (never the key again — the type's leading N columns ARE the N group keys, positionally).
   const grouped = make.aggregate({
-    id: fresh('svg'), input: vl, channels: [], groupBy: [col(vl.id, 'vlLabel')],
-    type: typeOf(meta('vlLabel', 'int'), meta('count', 'int')),
-    aggs: [['count', { kind: 'agg', fn: 'count', args: [col(vl.id, 'vlNode')] }]],
+    id: fresh('svg'), input: vl, channels: [], groupBy: [col(vl.id, 'label')],
+    type: typeOf(meta('label', 'int'), meta('count', 'int')),
+    aggs: [['count', { kind: 'agg', fn: 'count', args: [col(vl.id, VERTEX_OWNER)] }]],
   });
-  const joined = withNames('labels', grouped, 'vlLabel', fresh);
+  const joined = withNames('labels', grouped, 'label', fresh);
   // Collapse the join to ONE relation before the map, so the map builder references a single
   // relation id — the same shape `properties`/`edgeTriples` take through their `Distinct`. Referencing
   // a join's fused CHILD ids from a grandchild project is not in scope; its OUTPUT is.
@@ -123,17 +124,17 @@ function vertexLabels(fresh: Minter): Rel {
  *  the honest answer for a value whose type the storage class alone decides. */
 function properties(fresh: Minter): Rel {
   const vp = scanAs('vertex_properties', [['node', 'vpNode', 'int'], ['key', 'vpKey', 'text'], ['vtype', 'vpType', 'text']], fresh);
-  const vl = scanAs('vertex_labels', [['node', 'vlNode', 'int'], ['label', 'vlLabel', 'int']], fresh);
+  const vl = labelOwners('vertex', fresh);
   // vp → vl, FLATTENED so the next join reads one relation's columns (the file's discipline — see
   // `edgeTriples`), then → labels for the label name. A parent reads a join's OUTPUT columns through the
   // JOIN's id (its spliced children's ids are not exposed upward — the emitter's join scope rule).
-  const vpVl = innerJoin(vp, vl, eqExpr(col(vp.id, 'vpNode'), col(vl.id, 'vlNode')), fresh);
+  const vpVl = innerJoin(vp, vl, eqExpr(col(vp.id, 'vpNode'), col(vl.id, VERTEX_OWNER)), fresh);
   const onVl = make.project({
     id: fresh('pvj'), input: vpVl,
-    channels: [], type: typeOf(meta('vpKey', 'text'), meta('vpType', 'text', true), meta('vlLabel', 'int')),
-    exprs: [['vpKey', col(vpVl.id, 'vpKey')], ['vpType', col(vpVl.id, 'vpType')], ['vlLabel', col(vpVl.id, 'vlLabel')]],
+    channels: [], type: typeOf(meta('vpKey', 'text'), meta('vpType', 'text', true), meta('label', 'int')),
+    exprs: [['vpKey', col(vpVl.id, 'vpKey')], ['vpType', col(vpVl.id, 'vpType')], ['label', col(vpVl.id, 'label')]],
   });
-  const joined = withNames('labels', onVl, 'vlLabel', fresh);
+  const joined = withNames('labels', onVl, 'label', fresh);
   // DISTINCT (label, key, vtype): the same key on many vertices is ONE schema field. Whole-row distinct
   // over exactly the three columns the map reads, so it is a `Project` of them then `Distinct`.
   const triple = make.project({
@@ -155,17 +156,16 @@ function properties(fresh: Minter): Rel {
  *  (`scanAs`) and each label decode (`withNames`) is flattened before the next join, so the five-way join
  *  carries no duplicate output name. */
 function edgeTriples(fresh: Minter): Rel {
-  // Resolve each endpoint's label NAME locally first — `vertex_labels` JOIN `labels`, flattened to one
+  // Resolve each endpoint's label NAME locally first — the vertex `labelOwners` JOIN `labels`, flattened to one
   // relation carrying (node, name) — so the edge join references one id per end, never a deep child.
   // Flattening after each join is the collision-free discipline the whole file follows: a later join's
   // ON reads the immediate input's OWN columns, so no reference reaches through an intermediate that the
   // emitter may have closed into a subquery.
   const endpoint = (nodeOut: string, nameOut: string): Rel => {
-    const vl = scanAs('vertex_labels', [['node', 'vNode', 'int'], ['label', 'vLabel', 'int']], fresh);
-    const j = withNames('labels', vl, 'vLabel', fresh);
+    const j = withNames('labels', labelOwners('vertex', fresh), 'label', fresh);
     return make.project({
       id: fresh('ep'), input: j, channels: [], type: typeOf(meta(nodeOut, 'int'), meta(nameOut, 'text')),
-      exprs: [[nodeOut, col(j.id, 'vNode')], [nameOut, col(j.id, 'name')]],
+      exprs: [[nodeOut, col(j.id, VERTEX_OWNER)], [nameOut, col(j.id, 'name')]],
     });
   };
   const e = scanAs('edges', [['src', 'eSrc', 'int'], ['label', 'eLabel', 'int'], ['tgt', 'eTgt', 'int']], fresh);
@@ -202,19 +202,19 @@ function edgeTriples(fresh: Minter): Rel {
 }
 
 /** EDGE PROPERTIES — one `{kind:'edgeProperty', label, key, type}` per DISTINCT (edgeLabel, key, vtype).
- *  The `properties` twin for edges: `edge_properties` JOIN `edges` (for the label id) JOIN `labels` (the
+ *  The `properties` twin for edges: `edge_properties` JOIN the edge `labelOwners` (for the label id) JOIN `labels` (the
  *  name). This is what completes the reflected schema for edge fields — the `edge_properties → edge-field
  *  argument/payload types` the plan's §4 names — so a later increment can expose an edge's own fields. */
 function edgeProperties(fresh: Minter): Rel {
   const ep = scanAs('edge_properties', [['edge', 'epEdge', 'int'], ['key', 'epKey', 'text'], ['vtype', 'epType', 'text']], fresh);
-  const e = scanAs('edges', [['id', 'eId', 'int'], ['label', 'eLabel', 'int']], fresh);
-  const epE = innerJoin(ep, e, eqExpr(col(ep.id, 'epEdge'), col(e.id, 'eId')), fresh);
+  const e = labelOwners('edge', fresh);
+  const epE = innerJoin(ep, e, eqExpr(col(ep.id, 'epEdge'), col(e.id, LABEL_OWNERS.edge.owner)), fresh);
   const onE = make.project({
     id: fresh('epj'), input: epE,
-    channels: [], type: typeOf(meta('epKey', 'text'), meta('epType', 'text', true), meta('eLabel', 'int')),
-    exprs: [['epKey', col(epE.id, 'epKey')], ['epType', col(epE.id, 'epType')], ['eLabel', col(epE.id, 'eLabel')]],
+    channels: [], type: typeOf(meta('epKey', 'text'), meta('epType', 'text', true), meta('label', 'int')),
+    exprs: [['epKey', col(epE.id, 'epKey')], ['epType', col(epE.id, 'epType')], ['label', col(epE.id, 'label')]],
   });
-  const joined = withNames('labels', onE, 'eLabel', fresh);
+  const joined = withNames('labels', onE, 'label', fresh);
   const triple = make.project({
     id: fresh('epp'), input: joined, channels: [], type: typeOf(meta('name', 'text'), meta('key', 'text'), meta('type', 'text')),
     exprs: [['name', col(joined.id, 'name')], ['key', col(joined.id, 'epKey')],

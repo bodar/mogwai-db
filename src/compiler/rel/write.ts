@@ -24,7 +24,7 @@ import {
   LABEL_ITEM_NAME, LABEL_MEMBER_NAME, LABEL_NAME, type NameRules, validateLabel, validatePropertyKey,
 } from '../../gremlin/validate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
-import { and, carriedCols, eq, explodeMembers, fenced, meta, storedForm, presenceFenced, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
+import { and, carriedCols, eq, explodeMembers, fenced, LABEL_OWNERS, meta, PROPERTIES, storedForm, presenceFenced, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
 import { substRelId } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import { scanColumnOf } from './source.ts';
@@ -87,20 +87,20 @@ const admittedPresence = (cv: ChildValue): Expr => {
  */
 
 /** The physical columns each cascade statement addresses its rows by. `Scan` is the one node that
- *  names the schema (§3.3), so a table the cascade touches declares its shape HERE — the read side's
- *  `NODE_COLS`/`EDGE_COLS` are the same list for the two element tables. */
+ *  names the schema (§3.3), so a table the cascade touches declares its shape HERE (`NODE_COLS`/`EDGE_COLS`
+ *  are the same list); an entry that IS a read-side fact spreads it from `PROPERTIES`/`LABEL_OWNERS`. */
 const OWNED_BY = {
-  vertexProps: { table: 'vertex_properties', owner: 'node', cols: [meta('id', 'int'), meta('node', 'int')] },
+  vertexProps: { ...PROPERTIES.vertex, cols: [meta('id', 'int'), meta('node', 'int')] },
   vertexCardinality: { table: 'vertex_property_cardinality', owner: 'node', cols: [meta('node', 'int'), meta('key', 'text')] },
-  vertexLabels: { table: 'vertex_labels', owner: 'node', cols: [meta('node', 'int'), meta('label', 'int')] },
-  edgeProps: { table: 'edge_properties', owner: 'edge', cols: [meta('id', 'int'), meta('edge', 'int')] },
+  vertexLabels: { ...LABEL_OWNERS.vertex, cols: [meta('node', 'int'), meta('label', 'int')] },
+  edgeProps: { ...PROPERTIES.edge, cols: [meta('id', 'int'), meta('edge', 'int')] },
   // The same two tables addressed by the property row's OWN id rather than by its owner — what
   // `drop()` over a PROPERTY stream deletes. Separate entries and not a parameter, because the KEY is
   // the whole difference between "this element's properties" and "these properties".
-  vertexPropRows: { table: 'vertex_properties', owner: 'id', cols: [meta('id', 'int')] },
-  edgePropRows: { table: 'edge_properties', owner: 'id', cols: [meta('id', 'int')] },
+  vertexPropRows: { table: PROPERTIES.vertex.table, owner: 'id', cols: [meta('id', 'int')] },
+  edgePropRows: { table: PROPERTIES.edge.table, owner: 'id', cols: [meta('id', 'int')] },
   nodes: { table: 'nodes', owner: 'id', cols: [meta('id', 'int')] },
-  edges: { table: 'edges', owner: 'id', cols: [meta('id', 'int')] },
+  edges: { table: 'edges', owner: 'id', cols: [meta('id', 'int')] }, // by rowid — not `LABEL_OWNERS.edge`, which only coincides
 } as const satisfies Readonly<Record<string, { readonly table: Table; readonly owner: string; readonly cols: readonly ColMeta[] }>>;
 
 /** `property_fts`'s ROWID is the property row's id SIGNED by owner kind (+vertex, -edge — `ftsRowid` in

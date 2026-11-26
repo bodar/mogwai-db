@@ -20,6 +20,7 @@ import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { exec, executeQuery } from './support/executor.ts';
 import { Executor } from '../src/execute.ts';
 import { MODERN_SEED } from './fixtures/seed-modern.ts';
+import { zooStore } from './support/harness.ts';
 import { decode, decodeAll } from './support/decode.ts';
 
 /** Parse a gremlin string, normalize, and return the (single) folded call IRStep. */
@@ -527,9 +528,9 @@ describe('schema — reflect the implicit schema as a map stream', () => {
   for (const g of MODERN_SEED) executeQuery(store, g, {});
   // Decode the stream to plain objects: each row is a GraphBinary Map. Collect into an array of
   // plain-object records so the assertions read as the schema, not the framing.
-  const schema = async (): Promise<Record<string, unknown>[]> => {
+  const schema = async (of: GraphStore = store): Promise<Record<string, unknown>[]> => {
     const out: Record<string, unknown>[] = [];
-    for (const b of exec(store, extendedRegistry).buffers("g.call('schema')", {})) {
+    for (const b of exec(of, extendedRegistry).buffers("g.call('schema')", {})) {
       const m: any = await decode(b);
       out.push(Object.fromEntries([...m]));
     }
@@ -565,6 +566,25 @@ describe('schema — reflect the implicit schema as a map stream', () => {
   test('fold() collects the whole schema into one list — the list-of-maps substrate', async () => {
     const [list] = await decodeAll(exec(store, extendedRegistry).buffers("g.call('schema').fold()", {}));
     expect((list as unknown[]).length).toBe(10);
+  });
+
+  // The ZOO graph gives one vertex SEVERAL labels, so an edge contributes one triple per (srcLabel,
+  // tgtLabel) pair and a vertex counts once under each label. The oracle is the storage schema read
+  // directly, independent of the RelIR the service builds through `labelOwners`.
+  test('zoo (multi-label) — label counts and edge triples match the stored label rows', async () => {
+    const zoo = zooStore();
+    const rows = await schema(zoo);
+    const oracle = (sql: string) => zoo.query<{ k: string }>(sql).map((r) => r.k).sort();
+    expect(of(rows, 'vertexLabel').map((r) => `${r.name}:${r.count}`).sort()).toEqual(oracle(
+      "SELECT l.name || ':' || count(*) AS k FROM vertex_labels vl JOIN labels l ON l.id = vl.label GROUP BY l.name"));
+    const triples = of(rows, 'edge').map((r) => `${r.src}-${r.label}->${r.tgt}`).sort();
+    expect(triples).toEqual(oracle(`SELECT DISTINCT sl.name || '-' || el.name || '->' || tl.name AS k FROM edges e
+      JOIN labels el ON el.id = e.label
+      JOIN vertex_labels s ON s.node = e.src JOIN labels sl ON sl.id = s.label
+      JOIN vertex_labels t ON t.node = e.tgt JOIN labels tl ON tl.id = t.label`));
+    expect(triples).toContain('keeper-careFor->endangered'); // a multi-label target fans out per label
+    expect(of(rows, 'edgeProperty').map((r) => `${r.label}.${r.key}:${r.type}`).sort())
+      .toEqual(['careFor.specialty:string', 'friendsWith.since:int', 'livesIn.since:int']);
   });
 
   test('schema is an EXTENSION — absent from the reference registry', () => {
