@@ -7,7 +7,7 @@ import {
     byEncounter, coalesce, EDGE_COLS, EMPTY_ARRAY, EMPTY_OBJECT, eq, jsonOf, meta, NODE_COLS, typeOf, typedNode, typedNodeDetached,
     type Minter,
 } from './build.ts';
-import { labelOwners, nameOf, withNames } from './names.ts';
+import { nameOf, ownedNames } from './names.ts';
 
 /**
  * THE ELEMENT PAYLOAD — an id-relation projected to the tuple a vertex or an edge is ON THE WIRE.
@@ -71,17 +71,18 @@ function correlatedColumn(
 }
 
 /**
- * ALL of a vertex's labels as a JSON array of names — the PAYLOAD position (`labelPayloadFor`), which is
- * unconditional and has no `LabelRegime`: GraphBinary's `{label}` field IS a list and the client derives
- * `.label` from `labels[0]`, so a vertex element carries the whole set whatever `with("singlelabel")` says
- * about how `elementMap()` renders a `T.label` entry.
+ * ALL of an element's labels as a JSON array of names. For a vertex it is the PAYLOAD position
+ * (`labelPayloadFor`), which is unconditional and has no `LabelRegime`: GraphBinary's `{label}` field IS a
+ * list and the client derives `.label` from `labels[0]`, so a vertex element carries the whole set whatever
+ * `with("singlelabel")` says about how `elementMap()` renders a `T.label` entry. An edge has exactly one
+ * `labelOwners` row, so the same aggregate is its one-name array.
  *
- * Ordered by LABEL ID, which is the same deterministic pick `vertexLabelName` makes, so the scalar
- * `label()` and the payload's first entry name the same label. `json_group_array` over no rows is NULL —
- * a vertex may carry zero labels under `ZERO_OR_MORE` — so the `COALESCE` is the totality, not a defence.
+ * Ordered by LABEL ID, which is the same deterministic pick `labelScalar` makes, so the scalar `label()`
+ * and the payload's first entry name the same label. `json_group_array` over no rows is NULL — a vertex
+ * may carry zero labels under `ZERO_OR_MORE` — so the `COALESCE` is the totality, not a defence.
  */
-export function vertexLabels(node: Expr, fresh: Minter): Expr {
-  const joined = withNames('labels', labelOwners('vertex', fresh, node), 'label', fresh);
+export function labelArrayOf(kind: Elem, owner: Expr, fresh: Minter): Expr {
+  const joined = ownedNames(kind, fresh, owner);
   const collected = make.aggregate({
     id: fresh('wlc'), input: joined, channels: [], type: typeOf(meta('labels', 'json', true)),
     groupBy: [],
@@ -251,7 +252,7 @@ function correlatedElement(rowid: Expr, elem: Elem, fresh: Minter, wrap: (payloa
       ['id', coalesce(own('uid'), own('id'))],
       // A VERTEX's label payload is a JSON ARRAY and an EDGE's is a bare name, so only the first needs
       // the subtype pinned — quoting an array as a string is the failure this prevents.
-      ['label', elem === 'edge' ? nameOf('labels', own('label'), fresh) : jsonOf(vertexLabels(own('id'), fresh))],
+      ['label', elem === 'edge' ? nameOf('labels', own('label'), fresh) : jsonOf(labelArrayOf('vertex', own('id'), fresh))],
       ...(elem === 'edge'
         ? [['src', nodeExternalId(own('src'), fresh)] as const, ['tgt', nodeExternalId(own('tgt'), fresh)] as const]
         : []),
@@ -311,7 +312,7 @@ export function elementPayload(input: Rel, elem: Elem, opts: { readonly bulk: bo
     [meta('id', 'any'), coalesce(col(ordered.id, ROW('uid')), rowid)],
     elem === 'edge'
       ? [meta('label', 'text', true), nameOf('labels', col(ordered.id, ROW('label')), fresh)]
-      : [meta('label', 'json'), vertexLabels(rowid, fresh)],
+      : [meta('label', 'json'), labelArrayOf('vertex', rowid, fresh)],
     ...(elem === 'edge'
       ? [
           [meta('src', 'any', true), nodeExternalId(col(ordered.id, ROW('src')), fresh)] as const,
@@ -355,7 +356,7 @@ export function correlatedElementColumns(
   }
   return [
     [meta('id', 'any', true), externalId(rowid, 'vertex', fresh)],
-    [meta('label', 'json', true), vertexLabels(rowid, fresh)],
+    [meta('label', 'json', true), labelArrayOf('vertex', rowid, fresh)],
     [meta('props', 'json', true), vertexProps(rowid, fresh)],
   ];
 }

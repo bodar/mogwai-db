@@ -6,13 +6,13 @@ import type { Binding } from '../../rel/plan.ts';
 import { arg, type Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../elem.ts';
 import { constLit } from './const.ts';
-import { elementNode, elementObject, elementPayload, externalId as elementExternalId, vertexLabels } from './element.ts';
+import { elementNode, elementObject, elementPayload, externalId as elementExternalId, labelArrayOf } from './element.ts';
 import { CONSTANT } from './predicate.ts';
 import { valueIsKind } from './receiver.ts';
 import type { ValueEvidence } from './tag.ts';
 import { propertyRelation } from './property.ts';
 import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, LABEL_OWNERS, meta, NODE_COLS, PROPERTIES, renumber, storedOrderKey, storedPayload, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
-import { labelOwners, nameIds, nameOf, withNames } from './names.ts';
+import { labelOwners, nameIds, nameOf, ownedNames, withNames } from './names.ts';
 
 // ---------- GraphSource: one traversal vocabulary over two physical graph shapes ----------
 //
@@ -652,7 +652,7 @@ export const BaseGraph: GraphSource = {
     }
     // `has(T.label, P)`: `P` is an arbitrary predicate over the decoded NAME, so it tests the owner's
     // decoded label rows rather than looking a name up.
-    const joined = withNames('labels', labelOwners(kind, fresh, id), 'label', fresh);
+    const joined = ownedNames(kind, fresh, id);
     const matches = valuePred(col(joined.id, 'name'));
     if (!matches) return null;
     const matching = make.filter({ id: fresh('f'), input: joined, channels: [], type: joined.type, pred: matches });
@@ -666,7 +666,7 @@ export const BaseGraph: GraphSource = {
 
   labelScalar: (kind, id, fresh) => {
     // The first label in INTERNING order — the owner's label id, which is what makes it the payload's `labels[0]`.
-    const joined = withNames('labels', labelOwners(kind, fresh, id), 'label', fresh);
+    const joined = ownedNames(kind, fresh, id);
     return firstOf(joined, col(joined.id, 'name'), col(joined.id, 'label'), fresh);
   },
 
@@ -738,11 +738,8 @@ export const BaseGraph: GraphSource = {
     return { kind: 'exists', plan: probe, negated: false };
   },
 
-  // Always called for a VERTEX (a set-regime `T.label`, or the zero-label gate); the edge arm is for
-  // totality — an edge is single-label, so its "array" is the one name.
-  labelArray: (kind, id, fresh) => kind === 'vertex'
-    ? vertexLabels(id, fresh)
-    : { kind: 'call', fn: 'json_array', args: [BaseGraph.labelScalar('edge', id, fresh)] },
+  // One path for both kinds: an edge has one `labelOwners` row, so its array is the one name.
+  labelArray: (kind, id, fresh) => labelArrayOf(kind, id, fresh),
 
   // A path position IS the base element node — `elementNode` already builds the `{t,v}` scalar over the
   // physical tables, so the source method is that call with the vocabulary's argument order.

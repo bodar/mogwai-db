@@ -26,8 +26,10 @@ import type { Elem } from '../elem.ts';
 export type NameDict = 'labels';
 
 /**
- * A scan of a name dictionary, as its `(id, name)` rows. PRIVATE on purpose: every read and write of a
- * dictionary goes through the functions below, so no caller outside this file reads `labels` directly.
+ * A scan of a name dictionary, as its `(id, name)` rows. PRIVATE on purpose: every RelIR read and write of
+ * a dictionary goes through the functions below, so no RelIR caller outside this file scans `labels`. Raw
+ * SQL outside the compiler still names it (`src/formats/csv.ts`); stage B5 of
+ * `docs/2026-11-26-name-interning-plan.md` routes those sites through store-side twins.
  */
 const dictScan = (dict: NameDict, fresh: Minter): Extract<Rel, { readonly kind: 'scan' }> =>
   make.scan({ id: fresh('lbl'), table: dict, alias: fresh('rl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
@@ -112,6 +114,16 @@ export function labelOwners(kind: Elem, fresh: Minter, of?: Expr): Rel {
     type: typeOf(meta(owner, 'int'), meta('label', 'int')),
   });
   return of === undefined ? scan : make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: eq(col(scan.id, owner), of) });
+}
+
+/**
+ * ONE element's labels, DECODED — `labelOwners(kind, fresh, of)` joined to `labels`: one row per label the
+ * owner carries, with `label` (the dictionary id, the interning order) and `name`. The correlated read
+ * every per-element label question starts from: the scalar `label()`, the label array, and a
+ * `has(T.label, P)` probe. Without `of`, every owner's rows.
+ */
+export function ownedNames(kind: Elem, fresh: Minter, of?: Expr): Rel {
+  return withNames('labels', labelOwners(kind, fresh, of), 'label', fresh);
 }
 
 /**

@@ -4,6 +4,13 @@
 // the statement — an inline label spends no bind, a parameter spends exactly one.
 import { test, expect, describe } from 'bun:test';
 import { bagOf, bare, read, run, seededStore } from '../support/harness.ts';
+import { col } from '../../src/rel/expr.ts';
+import * as make from '../../src/rel/factory.ts';
+import { emitQuery } from '../../src/rel/emit.ts';
+import { planOf } from '../../src/rel/plan.ts';
+import { meta, minter, typeOf } from '../../src/compiler/rel/build.ts';
+import { BaseGraph } from '../../src/compiler/rel/source.ts';
+import type { Elem } from '../../src/compiler/elem.ts';
 
 const values = (rows: readonly unknown[]): unknown[] => bare(rows).map((row: { v: unknown }) => row.v);
 
@@ -83,6 +90,23 @@ describe('nameOf / withNames — an id decodes to its name', () => {
   test('an edge label decodes to its name', () => {
     const store = seededStore();
     expect(values(run(store, 'g.E().label()')).sort()).toEqual(['created', 'created', 'created', 'created', 'knows', 'knows']);
+  });
+
+  // `labelArray` is ONE path for both kinds (`labelArrayOf` over `ownedNames`): an edge has one owned
+  // label row, so its array is the one name; a vertex's is every name in interning order.
+  test('labelArray reads both kinds through the same owned-names relation', () => {
+    const store = seededStore();
+    run(store, "g.addV('zeta').property('name', 'z').addLabel('person')");
+    const arrays = (kind: Elem): string[] => {
+      const fresh = minter();
+      const scan = make.scan({ id: fresh('s'), table: kind === 'edge' ? 'edges' : 'nodes', alias: fresh('r'), channels: [], type: typeOf(meta('id', 'int')) });
+      const ordered = make.sort({ id: fresh('o'), input: scan, channels: [], type: scan.type, terms: [{ expr: col(scan.id, 'id'), dir: 'asc' }] });
+      const out = make.project({ id: fresh('p'), input: ordered, channels: [], type: typeOf(meta('v', 'json')), exprs: [['v', BaseGraph.labelArray(kind, col(ordered.id, 'id'), fresh)]] });
+      const { sql, binds } = emitQuery(planOf(out));
+      return (store.query(sql, binds as never[]) as { v: string }[]).map((row) => row.v);
+    };
+    expect(arrays('edge')).toEqual(['["knows"]', '["knows"]', '["created"]', '["created"]', '["created"]', '["created"]']);
+    expect(arrays('vertex').at(-1)).toBe('["person","zeta"]');
   });
 });
 
