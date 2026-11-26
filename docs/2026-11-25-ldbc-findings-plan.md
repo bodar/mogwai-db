@@ -1,8 +1,7 @@
 # LDBC findings — fix the three measured defects
 
-**Status: L1–L3 LANDED (2026-11-25). Round 2 LANDED (2026-11-25). Round 3 LANDED (item 5 on
-2026-11-26, `1c5020d9`). Open: "Parked in round 3", "Follow-ups from review (round 3)" and the round-4 list under
-"Next round (round 4)".**
+**Status: L1–L3 LANDED (2026-11-25). Rounds 2–4 LANDED. Round 5 items 1–4 LANDED (2026-11-26).
+Open: the round-5 follow-ups and the round-6 list under "Next round (round 6)".**
 
 **Source.** A head-to-head run against Relate 1.2.0 (Neo4j's embedded in-memory Cypher engine) on
 LDBC SNB sf0.1: 327,588 vertices, 1,477,965 edges, Relate's own 30-query latency lane
@@ -556,7 +555,8 @@ Major first. Minor items are kept only when they are cheap and concrete.
   the stored TEXT. That wrong answer is recorded as `duration-stored-comparable`, so it is not new. Fix:
   one exported bucket table, read by both (see round-5 item 3). ✅ Fixed by round-5 item 3 (`a180b839`):
   `bucketGuard` is the one table.
-- **Pre-existing wrong answer — `P.not` around an ordering keeps incomparable rows**
+- ✅ **Resolved by round-5 item 1 (`f6715991`): the premise was wrong, see there.** *Original text:*
+  **Pre-existing wrong answer — `P.not` around an ordering keeps incomparable rows**
   (`src/compiler/rel/predicate.ts` `negated()`). Store `s` in {`'10'`, `10`, `10.00m`, `'x'`, `3`, `true`,
   `1`}. `g.V().has('k','e').as('x').V().has('s', P.not(P.gt(select('x').values('s')))).values('k')`
   returns `[a,d,e,f,h]`; the reference is `[e,h]`. The literal form `has('s', P.not(P.gt(3)))` is wrong
@@ -676,9 +676,114 @@ Order: wrong answer, then the SQL doubling, then cheap fixes, then byte-stable r
     the stricter rule. About 35 lines and one concept removed. Only the plan can change: keep the
     sql-plan gate and the merge-scale `e_in`/no-`rowid=?` assertions green.
 
+## Parked in round 5
+
+None. Items 1–4 landed. Items 5–15 were not started: the round took only items 1–4. They are not
+blocked and need no new substrate. They move to round 6 unchanged. No round-5 branch is a resume point.
+
+## Follow-ups from review (round 5)
+
+No MAJOR finding. Minor items are kept when they are cheap and concrete, or a real gap.
+
+- **A label operand inside `is()` or a `where()`/`select()` body declines (depth gap, plausible
+  reach).** Not new: base and head give the same clean `UnsupportedTraversal`. Witnesses:
+  `g.V().values('age').as('x').V().where(values('age').is(gt(select('x')))).count()`;
+  `g.inject(29.0d,29).as('e').V().values('age').is(gte(select('e')))`;
+  `g.V().has('age').as('a').values('age').as('x').select('a').values('age').is(eq(select('x')))`. The
+  corpus form `g.V(vid1).as('a').V().values('age').is(P.gt(__.select('a').values('age')))`
+  (`Is.feature:368`) also declines in the probe harness. The same applies to `neq(select('e'))` and
+  `between(select('x'),100)` in `has()`. Where: `src/compiler/rel/lower/reduction.ts`. The `is()` host
+  must reach the same nested-operand lowering that `has()` uses. Check with
+  `bun scripts/rel-blockers.ts --step is` first.
+- **The nested operand's "raw tag" fact is carried by a field's presence** (`2479f03e`,
+  `src/compiler/rel/lower/reduction.ts` `nestedFirstValue`). It sets `inferNullTag` when
+  `ChildValue.labelEntry` is present. Every producer re-points or gates `labelEntry` today, and the
+  probes at depth answer correctly. But a future producer that keeps `vtype` and drops `labelEntry`
+  silently brings back the dropped-rows answer. Fix: a `rawTag` (or `inferNullTag`) flag on
+  `ChildValue`/`ChildHost`, set by the producer, as `aliasOperandAt` does. The same flag lets a label
+  bound from a stored `values(k)` (its `t` is never NULL) skip the inferred-tag arm: about 330–670 B of
+  SQL per guard site, no runtime change.
+- **The label's history entry is still built twice per comparison** (`src/compiler/rel/predicate.ts`).
+  `g.V().as('v').values('age').as('e').select('v').out().has('age', gte(select('e'))).count()`: the
+  value operand VALUES and the `sameBucket` guard VALUES each re-spell the whole `jsonb_array(…)`
+  document. Not a regression (base had the same). Cost is bytes, not scaling (7.1× from 1k to 8k).
+  Fix: bind the operand node once and give it to both the guard and the compare. Do it with the item
+  above. It is also the first step to the round-5 item-2 SQL-size target.
+- **Char and String: one bucket for ordering, two for equality** (`src/compiler/rel/predicate.ts`).
+  `bucketGuard` puts `char` and `string` in one ordering bucket; `typedValueEq` keeps them apart. So
+  `where('a', P.lte('b'))` between a char and an equal string can hold while `P.eq` does not.
+  Pre-existing. Read `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java`
+  (its `Type` for `Character`), then make `typedValueEq` read `bucketGuard`'s table.
+- **Cheap — correct the unbound-label citation** (`f6715991`, `src/compiler/rel/lower.ts` `aliasPred`
+  doc and the commit text). It says an unbound label in an `or()` leaf drops the row "as the reference
+  does". The reference throws: `Scoping.getSafeScopeValue` rethrows `KeyNotFoundException` as
+  `IllegalArgumentException`
+  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/Scoping.java:141-146`).
+  Dropping is our accepted divergence (`docs/limitations.md` row "Label with no value"). Say that.
+- **Cheap — emit the leaf presence guard only under an OR** (`src/compiler/rel/lower.ts`
+  `identityLeaf`). An OPTIONAL-bound operand label now adds `(a1 IS NOT NULL AND json_array_length(a1) > 0)`
+  even for a single-leaf `P.not`, where a NOT over a NULL compare already drops the row. Witness:
+  `g.V().as('a').optional(__.out().has('age',P.gt(50)).as('b')).where('a', P.not(P.eq('b'))).count()`.
+  Linear, same counts, baseline unmoved.
+- **Already recorded, confirmed again:** the `by()`-ring leaf compares raw across types
+  (`where-ring-raw-compare` in `docs/outstanding-work.md`). New witnesses:
+  `g.V().as('a').out().as('b').where('a', P.not(P.gt('b'))).by('name').by('age')` returns `[]`, the
+  reference `[marko, marko]`; on a mixed-type `v`, `where('x', P.not(P.eq('w'))).by('v')` drops a
+  `true` beside `1`. Add the witnesses to that entry.
+
+## Next round (round 6)
+
+Order: the depth gap, then items carried from round 5, then the round-5 reuse sweep.
+
+1. **A label operand inside `is()`** (follow-up above). Plausible reach, and one corpus traversal
+   (`Is.feature:368`). Fix it in the body's lowering, not with a new route.
+2. **The raw-tag flag and one operand node per comparison** (two follow-ups above, one item, same
+   code). Do it before item 3.
+3. **`storedCompareOnce` is `overOperand` specialised — delete it** (round-5 item 5, unchanged).
+4. **`storedForm.value` is `comparableOf`** (round-5 item 6, unchanged).
+5. **mergeV map-entry signature keys a Number by `typedValueKey`** (round-5 item 7, unchanged).
+6. **Char/String bucket** (follow-up above). Read the reference first.
+7. **The two cheap round-5 follow-ups** (citation wording, leaf guard only under OR).
+8. **Elide `always` once, at the algebra boundary** (round-5 item 8). Do it with item 10.
+
+### Reuse sweep (byte-stable unless said)
+
+9. **One AND/OR authority** (round-4 item 8).
+10. **Name the contradiction once** (round-4 item 9). Do it with item 8.
+11. **`isNull`/`isNotNull`/`binary` in `src/rel/expr.ts`** (round-4 item 10).
+12. **Move `setMembers` into `list.ts`** (round-4 item 11).
+13. **The census/L5 nondeterminism test asks `dynamicLiteral`** (round-4 item 12).
+14. **One `tagIn(expr, names)` constructor** (round-5 item 14). Do it with item 10.
+15. **Fold `scanColumnOf` into the column-lineage authority** (round-5 item 15).
+16. **One static-folding Number-tag test beside `NUMERIC_VTYPES`.** Seven places spell
+    `{kind:'in-list', expr: tag, values: NUMERIC_VTYPES.map(compilerText)}` by hand: `bucketGuard`'s
+    in-list row, `typedValueEq`, `typedValueKey`, the stored-range space (about l.327) and the digits
+    test (about l.631) in `src/compiler/rel/predicate.ts`, and `src/compiler/rel/write.ts` about l.3715.
+    Only `src/compiler/rel/reducer.ts` `numberTag` folds a compile-time tag. Move it to `predicate.ts` as
+    the one `numberTagTest(tag)` and use it everywhere. Derive the `orderability.ts` `NUMERIC` set and
+    `comparabilityClass`'s list from `NUMERIC_VTYPES` plus the two storage classes. Answers do not
+    change; SQL shrinks where a side has a static tag. Do it with item 14.
+17. **Delete the single-leaf `where()` alias-compare path.** `aliasWhere` (`src/compiler/rel/lower.ts`,
+    the single-binary block gated on `ALIAS_CMP[pred.op]`, about l.6599–6631, and the compound-only gate
+    at about l.6580). `aliasPred` already treats one leaf as a tree of one. About 35 lines. SQL should
+    not change (confirm byte-identical SQL on the `by()` single-leaf witnesses first). One decline
+    becomes an answer: `where('a', P.gt('b')).by('age').by('weight')` (the ring gives the reference's
+    `by[0]`/`by[1]`, `WherePredicateStep`).
+18. **One leaf walker for a `where()` alias P tree.** `whereOperands` (`src/compiler/rel/lower/scoped.ts`,
+    private `leaves`), `aliasPred`'s `fold` and `namesALiveLabel` (`lower.ts`) walk the same leaves. The
+    by() ring order must match `aliasPred`'s leaf order, and today two walks agree only by convention.
+    Export one `aliasPredLeaves(pred)` beside `aliasPred`. Do it with item 17.
+19. **`aliasEntryAt` re-spells `endPath`'s `$[0]`/`$[#-1]` selector** (`src/compiler/rel/alias.ts`).
+    Split out `entryPath(end)` and use it in both. Small.
+20. **Match back-edge scalar equality uses the typed comparator.** `src/compiler/rel/match.ts` (back
+    edges at about l.553, 764, 822) compares with raw `=`; `scalarSubjectOf` re-spells
+    `aliasValueAt`/`aliasTypeAt`. Use `valueTheta('eq', …, aliasOperandAt(column,'last',type), fresh)`.
+    Answers change only where raw `=` is wrong (Boolean `true` against Integer `1`), so probe before
+    landing. Lowest priority.
+
 ## Needs a human
 
-No new questions in round 4. No new questions in round 3.
+No new questions in round 5. No new questions in round 4. No new questions in round 3.
 
 **Answered by the owner review (2026-11-25):** take items 1–3 and 5–11, 13 and 14 in round 3, in the
 order above. Item 4, item 12 and the correlated form are cut. Items 8 and 9 land together, because a
