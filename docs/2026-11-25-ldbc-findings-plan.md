@@ -397,7 +397,7 @@ Major first. Minor items are kept only when they are cheap and concrete.
   fails the same way. `map(...)`, `filter(...)` and the step form `local(__.or(...))` answer correctly. The
   connective rewrite must stay inside the child body. Reference:
   `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/decoration/ConnectiveStrategy.java`.
-- **MAJOR, pre-existing super-linear — an edge upsert that MATCHES existing edges is quadratic**
+- ✅ **LANDED (`1d7beeaf`, round-4 item 5).** **MAJOR, pre-existing super-linear — an edge upsert that MATCHES existing edges is quadratic**
   (`src/compiler/rel/write.ts`). `g.V().hasLabel('p').as('a').out('k').as('b').mergeE([(T.label):'k',
   (Direction.from):Merge.outV, (Direction.to):Merge.inV]).option(Merge.outV, __.select('a'))
   .option(Merge.inV, __.select('b')).count()`: 120 ms at 1k, 5,229 ms at 8k (44×); with
@@ -469,6 +469,9 @@ then byte-stable reuse.
 4. **Value-join regression and one comparable authority** (the two MAJOR item-3 follow-ups above, one
    item).
 5. **Quadratic matching `mergeE`** (follow-up above).
+   ✅ **Landed 2026-11-26 (`1d7beeaf`).** The match joins the criteria read's own edge row, not
+   `edges.id IN (label population)` (`src/compiler/rel/write.ts`, `src/compiler/rel/source.ts`). Scaling
+   1k/8k: 10.5 / 74 ms (7.1×), was 65×. Remains: nothing.
 6. ~~Land round-3 item 5~~ — landed as `1c5020d9`. Its two review follow-ups (test timeout, trade comment) join item 7.
 7. **The cheap and concrete round-3 follow-ups** above.
 
