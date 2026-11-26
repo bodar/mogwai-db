@@ -90,6 +90,11 @@ rows (2.5 MB). The key is stored three times per row (table and two indexes): ab
    `namesOf(dict, ids)`. Route `labelId`, `dropVertexLabels`, `vertexLabels`, `labelName`, the bulk memo,
    the olap `directedAdjacency`, drain, graphson, csv `fill` and refresh. Acceptance: format, replication
    and `test/bulk.test.ts` green.
+   **Landed (61a3f576), reduced scope.** It deletes the dead `GraphStore` label methods (`src/storage.ts`).
+   The test graph helper (`test/support/graph.ts`) no longer uses them. The six raw-SQL label sites stay
+   as they are: each is a one-line JOIN or IN, and a `names.ts` fragment adds lines. No SQL change, no
+   baseline move. **Remains:** the `src/sql/names.ts` fragment (`labelIdsIn` plus the decode join) goes to
+   B5. Lines 34 and 90 of this doc still name the deleted methods.
 6. **A6. Add a guard.** In `scripts/arch-check.ts`: only `names.ts` builds a scan of `labels`; only
    `storage.ts` names `labels` in raw SQL. One L2 test: `hasLabel('nope')`, `out('nope')`,
    `has('nope','k',v)`, `E().hasLabel('nope')`, `dropLabel('nope')` give no rows or a no-op, never an
