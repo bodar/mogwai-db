@@ -1,7 +1,8 @@
 # One name authority for labels and property keys, then intern property keys
 
-**Status: Stage A LANDED (2026-11-26). Gate A PASSED (owner, 2026-11-26): a sane path. Next: the Stage A
-finish round (A-f1–A-f6, N1–N3, A-w1–A-w3), then Stage B.**
+**Status: Stage A LANDED (2026-11-26). Gate A PASSED (owner, 2026-11-26): a sane path. The Stage A
+finish round landed A-f1, A-f2, A-f3, A-f5, N1–N3 (648eec92, e24da098). Next: land the parked
+`merge-map-null-token` branch (M0, M1 below), then the reuse items N4–N7, then Stage B.**
 
 **How a gate works (owner, 2026-11-26).** A gate asks one question: is this a sane path? The numbers
 (line counts, stop rules) are evidence for that judgement, not automatic stops. If the path is sane,
@@ -213,6 +214,73 @@ changed. The `sql-hygiene` baseline moved for alias churn only. **Remains:** not
   .mergeV()` now creates 2 vertices; the reference gives 1 (`Vertex.DEFAULT_LABEL`). Trunk refused it
   before. Decide from the existing labelless-vertex model in `docs/limitations.md`: if a labelless
   vertex is a documented divergence, add this case to that row; otherwise fix it.
+
+### Stage A finish — parked item (resume point)
+
+**`merge-map-null-token` is BUILT but NOT LANDED.** It covers A-w2, A-w3, the A-w1 docs fix, A-f4 and
+the A-f6 `labelListed` lambda. The commit is `4f95f2db` on branch `wf/merge-map-null-token-1-0`
+(worktree `.claude/worktrees/wf_bc503f19-1bd-8`). The builder had to report before `mise run ci`
+printed a verdict. Its logs show check, lint, arch, binds, sql-hygiene and build clean, all 10 test
+brackets PASS, and every L8 bracket at 0 fail. But no `CI passed` line was seen. Its base is `aa29ea83`,
+so it does not include `e24da098`, which also changed `src/compiler/rel/write.ts`.
+
+What the commit does (`src/compiler/rel/write.ts`):
+- `refuseDrivers(carrier, pairPred, message, guard, fresh, withKey?)`: one LIMIT-1 guard statement over
+  the carrier's map pairs. The mergeV `T.id`, mergeE `T.id` and mergeE list-label guards use it.
+- `refuseNullTokens(op, carrier)`: a `T`/`Direction` key with a null value raises
+  `<op>() does not allow null Map values - check: <key>`, the constant path's sentence.
+- `isTokenKey(pair, t, v)` replaces the two duplicate `isToken` closures; `labelListed` is named once.
+- `docs/limitations.md` §3: the non-string map label row is corrected (A-w1: an integer gives its
+  digits, `true` gives `'1'`, `2.0d` gives `'2'`, a datetime gives epoch ms). A new row covers a merge
+  map with no label (A-w3).
+- 3 new tests in `test/compiler/name-dict.exec.test.ts`.
+
+Plan items, in order:
+- **M0. Rebase `wf/merge-map-null-token-1-0` onto trunk (`e24da098` or later) and get a CI verdict.**
+  Resolve any `write.ts` conflict against `ownedTarget`/`labelOwners`. Run `mise run ci` unpiped and read
+  `CI passed`. This is the only prerequisite for M1.
+- **M1. Land `merge-map-null-token`.** After M0. Then A-w1, A-w2, A-w3, A-f4 and A-f6 are done.
+
+### Stage A finish — follow-ups from review (all minor; no answer changes)
+
+- **F-a. The `dictScan` docstring overclaims.** It says no caller outside `names.ts` reads `labels`
+  directly. `src/formats/csv.ts` `fill(store, 'labels', …)` (CSV edge export) does. Say "no RelIR
+  caller". The raw-SQL site itself goes to B5. Cheap; do it with the next commit that touches `names.ts`.
+- **F-b. Physical label facts live in two compiler tables.** `LABEL_OWNERS.vertex`/`.edge`
+  (`src/compiler/rel/build.ts`) repeat `OWNED_BY.vertexLabels`/`.edges` (`src/compiler/rel/write.ts`).
+  Reads use the first, writes the second. A third copy is `src/sql/schema.ts`. N6 below removes the
+  compiler duplicate. `src/services/catalog/schema.ts` still scans `vertex_labels` by hand; N4 removes it.
+- **F-c. `labelScalar` re-reads `edges` for an edge already in scope** (`g.V().outE().label()`,
+  `g.E().order().by(T.label)`): one rowid seek per row. It existed before this round and scales
+  linearly (1.82 ms at 1k, 6.91 ms at 8k, 3.8×). Candidate for `docs/outstanding-work.md`, not a defect.
+- **F-d. Depth gaps (pre-existing, clean declines, no wrong answer).** Add to the list above:
+  `g.V().coalesce(outE().has(T.label, eq('likes')).label(), constant('none')).groupCount()`,
+  `g.E().has(T.label, regex('^k')).count()`, `g.V().hasLabel(TextP.startingWith('p')).count()`.
+
+### Next round — reuse proposals (before B1)
+
+- **N4. The catalog reads label rows through `labelOwners`.** `src/services/catalog/schema.ts`
+  `vertexLabels`, `properties` and `edgeTriples` hand-write `scanAs('vertex_labels', …)` three times.
+  Use `labelOwners('vertex', fresh)`. Then `LABEL_OWNERS` is the one place that names the physical label
+  table and owner column. No column clash (the other scans already rename). One Project node less per
+  scan; same rows, so no answer change.
+- **N5. One `labelArray` path for both kinds.** `BaseGraph.labelArray` (`source.ts`) has a kind ternary;
+  `element.ts` `vertexLabels` hard-codes `'vertex'`. Give `vertexLabels` a `kind`. An edge has one
+  `labelOwners` row, so `json_group_array` gives the same one-name array; `COALESCE(…, '[]')` still covers
+  a vertex with no labels. Add `ownedNames(kind, fresh, of)` = `withNames('labels', labelOwners(kind,
+  fresh, of), 'label', fresh)` in `names.ts`; it replaces four written-out copies (`hasTokenPredicate`,
+  `labelScalar`, `vertexLabels`, `labelArray`). Finishes N2.
+- **N6. Derive `OWNED_BY` table and owner from `LABEL_OWNERS`/`PROPERTIES`.** For example
+  `vertexLabels: { ...LABEL_OWNERS.vertex, cols: [...] }`, and the same for `vertexProps`/`edgeProps`
+  from `PROPERTIES`. Removes three duplicate facts (F-b); no SQL change. Leave
+  `src/rel/passes/semijoin.ts` `SEEK_PROPERTIES`/`PROPERTY_OWNER` alone: `src/rel` must not import
+  `src/compiler`.
+- **N7. One `existsOf` (the `SELECT 1` probe) in `build.ts`.** Two private copies
+  (`decorate.ts`, `boundgraph.ts`) and about 18 inline `make.project(… [['one', compilerInt(1)]])` +
+  `{kind:'exists'}` sites (`source.ts` ×6, `write.ts` ×5, `map.ts` ×2, `list.ts`, `lower.ts`,
+  `lower/filter.ts`). About 35–40 lines less; same SQL apart from aliases.
+
+**Needs-human questions from this round:** none.
 
 **Gate A (owner review) — PASSED 2026-11-26.** Evidence: the A1–A6 refactors are net −20 production
 lines (A1 +26, A2+A3 −6, A4 −7, A5 −31, A6 −2); A4 is −1,873 SQL bytes over the corpus; `sql-plan`
