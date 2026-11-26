@@ -347,6 +347,11 @@ Plan items, in order:
   - `label-probe-edge-col`: add a Where line (`src/compiler/rel/boundgraph.ts`). Point the Fix at SS1.
   - The Contents section counts are wrong (§1, §2, §3, §4). Recount at the next
     `update-outstanding-work` compaction.
+  **LANDED as `cc95f59c` with P4 (`CI passed`, docs only, no baseline moves).** Mechanism: the three
+  rows in `docs/outstanding-work.md` now carry the witnesses, Where paths and the SS1 Fix pointer.
+  **Remains:** the Contents counts (§1–§4) are still wrong. Recount them at the next
+  `update-outstanding-work` compaction. F-c says "delete the per-consumer fix line in
+  `label-probe-edge-col`". That line is now gone: P3 replaced it with the SS1 pointer.
 - **P4. Depth gaps seen in review (pre-existing, clean `UnsupportedTraversal`, not this plan's scope).**
   Record each as a `docs/outstanding-work.md` §3 row if it is not there yet:
   - Map drivers that come from `unfold()` of an injected list, from `project().by()` or
@@ -355,6 +360,9 @@ Plan items, in order:
     `g.V().hasLabel('person').project('name').by('name').mergeV()`.
   - `call('schema')` under `group().by(select('kind')).by(count())`, `order().by(select('kind'))` and
     `project(…).by(select(…))`. `filter`/`where`/`select`/`dedup`/`fold`/`union`/`count` answer.
+  **LANDED as `cc95f59c` with P3 (`CI passed`, docs only).** Mechanism: §3 `R8-res` lists the
+  `project()`/`valueMap()`/`unfold()` driver forms and points at `s3-write-in-child` and `o-seqguard`.
+  The new §3 row `schema-map-by-key` holds the keyed `by()` over a Map row. **Remains:** nothing for P4.
 - **Noted, no action.** Each vertex map driver now pays one capped `vl_label` probe (+3% to +14% at 8k,
   far under 2×; the commit names the reason). The two-unselective-criteria grid
   (`[(T.label):'l'+i%s, name:'n'+i/s]`) stays N^1.5, as on the parent commit.
