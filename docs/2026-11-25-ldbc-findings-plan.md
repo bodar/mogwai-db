@@ -1,7 +1,8 @@
 # LDBC findings — fix the three measured defects
 
-**Status: L1–L3 LANDED (2026-11-25). Round 2 (next-round items 1–3) LANDED (2026-11-25). Open: the
-round-3 list under "Next round" and the questions under "Needs a human".**
+**Status: L1–L3 LANDED (2026-11-25). Round 2 LANDED (2026-11-25). Round 3 LANDED except item 5
+(2026-11-26). Open: "Parked in round 3", "Follow-ups from review (round 3)" and the round-4 list under
+"Next round (round 4)".**
 
 **Source.** A head-to-head run against Relate 1.2.0 (Neo4j's embedded in-memory Cypher engine) on
 LDBC SNB sf0.1: 327,588 vertices, 1,477,965 edges, Relate's own 30-query latency lane
@@ -204,12 +205,12 @@ Major first. Minor items are kept only when they are cheap and concrete.
   8k (49×). Pre-existing (trunk 64×). Fix: past 2^63 only a `bigint` TEXT row can meet c. Below that,
   a partial index on `(key, value) WHERE vtype IN ('long','bigint')` lets the gate narrow, as
   `vp_decimal` does for the BigDecimal arm.
-- **Read-path BigDecimal equality misses a large value (pre-existing wrong answer).** After
+- **(Fixed by round-3 item 3.) Read-path BigDecimal equality misses a large value (pre-existing wrong answer).** After
   `g.addV('p').property('n', 123456789012345678m)`, `g.V().has('n', 123456789012345678m).count()`
   returns 0. The reference returns 1. The merge in the same case matches. Probable cause: the literal
   and the REAL cast of the stored value have different number classes on the read path
   (`src/compiler/rel/predicate.ts`, `decimalTextArm`).
-- **Parse-cache bounds are large for a 128 MB isolate, and one sizing rule is wrong.** Measured trees
+- **(Round-3 item 5 — parked, see "Parked in round 3".) Parse-cache bounds are large for a 128 MB isolate, and one sizing rule is wrong.** Measured trees
   are about 141–207 B per text unit. At 256K units in all that is about 36–55 MB. One 64K-unit entry is
   about 13 MB. The rule `PARSE_CACHE_MAX_ENTRY_TEXT_UNITS >= PLAN_CACHE_MAX_ENTRY_TEXT_UNITS` rests on a
   wrong premise: `compilePlan` returns a plan-cache hit before it calls `parseGremlin`, so a held plan
@@ -229,7 +230,7 @@ Major first. Minor items are kept only when they are cheap and concrete.
 - **Covered by "Next round" reuse items 9–10:** the private OR folds left at `write.ts:1403` and
   `lower.ts:1376`, the private AND folds, and the `and`/`or` copies in `receiver.ts`.
 
-## Next round
+## Round 3 (2026-11-25/26)
 
 **Owner review (2026-11-25): mechanical sympathy, not Java emulation.** The rule
 (CLAUDE.md, "A faithful port"): fix a wrong answer in the way SQLite and JS do it naturally; if that is
@@ -286,9 +287,10 @@ byte-stable reuse.
    most 7.5× from 1k to 8k. Remains: nothing.
 4. *(Cut by owner review — subsumed by item 3.)*
 5. **Parse-cache bounds for memory** (follow-up above). Small.
+   ⏸ **Built, CI green, NOT landed** (`wf/parse-cache-bounds-1-0`, `7269cbf9`). See "Parked in round 3".
 6. **GraphBinary frames a boolean tag through `booleanOfStored`; name `vp_decimal`/`ep_decimal` in the
    index-build-on-deploy note** (round-1 follow-ups, about 5 lines).
-   ✅ **Landed 2026-11-25 (first half).** `frameValue` (`src/execute.ts`) decodes a `boolean` tag with
+   ✅ **Landed 2026-11-25 (first half, `71265cd0`).** `frameValue` (`src/execute.ts`) decodes a `boolean` tag with
    `booleanOfStored`, the one decode GraphSON, CSV and JSON use. Test: `test/graphbinary-boolean.test.ts`.
    Remains: nothing. The index-note half is moot: item 3 deletes `vp_decimal`/`ep_decimal`.
 7. **Sargable seek range for an ordered predicate** (`has(k, gt/lt/between/inside …)`; the Deferred
@@ -348,7 +350,162 @@ byte-stable reuse.
     (`src/rel/expr.ts`). Seeded folds use `conjoin(xs) ?? always`. SQL text only, no answer change.
     The sql-hygiene baseline moved. The sql-plan baseline did not. Remains: nothing.
 
+## Parked in round 3
+
+Two items did not land. Neither needs new substrate. The cause is the same for both: the round built
+them from a doc state that other landings had already moved. So there is no prerequisite item, only a
+rebase.
+
+- **Item 5, parse-cache bounds** (resume branch `wf/parse-cache-bounds-1-0`, `7269cbf9`, worktree
+  `.claude/worktrees/wf_b159e7ce-919-5`). It is built and `mise run ci` was green on its base
+  `2f1fcfc4`. The land failed. On trunk it conflicts in `src/gremlin/frontend.ts`: items 8+9
+  (`afde6e28`) rewrote the `isVolatileQuery` comment that this commit also edits. Resume: rebase onto
+  trunk, keep both comments, run `mise run ci`, land. Review follow-ups for the same commit:
+  - Give the test "a large batch write compiled again and again is never held, and hot reads stay"
+    (`test/compiler/plan-cache.exec.test.ts`) an explicit timeout. It took 6.8 s on a cold run against
+    the 5 s default. The cause is the batch compile (about 300 ms per compile), not this commit.
+  - Add one line to the `frontend.ts` comment that names the trade: a text of 4K–64K units that misses
+    the plan cache (segment plan, volatile text, long param key) is parsed again on each compile. The
+    cost is linear in text length (about 2 ms at 5K, 13 ms at 60K units). No answer changes.
+- **Item 6, GraphBinary boolean decode.** Nothing remains. The round built it again
+  (`wf/graphbinary-boolean-decode-1-0`, `0131bb50`), but the same patch is already on trunk as
+  `71265cd0` (identical `git patch-id`). The branch can be deleted.
+
+## Follow-ups from review (round 3)
+
+Major first. Minor items are kept only when they are cheap and concrete.
+
+- **MAJOR — a label value join got about 2× slower (item 3, `src/compiler/rel/predicate.ts`,
+  `src/compiler/rel/build.ts` `comparableOf`).** At 8k vertices, trunk before item 3 / after:
+  `g.V().values('age').as('e').V().has('age', select('e'))` 973 / 2029 ms (2.08×, past the 2× bar);
+  the same on `name` 21.8 / 44.9 ms; `has('age', __.values('age')).count()` 5.4 / 9.9 ms. Growth stays
+  linear. SQL bytes for the `name` join: 2180 → 10492. Two causes:
+  (a) `comparableOf` re-inlines the operand in each `CASE` arm (two tag tests, three value reads), in
+  both the `IN` copy and the `EXISTS` copy. That breaks "an expression used N times is computed once".
+  (b) For a correlated `__.values(k)` or `__.select('a').values(k)` operand, `comparedOnce` adds a second
+  correlated seek of the same property row only to read its `vtype`.
+  Fix: an operand that is a STORED property row reads that row's own `value` column, which is already
+  in comparable form. No tag, no `+ 0`, no second seek. Convert by tag only for a true stream operand,
+  and bind payload and tag once. A string or int key must not pay for a conversion that cannot matter.
+- **MAJOR — `comparableOf` is a second payload-to-comparable authority beside `storedForm`.** After
+  `c2e13ae8` the BigDecimal arm is `CAST AS REAL`, as `storedForm` stores it. The long/bigint arm is
+  still `+ 0`, a parallel rule. Make `comparableOf` reuse `storedForm`'s value arm, spelled with one
+  payload read. Do this with the item above; it is the same code.
+- **MAJOR, pre-existing wrong answer — an infix connective inside `local()` drops the whole chain**
+  (`src/compiler/ir/strategies.ts`). `g.V().hasLabel('person').local(__.has('age').or().has('lang')).count()`
+  returns all 6 modern vertices as element rows; the reference is `[4]`. `local(__.has('age').and().has('name'))`
+  fails the same way. `map(...)`, `filter(...)` and the step form `local(__.or(...))` answer correctly. The
+  connective rewrite must stay inside the child body. Reference:
+  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/decoration/ConnectiveStrategy.java`.
+- **MAJOR, pre-existing super-linear — an edge upsert that MATCHES existing edges is quadratic**
+  (`src/compiler/rel/write.ts`). `g.V().hasLabel('p').as('a').out('k').as('b').mergeE([(T.label):'k',
+  (Direction.from):Merge.outV, (Direction.to):Merge.inV]).option(Merge.outV, __.select('a'))
+  .option(Merge.inV, __.select('b')).count()`: 120 ms at 1k, 5,229 ms at 8k (44×); with
+  `option(onMatch, …)` on `knows`, 280 ms / 18,911 ms (67×). The match join is
+  `pw r INNER JOIN edges wt ON (src, tgt) WHERE wt.id IN (SELECT id FROM edges WHERE label IN (…))`;
+  `EXPLAIN` shows `e_pair (src=? AND tgt=? AND rowid=?)`, so SQLite walks the whole label id list per
+  driver row. Fix: test the label as a residual on the `e_pair` row, not as a rowid `IN` set. Answers
+  are correct.
+- **Pre-existing wrong answer — a nested-operand ORDERING has no comparability guard**
+  (`src/compiler/rel/predicate.ts` `comparedOnce`). On one key with `'10'`, `10`, `10.00m`, `'x'`,
+  `has('s', P.gt(__.V().has('k','b').values('s')))` also returns the String rows (SQLite: TEXT > number).
+  The literal `has('s', gt(5))` answers correctly. Reference: an incomparable pair is false
+  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java`).
+  The `VALUES` row already holds the operand's tag, so apply the `NUMERIC_VTYPES` class guard that the
+  literal path uses.
+- **To `docs/outstanding-work.md`:**
+  - `g.V(51).hasLabel('person').count()` is a point read that reads every `person` vertex
+    (`rn.id IN (SELECT node FROM vertex_labels WHERE label IN (…))`): 0.06 / 0.48 ms at 1k / 8k (8.6×).
+    Pre-existing (`src/compiler/rel/lower.ts`).
+  - `g.V().has('d', within(__.V().values('d').fold()))` folds the set twice: once in the `IN`
+    pre-filter, once in the `EXISTS`. A constant 2×, not super-linear (`src/compiler/rel/lower/reduction.ts`).
+  - A nested operand that traverses an edge declines: `has('price', P.eq(__.out('k').values('price')))`,
+    `within(__.out('k').values('price').fold())`, and `has('price', P.eq(__.constant(10.00m)))`.
+    Pre-existing.
+- **Cheap and concrete:**
+  - `insertSet`'s `derive` hook (`src/setwrite.ts`) passes `cellOf(name)`, and `storedForm` re-inlines
+    that `json_extract` about 10 times per row. Project the cells once, then derive in an outer
+    project, as `mapEntryProperties` does.
+  - `guardMergeInterleaving` (`src/compiler/rel/write.ts`, about l.3515) still emits `1 = 1 AND`. Use
+    one `conjoin([...].filter(x => x !== always))` there.
+  - `test/plan-stability.test.ts`: add a parameter-bound `V($ids).has(k, range)` gate. The literal
+    `V(50, 51)` gate does not exercise the `json_each` or the id-or-uid branch of `pinnedBy`.
+  - The storage-class edge conjunct of `storedRange` (`+value < ''`) is needed only where the range is
+    a seek. In a correlated check the `vtype` residual already excludes those rows. Add the edge only
+    where `indexable` makes the range a seek.
+  - The doc comment on `ordered` (`src/compiler/rel/predicate.ts`) says a numeric value may be stored
+    as decimal TEXT. `storedRange` now relies on the opposite: `value` is always the comparable
+    INTEGER/REAL (`src/storage.ts`). Fix the comment.
+  - `pinnedBy` and `reached` in `elementFacts` (`src/rel/passes/semijoin.ts`) extract the member twice.
+    Make one extractor that returns `(member, bounded?)`.
+  - The `allNullGuard` JSDoc (`src/compiler/rel/transform.ts`) sits between the `VALUE_TX` JSDoc and
+    `VALUE_TX`. Move `allNullGuard` above that block.
+  - `rereadsSubquery` (`src/rel/emit.ts`) has a second, column-spelling fence exemption. State the
+    rule once: a fence costs the predicate its index when the predicate seeks the block's own columns.
+- **Accepted, no action:** item 3 adds `COALESCE(exact, value)` to every property read that passes a
+  value on. sql-hygiene moved in 89 families. Measured runtime cost is noise, except `elementMap()`
+  +10% at 8k. Some per-row term is inherent to a two-column design.
+
+## Next round (round 4)
+
+Order: wrong answers, then super-linear and the 2× regression, then the parked item, then cheap fixes,
+then byte-stable reuse.
+
+1. **Order a stored property by its stored `value`** (reuse proposal, and a wrong answer). After item 3
+   a stored row's `value` is already comparable, so `storedCompareOn` (`src/compiler/rel/predicate.ts`)
+   is an identity there, except one case: `CAST(REAL AS INT)` clamps a long/bigint past int64 to
+   9223372036854775807. Witness on trunk: store `n` = 3e20, 1e20, 2e20 as bigint (`k` = c, a, b).
+   `g.V().hasLabel('x').order().by('n').values('k')` gives `[c,a,b]`; `.order().by('n', desc)` gives the
+   same; `properties('n').order().by(value).value()` gives insertion order. All should be sorted. Sites:
+   `src/compiler/rel/source.ts` (ordering read, about l.723), `src/compiler/rel/property.ts`
+   `propertyOrderTerms` (about l.234), `src/compiler/rel/modulator.ts` (about l.330, `T.value` over a
+   property). Keep `storedCompareOn` only for carriers that are not stored rows (list members, `{t,v}`
+   nodes, reducer `vt`). Check first that datetime and duration are stored as INTEGER. Delete
+   `storedCompare` (dead export, 0 references).
+2. **Infix connective inside `local()`** (follow-up above).
+3. **Comparability guard for a nested-operand ordering** (follow-up above).
+4. **Value-join regression and one comparable authority** (the two MAJOR item-3 follow-ups above, one
+   item).
+5. **Quadratic matching `mergeE`** (follow-up above).
+6. **Land round-3 item 5** from `wf/parse-cache-bounds-1-0` (see "Parked in round 3").
+7. **The cheap and concrete round-3 follow-ups** above.
+
+### Reuse sweep (byte-stable unless said)
+
+8. **One AND/OR authority.** Delete `and`/`or`/`eq` in `src/compiler/rel/build.ts` (about l.399–415;
+   `and`/`or` accept `undefined`; 138 + 19 refs, `eq` 247 refs). Use `conjoin`/`disjoin` and the
+   `src/rel/expr.ts` constructors. That also removes the bare `Error('… a conjunction of nothing')`.
+   Loop folds that the `test/rel-expr-folds.test.ts` scan cannot see: `lower/filter.ts:113`
+   `fuseSourceFilters` and `:245`, `lower/reduction.ts:1955`, `lower/branch.ts:1204`, `match.ts:608`
+   `connectiveExpr`, `lower/exists.ts:206-208`. Hand-written `x ? and(x, y) : y`: `map.ts:620`,
+   `modulator.ts:1066`, `lower.ts:6442/6475/6535`, `rel/decorrelate.ts:710`. About 20 literal
+   `{kind:'binary', op:'and'|'or'}`: `build.ts:306/310`, `child.ts:289`, `path.ts:534`,
+   `write.ts:746/1489`, `lower.ts:1338`, `decorrelate.ts:575`. Then let the scan also forbid object-literal
+   `op:'and'|'or'` outside `expr.ts`. SQL unchanged.
+9. **Name the contradiction once.** Export `never` (`1 = 0`) beside `always`, and a text in-list
+   constructor that returns `never` for an empty set (SQLite rejects `IN ()`). Spellings:
+   `predicate.ts:50` `CONSTANT.false` (42 uses), `build.ts:305` `storedForm` `tagged`, `build.ts:584`
+   `keyMembership`, `write.ts:4236` `fromOnCreate`, `record.ts:555`, `services/catalog/search.ts:94`.
+   Private `inList` in `receiver.ts:79` and `build.ts:745`, plus about 40 inline in-list literals. SQL
+   the same or smaller.
+10. **`isNull`/`isNotNull`/`binary` in `src/rel/expr.ts`.** Delete the 7 private `bin`/`binary`
+    (`sack.ts:245`, `tag.ts:38`, `operator.ts:119`, `transform.ts:95`, `reducer.ts:388`,
+    `lower/reduction.ts:1402`, `predicate.ts:40`) and the 8 private null tests (`operator.ts:120`,
+    `sack.ts:246`, `receiver.ts:78`, `predicate.ts:818`, `lower/filter.ts:444`, `modulator.ts:378`,
+    `child.ts:291`, `write.ts:1905-1906`). About 41 inline `op:'is'|'is not'` literals get shorter.
+11. **Move `setMembers` into `list.ts`.** `lower/reduction.ts:513` `setMembers` builds its own
+    `json_each` explode and calls `payloadOf`/`ownTagOf`, which `list.ts` exported only for it. Add
+    `listMemberSet(list, of, fresh, typed)` beside `correlatedListMembers` on `membersOf`,
+    `memberPayload` and `memberOwnTag`, and make the two exports private again. This also removes the
+    `isTypedList` alias of `hasTypedMembers`. SQL changes only in column aliases (`sm`/`smt` →
+    `mv`/`mt`); check the sql-plan and sql-hygiene baselines.
+12. **The census/L5 nondeterminism test asks `dynamicLiteral`.** `test/support/graph.ts:110`
+    `NONDETERMINISTIC` copies `src/gremlin/frontend.ts:129` `dynamicLiteral` as a regex. Use the
+    predicate for dynamic literals; keep the regex only for `sample`/`coin`/`shuffle`. No answer changes.
+
 ## Needs a human
+
+No new questions in round 3.
 
 **Answered by the owner review (2026-11-25):** take items 1–3 and 5–11, 13 and 14 in round 3, in the
 order above. Item 4, item 12 and the correlated form are cut. Items 8 and 9 land together, because a
