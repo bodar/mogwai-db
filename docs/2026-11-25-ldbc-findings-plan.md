@@ -712,8 +712,15 @@ No MAJOR finding. Minor items are kept when they are cheap and concrete, or a re
 - **Char and String: one bucket for ordering, two for equality** (`src/compiler/rel/predicate.ts`).
   `bucketGuard` puts `char` and `string` in one ordering bucket; `typedValueEq` keeps them apart. So
   `where('a', P.lte('b'))` between a char and an equal string can hold while `P.eq` does not.
-  Pre-existing. Read `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java`
-  (its `Type` for `Character`), then make `typedValueEq` read `bucketGuard`'s table.
+  Pre-existing. **Owner decision (2026-11-26): a Char is a String with a wire tag, everywhere.** The
+  reference keeps them apart (`Character` is not a `GremlinValueComparator.Type`, so a char and a String
+  are never equal and are incomparable). JavaScript has no char type, and the JS client decodes a Char as
+  a one-character string. So: keep the `char` tag for output framing and `typeOf(GType.CHAR)`; COMPARE a
+  char as a String in every place a value is compared — ordering, `eq`/`neq`, `within`/`without`,
+  `dedup`, `group`/`groupCount` keys, joins and merge criteria. One rule, no place treats char apart.
+  Make `typedValueEq` read `bucketGuard`'s table; check whether `dedup`/`group` keys carry the tag and
+  route them through the same rule. Add one row to `docs/limitations.md` §3 "Text": "A Char compares
+  as a one-character String. Java keeps Char and String apart." Report the net production lines.
 - **Cheap — correct the unbound-label citation** (`f6715991`, `src/compiler/rel/lower.ts` `aliasPred`
   doc and the commit text). It says an unbound label in an `or()` leaf drops the row "as the reference
   does". The reference throws: `Scoping.getSafeScopeValue` rethrows `KeyNotFoundException` as
@@ -742,7 +749,7 @@ Order: the depth gap, then items carried from round 5, then the round-5 reuse sw
 3. **`storedCompareOnce` is `overOperand` specialised — delete it** (round-5 item 5, unchanged).
 4. **`storedForm.value` is `comparableOf`** (round-5 item 6, unchanged).
 5. **mergeV map-entry signature keys a Number by `typedValueKey`** (round-5 item 7, unchanged).
-6. **Char/String bucket** (follow-up above). Read the reference first.
+6. **Char compares as a String everywhere** (owner decision, follow-up above), with the §3 row.
 7. **The two cheap round-5 follow-ups** (citation wording, leaf guard only under OR).
 8. **Elide `always` once, at the algebra boundary** (round-5 item 8). Do it with item 10.
 
