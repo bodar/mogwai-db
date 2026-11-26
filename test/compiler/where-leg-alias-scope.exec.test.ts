@@ -105,8 +105,10 @@ describe('a multi-correlation leg reads outer labels after the correlation', () 
 // so over `values(…)` the subject is a typed SCALAR. `bareAliasWhere` (`src/compiler/rel/lower.ts`) takes
 // it with the value leaf: `typedValueEq` for eq/neq (so `true` is not `1` and `30` is `30.0`),
 // `comparableTheta` for an ordering (same bucket, else false), and a scalar against an ELEMENT label folds
-// at compile time (`neq` true, everything else false — a String is never a Vertex). `P.not` is pushed INTO
-// the op (`Compare.negate`), so a cross-bucket ordering stays false under it.
+// at compile time (`neq` true, everything else false — a String is never a Vertex). `P.not` is the boolean
+// complement (`NotP.NotPBiPredicate.test` is `!original.test`,
+// vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/NotP.java:108, built by
+// `P.negate`, .../traversal/P.java:247), so a cross-bucket ordering is false and its `P.not` true.
 const names = (g: string): string[] => bare(run(s, g)).map((r: { v: string }) => r.v).sort();
 
 describe('a value traverser compares against a label', () => {
@@ -123,10 +125,11 @@ describe('a value traverser compares against a label', () => {
     expect(bare(run(s, "g.V(1).as('x').values('name').where(P.eq('x'))"))).toEqual([]));
   test('neq against a Vertex label keeps it', () =>
     expect(names("g.V(1).as('x').values('name').where(P.not(P.eq('x')))")).toEqual(['marko']));
-  test('not(ordering) across buckets stays false', () => {
-    expect(bare(run(s, "g.V(1).as('x').values('name').where(P.not(P.lt('x')))"))).toEqual([]);
-    expect(bare(run(s, "g.V(1).values('age').as('a').constant('x').where(P.not(P.gt('a')))"))).toEqual([]);
-    expect(bare(run(s, "g.V(1).values('age').as('a').constant('x').where(P.not(P.lte('a').or(P.eq('a'))))"))).toEqual([]);
+  test('not(ordering) across buckets is true — the complement of false', () => {
+    expect(names("g.V(1).as('x').values('name').where(P.not(P.lt('x')))")).toEqual(['marko']);
+    expect(names("g.V(1).values('age').as('a').constant('x').where(P.not(P.gt('a')))")).toEqual(['x']);
+    expect(names("g.V(1).values('age').as('a').constant('x').where(P.not(P.lte('a').or(P.eq('a'))))")).toEqual(['x']);
+    expect(names("g.V(1).values('age').as('a').constant('x').where(P.not(P.not(P.gt('a'))))")).toEqual([]);
   });
   test('a boolean is not an int', () => {
     expect(bare(run(s, "g.inject(true).as('i').constant(1).where(P.eq('i'))"))).toEqual([]);
@@ -177,7 +180,7 @@ describe('an untyped side is typed by its value', () => {
     expect(rows("g.inject(1).as('i').V(1).project('k').by(__.constant(1)).select('k').where(P.eq('i'))")).toEqual([1]);
     expect(rows("g.inject(2).as('a').select('a').where(P.lt('a'))")).toEqual([]);
     expect(rows("g.inject(2).as('a').select('a').where(P.lte('a'))")).toEqual([2]);
-    expect(rows("g.inject('x').as('a').constant(1).where(P.not(P.lt('a')))")).toEqual([]);
+    expect(rows("g.inject('x').as('a').constant(1).where(P.not(P.lt('a')))")).toEqual([1]); // NotP.java:108
   });
   test('two value labels, boolean vs int and int vs double', () => {
     expect(count("g.inject(true).as('a').constant(1).as('b').V(1).where('a', P.eq('b')).count()")).toBe(0);
@@ -203,7 +206,7 @@ describe('a null value or label', () => {
     expect(rows("g.inject(null).as('a').constant(null).where(P.lte('a'))")).toEqual([null]);
     expect(rows("g.inject(null).as('a').constant(null).where(P.lt('a'))")).toEqual([]);
     expect(rows("g.inject(null).as('a').constant(null).where(P.not(P.lt('a')))")).toEqual([null]);
-    expect(rows("g.inject(null).as('a').constant(1).where(P.not(P.lt('a')))")).toEqual([]);
+    expect(rows("g.inject(null).as('a').constant(1).where(P.not(P.lt('a')))")).toEqual([1]); // NotP.java:108
   });
   test('two value labels', () => {
     expect(count("g.inject(1).as('a').constant(null).as('b').V(1).where('a', P.neq('b')).count()")).toBe(1);

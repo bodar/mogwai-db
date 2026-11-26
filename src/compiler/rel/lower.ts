@@ -6374,13 +6374,11 @@ function aliasCompare(op: string, left: Expr, right: Expr): Expr | null {
   return sql ? { kind: 'binary', op: sql, left, right } : null;
 }
 
-/** `Compare`'s own `negate()` per op (`eq`↔`neq`, `lt`↔`gte`, `gt`↔`lte`,
- *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/Compare.java`). */
-const NEGATED_CMP: Record<string, string | undefined> = { eq: 'neq', neq: 'eq', lt: 'gte', gte: 'lt', gt: 'lte', lte: 'gt' };
-
-/** ONE alias-compare LEAF — `op` against the label it names — as a boolean expression, or `null` to
- *  decline. Any `P.not` above it is already folded INTO `op`. */
-type AliasLeaf = (op: string, label: string) => Expr | null;
+/** ONE alias-compare LEAF — `op` against the label it names — or `null` to decline. Its `cmp` is TWO-VALUED
+ *  (never SQL NULL) once its `guard` holds, so a `P.not` above it is a plain SQL `NOT`. Its `guard` is what
+ *  must hold before the predicate is tested at all: the label's presence on this row, a `by()`'s
+ *  productivity. */
+type AliasLeaf = (op: string, label: string) => { readonly cmp: Expr; readonly guard?: Expr | undefined } | null;
 
 /**
  * A COMPOUND alias-compare predicate — `where(k, P.not(P.eq('a').or(P.eq('d'))))`, `where(P.lt('a'))` — as
@@ -6388,35 +6386,52 @@ type AliasLeaf = (op: string, label: string) => Expr | null;
  *
  * `WherePredicateStep` composes `eq`/`neq`/orderings/`and`/`or`/`not` over `selectKey` operands; what a
  * LEAF compares (two rowids, a `by()` ring's values, a scalar against a value label) is the caller's
- * `leaf`. `P.not(p)` IS `p.negate()` in the reference (`P.java` `not`, `ConnectiveP.negate` swaps
- * `and`/`or` and negates each branch), so the negation is pushed to the leaves rather than wrapped as a
- * SQL `NOT`: an ordering across `Comparability` buckets is FALSE and so is its negation (`lt` across a
- * String and a Number is false, and so is `gte`), which a SQL `NOT` over that false would turn TRUE.
- * Every leaf must build or the whole predicate declines, fail closed.
+ * `leaf`. It follows the reference's two stages
+ * (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/filter/WherePredicateStep.java`
+ * `filter`): `setPredicateValues` first resolves EVERY leaf's label, and an unbound or unproductive one
+ * drops the row whatever the tree says — so the leaves' guards are conjoined OUTSIDE the predicate; then
+ * `predicate.test` folds the tree, where `P.not(p)` is `NotP`, the plain boolean complement
+ * (`NotP.NotPBiPredicate.test` is `!original.test`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/NotP.java:108`;
+ * `P.negate` builds it, `.../traversal/P.java:247`). So an ordering across `Comparability` buckets is FALSE
+ * and its `P.not` is TRUE. Each leaf's `cmp` is two-valued, so the fold is plain SQL `AND`/`OR`/`NOT`. The
+ * leaves are visited in the tree's left-to-right order, which is the order a `by()` ring hands out its
+ * projections. Every leaf must build or the whole predicate declines, fail closed.
  */
-function aliasPred(pred: unknown, leaf: AliasLeaf, negated = false): Expr | null {
-  if (!isPred(pred)) return null;
-  const { op, operands } = pred;
-  if (op === 'not') return operands.length === 1 ? aliasPred(operands[0]!.value, leaf, !negated) : null;
-  if (op === 'and' || op === 'or') {
-    const parts = operands.map((o) => aliasPred(o.value, leaf, negated));
-    const joint: 'and' | 'or' = negated ? (op === 'and' ? 'or' : 'and') : op;
-    return parts.every((p): p is Expr => !!p) ? (joint === 'and' ? conjoin : disjoin)(parts) ?? null : null;
-  }
-  if (operands.length !== 1 || typeof operands[0]!.value !== 'string') return null;
-  const actual = negated ? NEGATED_CMP[op] : op;
-  return actual ? leaf(actual, operands[0]!.value) : null;
+function aliasPred(pred: unknown, leaf: AliasLeaf): Expr | null {
+  const guards = new Map<string, Expr>();
+  const fold = (p: unknown): Expr | null => {
+    if (!isPred(p)) return null;
+    const { op, operands } = p;
+    if (op === 'not') {
+      const inner = operands.length === 1 ? fold(operands[0]!.value) : null;
+      return inner && { kind: 'unary', op: 'not', arg: inner };
+    }
+    if (op === 'and' || op === 'or') {
+      const parts = operands.map((o) => fold(o.value));
+      return parts.every((e): e is Expr => !!e) ? (op === 'and' ? conjoin : disjoin)(parts) ?? null : null;
+    }
+    if (operands.length !== 1 || typeof operands[0]!.value !== 'string') return null;
+    const built = leaf(op, operands[0]!.value);
+    if (built?.guard) guards.set(JSON.stringify(built.guard), built.guard);
+    return built?.cmp ?? null;
+  };
+  const clause = fold(pred);
+  if (!clause) return null;
+  const guard = conjoin([...guards.values()]);
+  return guard ? and(guard, clause) : clause;
 }
 
 /** The IDENTITY leaf — an ELEMENT subject (its rowid `startId`) against an element label, with no `by()`:
  *  TinkerPop compares the elements themselves. Only `eq`/`neq` have identity meaning, so an ordering leaf
- *  declines (that is the `by()`-value form, `aliasValueWhere`). */
+ *  declines (that is the `by()`-value form, `aliasValueWhere`). The rowid compare is non-NULL once the
+ *  label's presence guard holds. */
 const identityLeaf = (startId: Expr, rel: Rel, labels: AliasMap, fresh: Minter): AliasLeaf => (op, label) => {
   if (op !== 'eq' && op !== 'neq') return null;
   const proj = aliasProjection(rel, labels, label, 'last', fresh);
   if (!isElementAlias(proj)) return null;
   const same = eq(startId, aliasIdAt(col(rel.id, proj.entry.col), 'last'));
-  return op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same };
+  return { cmp: op === 'eq' ? same : { kind: 'unary', op: 'not', arg: same }, guard: aliasGuard(rel, proj.entry) };
 };
 
 /**
@@ -6427,8 +6442,8 @@ const identityLeaf = (startId: Expr, rel: Rel, labels: AliasMap, fresh: Minter):
  * never equal to, less or greater than a Vertex (`GremlinValueComparator.COMPARABILITY`,
  * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java`)
  * — so it folds at compile time: `neq` true, every other op false. A list/map label is not built (declines).
- * A label first bound inside a branch arm owes its presence guard (`aliasGuard`) — conjoined OUTSIDE the
- * compare, so an unbound label drops the row whatever the op (a folded `neq` would otherwise keep it).
+ * A label first bound inside a branch arm owes its presence guard (`aliasGuard`) — the leaf's `guard`, so
+ * an unbound label drops the row whatever the op (a folded `neq` would otherwise keep it).
  */
 const valueLeaf = (subject: TypedOperand, rel: Rel, labels: AliasMap, fresh: Minter): AliasLeaf => (op, label) => {
   const proj = aliasProjection(rel, labels, label, 'last', fresh);
@@ -6438,8 +6453,7 @@ const valueLeaf = (subject: TypedOperand, rel: Rel, labels: AliasMap, fresh: Min
     : proj.read.kind === 'value'
       ? valueTheta(op, subject, aliasOperandAt(column, 'last', proj.read.type), fresh)
       : null;
-  const guard = aliasGuard(rel, proj.entry);
-  return cmp && (guard ? and(guard, cmp) : cmp);
+  return cmp && { cmp, guard: aliasGuard(rel, proj.entry) };
 };
 
 /**
@@ -6494,9 +6508,9 @@ const whereOperandHost = (rel: Rel, proj: ElementAliasProjection): ChildHost =>
  * a cycling `TraversalRing`, in encounter order: the startKey takes `by[0]`, then each predicate LEAF's
  * operand label takes `by[1]`, `by[2]`, … cycling, walking the `ConnectiveP` tree left-to-right. The LHS
  * (the startKey's value) is computed ONCE and every leaf compares against it. Any non-productive
- * projection drops the row (`isProductive()` → `false`), which the conjoined `IS NOT NULL` productivity
- * terms reproduce (a `ProductiveByStrategy` keep-null is not built, so that declines, matching the
- * single-binary path).
+ * projection drops the row (`isProductive()` → `false`), whatever the tree says, which the `IS NOT NULL`
+ * productivity terms conjoined OUTSIDE the predicate reproduce (a `ProductiveByStrategy` keep-null is not
+ * built, so that declines, matching the single-binary path).
  */
 function aliasValueWhere(
   step: IRStep, startHost: ChildHost, pred: unknown, rel: Rel, labels: AliasMap, ctx: ChainCtx, fresh: Minter,
@@ -6512,10 +6526,9 @@ function aliasValueWhere(
   const lhs = lhsBy.value;
   const lhsProd = productivityFilter(step, lhsBy, lhs);
   if (!lhsProd) return 'decline';
-  const prod: Expr[] = lhsProd.keep ? [lhsProd.keep] : [];
   let ringIdx = 1; // startKey took ring[0]; leaves cycle from ring[1] in tree-walk order
-  // The leaves are visited in the tree's left-to-right order (`aliasPred` keeps it under a `P.not`'s
-  // and/or swap), which is the order the ring hands out `by()`s.
+  // `aliasPred` visits the leaves in the tree's left-to-right order, the order the ring hands out `by()`s.
+  // A leaf's productivity is its guard (`setPredicateValues`), so its raw compare is never over a NULL.
   const leaf: AliasLeaf = (op, label) => {
     if (!ALIAS_CMP[op]) return null;
     const proj = aliasProjection(rel, labels, label, 'last', fresh);
@@ -6525,14 +6538,12 @@ function aliasValueWhere(
     const val = byProjection(by, valHost, ctx.source, fresh, true, seam);
     if (!val) return null;
     const p2 = productivityFilter(step, val, val.value);
-    if (!p2) return null;
-    if (p2.keep) prod.push(p2.keep);
-    return aliasCompare(op, lhs, val.value);
+    const cmp = p2 && aliasCompare(op, lhs, val.value);
+    return cmp && { cmp, guard: p2.keep };
   };
   const clause = aliasPred(pred, leaf);
   if (!clause) return 'decline';
-  const kept = conjoin(prod);
-  return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: kept ? and(kept, clause) : clause });
+  return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: lhsProd.keep ? and(lhsProd.keep, clause) : clause });
 }
 
 function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fresh: Minter, elem?: Elem): Rel | 'decline' | null {
@@ -6576,7 +6587,9 @@ function aliasWhere(step: IRStep, rel: Rel, labels: AliasMap, ctx: ChainCtx, fre
         const startProj = aliasProjection(rel, labels, wargs[0], 'last', fresh);
         if (isElementAlias(startProj)) {
           const clause = aliasPred(pred, identityLeaf(aliasIdAt(col(rel.id, startProj.entry.col), 'last'), rel, labels, fresh));
-          if (clause) return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: clause });
+          // The start label's presence, as `valueKeyWhere` guards it: the rowid compares are two-valued under it.
+          const guard = aliasGuard(rel, startProj.entry);
+          if (clause) return make.filter({ id: fresh('rw'), input: rel, channels: rel.channels, type: rel.type, pred: guard ? and(guard, clause) : clause });
         } else if (startProj?.read.kind === 'value') {
           const built = valueKeyWhere(startProj, pred, rel, labels, fresh);
           if (built) return built;

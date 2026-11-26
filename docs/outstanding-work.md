@@ -208,6 +208,13 @@ Queries that run and return a wrong result today. Fix these first.
 - **Depends on:** tag-excludes-guard
 - **Where:** `src/compiler/rel/predicate.ts`
 
+#### A `by()`-ring alias compare orders across types (`where-ring-raw-compare`)
+- **Area:** predicates
+- **Reach:** rare
+- **Problem:** `where('a', P.gt('b')).by('s')` compares the two `by()` values with a raw SQL `>`. SQLite orders every TEXT after every number, so `'10' > 3` is true. Gremlin calls a String and a Number incomparable, so `gt` is false. The answer differs only when `s` holds values of mixed types.
+- **Fix:** Build the ring leaf's compare with `valueTheta`, as the value leaf does. Each `by()` value then needs its tag.
+- **Where:** `src/compiler/rel/lower.ts` (`aliasValueWhere`, `aliasCompare`)
+
 ### Wrong answers: federation, services and io
 
 #### Federate global barriers count the wrong rows (`rf3-fed-barrier`)

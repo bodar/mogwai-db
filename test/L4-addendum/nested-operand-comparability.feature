@@ -129,3 +129,90 @@ Feature: mogwai addendum — a nested-traversal operand compares only within its
     Then the result should be unordered
       | result |
       | d[7].l |
+
+  # `where(P.not(…))` over a LABEL is the same boolean complement `has()`/`is()`/`not()` use: `P.not` is `NotP`,
+  # whose test is `!original.test` (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/NotP.java:108`,
+  # built by `P.negate`, `.../traversal/P.java:247`). So an incomparable pair — `gt` false — is KEPT by its
+  # `P.not`, as the `not(has(…))` scenario above keeps it. An unbound label still drops the row first
+  # (`WherePredicateStep.setPredicateValues`).
+  Scenario: g_V_hasXk_eX_valuesXsX_asXxX_V_asXvX_valuesXsX_whereXnotXgtXxXXX_selectXvX_valuesXkX
+    And the traversal of
+      """
+      g.V().has("k", "e").values("s").as("x").V().as("v").values("s").where(P.not(P.gt("x"))).select("v").values("k")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | a |
+      | d |
+      | e |
+      | f |
+      | h |
+
+  Scenario: g_V_hasXk_eX_valuesXsX_asXxX_V_valuesXkX_whereXnotXgtXxXXX_count_strings_against_a_number
+    And the traversal of
+      """
+      g.V().has("k", "e").values("s").as("x").V().values("k").where(P.not(P.gt("x"))).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[7].l |
+
+  Scenario: g_injectXxX_asXaX_constantX1X_whereXnotXltXaXXX
+    And the traversal of
+      """
+      g.inject("x").as("a").constant(1).where(P.not(P.lt("a")))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].i |
+
+  Scenario: g_injectXnullX_asXaX_constantX1X_whereXnotXltXaXXX
+    And the traversal of
+      """
+      g.inject(null).as("a").constant(1).where(P.not(P.lt("a")))
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].i |
+
+  Scenario: g_V_hasXk_eX_valuesXsX_asXxX_V_localXvaluesXsX_whereXnotXgtXxXXXX_count
+    And the traversal of
+      """
+      g.V().has("k", "e").values("s").as("x").V().local(__.values("s").where(P.not(P.gt("x")))).count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[5].l |
+
+  Scenario: g_V_asXaX_V_hasXk_eX_asXbX_whereXa_notXgtXbXXX_byXkX_selectXaX_valuesXkX_comparable_pairs
+    And the traversal of
+      """
+      g.V().as("a").V().has("k", "e").as("b").where("a", P.not(P.gt("b"))).by("k").select("a").values("k")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | a |
+      | b |
+      | c |
+      | d |
+      | e |
+
+  Scenario: g_V_hasXk_eX_asXxX_V_hasXs_notXgtXselectXxX_valuesXsXXXX_valuesXkX
+    And the traversal of
+      """
+      g.V().has("k", "e").as("x").V().has("s", P.not(P.gt(__.select("x").values("s")))).values("k")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | a |
+      | d |
+      | e |
+      | f |
+      | h |

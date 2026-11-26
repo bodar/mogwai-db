@@ -796,8 +796,9 @@ const vtypeOf = (type: SubjectType): Expr | null =>
  * (`compare(null, null)` is 0), `neq` iff not both, `lt`/`gt` never — rather than a NULL leaking out of a
  * comparator and dropping the row whatever the op (`neq` included).
  *
- * The caller pushes any `P.not` INTO the op (`lt` ↔ `gte`) — a SQL `NOT` over a cross-bucket FALSE
- * would answer TRUE, which `Compare.lt.negate()` never does.
+ * The answer is TWO-VALUED — NULL operands are settled above and every CASE ends in FALSE — so a `P.not`
+ * above it is a plain SQL `NOT`: `NotP` is the boolean complement, and an ordering across buckets is FALSE
+ * while its `P.not` is TRUE (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/NotP.java:108`).
  *
  * Both comparators spell each operand and tag several times over (a bucket test, then a cast per arm), so
  * an operand that is not a bare column or literal — a label's `json_extract` read, a per-row tag's
