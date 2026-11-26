@@ -462,6 +462,9 @@ then byte-stable reuse.
    property). Keep `storedCompareOn` only for carriers that are not stored rows (list members, `{t,v}`
    nodes, reducer `vt`). Check first that datetime and duration are stored as INTEGER. Delete
    `storedCompare` (dead export, 0 references).
+   ✅ **Landed 2026-11-26 (`8211161e`).** `wholeNumber` (`src/compiler/rel/build.ts`) is the one
+   whole-number primitive, `CAST(x AS NUMERIC)`: INTEGER inside int64, REAL past it, never clamped. A
+   stored row sorts by its own `value` through `storedOrderKey`. `storedCompare` is deleted. Remains: nothing.
 2. **Infix connective inside `local()`** (follow-up above).
    ✅ **Landed 2026-11-26 (`7474be16`).** `spliceIdentityHosts` folds the body's top-level connectives
    with `canonicalizeConnectivesLevel` before the splice (`src/compiler/ir/strategies.ts`). Remains: nothing.
