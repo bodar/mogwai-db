@@ -77,6 +77,11 @@ rows (2.5 MB). The key is stored three times per row (table and two indexes): ab
    column), `nameOf(dict, idExpr)` and `withNames(dict, input, idCol)` (decode), and `internNames(dict,
    names)` (from `internLabels`). `dict` is `'labels'`; Stage C adds `'keys'`. Add `isNameLookup(plan)`
    in `src/rel/names.ts`. Acceptance: SQL byte-identical; unit tests for the recognizer.
+   **Landed (3419cdb5), pure move.** `src/compiler/rel/names.ts` holds `nameIds` (was `labelIds`; it also
+   takes a `string[]`, so `namedLabelIds` is deleted), `internNames` (was `internLabels`) and `dictScan`
+   (replaces `LABELS_COLS` and the eight hand-built `labels` scans in `write.ts`). SQL is byte-identical;
+   no baseline moved. `test/compiler/name-dict.exec.test.ts` tests the dictionary. **Remains:** nothing.
+   `nameId`, `nameOf`, `withNames` and `isNameLookup` land with their first consumers (A2, A4).
 2. **A2. Route the five `write.ts` resolve copies through `nameIds`/`nameId`.** Delete `namedLabelIds`.
    Acceptance: bytes the same or smaller; no `sql-plan` regression; merge, `dropLabel` and scale tests
    green. After A1.
