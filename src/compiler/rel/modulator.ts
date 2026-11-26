@@ -11,12 +11,12 @@ import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts
 import { and, eq, firstOf, jsonField, jsonOf, mapNode, meta, PROPERTIES, storedPayload, storedValueOn, typedNode, typedNodeOnce, onceTyped, typeOf, familyKey, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { storedCompareOn, storedCompareOnce } from './predicate.ts';
-import { aliasEntryNode, aliasGuard, aliasProjection, liveAliases, readFraming, type Pop } from './alias.ts';
+import { aliasGuard, aliasMemberOf, aliasProjection, liveAliases, readFraming, type Pop } from './alias.ts';
 import type { ColMeta } from '../../rel/types.ts';
 import { metaPropertyRead, propertyMetaBag, propertyNode, propertyReadOf } from './property.ts';
 import { evidenceOf, type ValueEvidence } from './tag.ts';
 
-/** The floating tags whose by(select(label)) key reuses the label's exactly-spelled entry (`aliasEntryNode`). */
+/** The floating tags whose by(select(label)) key reuses the label's exactly-spelled entry (`aliasEntryAt`). */
 const FLOATING_TAGS: ReadonlySet<string> = new Set(['double', 'float', 'real']);
 
 /**
@@ -509,7 +509,7 @@ function typedArm(modulation: Modulation, value: Expr, host: ChildHost, fresh: M
  */
 function scopeValue(
   key: Extract<ByKey, { kind: 'alias' }>, host: ChildHost,
-): { readonly payload: readonly (readonly [ColMeta, Expr])[]; readonly framing: RelFraming; readonly optional: boolean; readonly present: Presence } | null {
+): { readonly payload: readonly (readonly [ColMeta, Expr])[]; readonly framing: RelFraming; readonly optional: boolean; readonly present: Presence; readonly labelEntry?: Expr } | null {
   const row = host.row;
   // A MAP host's own scope is a per-row key read this minter-less resolver cannot make (`correlatedMapKey`
   // is the readers' that can), and answering the path label instead would skip the scope the reference
@@ -545,6 +545,7 @@ function scopeValue(
     framing: readFraming(projected.read),
     optional: projected.entry.binds === undefined,
     present: guard ? { when: guard } : 'always',
+    ...(projected.labelEntry ? { labelEntry: projected.labelEntry } : {}),
   };
 }
 
@@ -722,11 +723,11 @@ export function byNode(modulation: Modulation, host: ChildHost, source: GraphSou
     // `vtype` COLUMN survives becoming JSON.
     // A STATIC recorded type rides on the framing, not a payload column, and is the node's tag: dropped to
     // NULL ("infer"), the value reached `json_object` bare, whose writer keeps only 15 digits. A FLOATING
-    // one reuses the entry the `as()` site already spelled exactly (`aliasEntryNode`) rather than reading
-    // the REAL back and repairing it a second time.
+    // one reuses the entry the `as()` site already spelled exactly — the entry the label's producer hands on
+    // (`aliasEntryAt`) — rather than reading the REAL back and repairing it a second time.
     const value = scoped.payload[0]![1], tag = scoped.payload[1]?.[1];
     const recorded = staticTypeOf(scoped.framing.type);
-    const entryNode = !tag && recorded && FLOATING_TAGS.has(recorded) ? aliasEntryNode(value) : null;
+    const entryNode = !tag && recorded && FLOATING_TAGS.has(recorded) && scoped.labelEntry ? aliasMemberOf(scoped.labelEntry) : null;
     return gatedOn(scoped.present, value, entryNode ?? typedNode(value, tag ?? (recorded ? compilerText(recorded) : compilerNull('text'))));
   }
 

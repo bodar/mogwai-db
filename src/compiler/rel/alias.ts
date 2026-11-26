@@ -106,27 +106,28 @@ export const aliasValueTypeAt = (column: Expr, end: 'first' | 'last', type: Scal
     : type.kind === 'perRow' ? perRowSubject(aliasTypeAt(column, end), aliasValueAt(column, end))
       : SUBJECT_UNKNOWN;
 
+/**
+ * A VALUE label's whole history ENTRY at one end — `{k, v, t}`, whose `v` and `t` fields are exactly what
+ * `aliasValueAt`/`aliasTypeAt` read. THE ONE READ of a label's entry: the `as()` site already wrote `v` in its
+ * exact JSON spelling (`exactRealEntry`) beside its `t`, so a reader that wants both — a comparison operand
+ * (`TypedOperand.node`), a member node (`aliasMemberOf`) — takes this node rather than walking the history
+ * once per field and repairing the number's spelling a second time. The producers that know the column and
+ * end (`aliasOperandAt`, `aliasProjection`) hand it on; no consumer recognises it back out of a field read.
+ */
+export const aliasEntryAt = (column: Expr, end: 'first' | 'last'): Expr =>
+  ({ kind: 'call', fn: 'jsonb_extract', args: [column, compilerText(end === 'first' ? '$[0]' : '$[#-1]')] });
+
+/** A label ENTRY (`aliasEntryAt`) as a `{t,v}` member node — the entry minus its shape `k`, as JSON text. */
+export const aliasMemberOf = (entry: Expr): Expr =>
+  ({ kind: 'call', fn: 'json_remove', args: [entry, compilerText('$.k')] });
+
 /** A VALUE label as a `valueTheta` operand — `aliasValueTypeAt`'s type, but a per-row label carries its RAW
- *  `t` read (the NULL-tag inference is applied once, over the comparison's evaluated columns). */
+ *  `t` read (the NULL-tag inference is applied once, over the comparison's evaluated columns) and its entry
+ *  (`aliasEntryAt`), which the comparison binds once rather than walking the history per field. */
 export const aliasOperandAt = (column: Expr, end: 'first' | 'last', type: ScalarType): TypedOperand =>
   type.kind === 'perRow'
-    ? { value: aliasValueAt(column, end), tag: aliasTypeAt(column, end), inferNullTag: true }
+    ? { value: aliasValueAt(column, end), tag: aliasTypeAt(column, end), inferNullTag: true, node: aliasEntryAt(column, end) }
     : subjectOperand(aliasValueAt(column, end), aliasValueTypeAt(column, end, type));
-
-/**
- * A VALUE label's history entry AS a `{t,v}` member node — the entry minus its shape `k`. The `as()` site
- * already wrote `v` in its exact JSON spelling (`exactRealEntry`), so re-reading it through `json_extract`
- * and repairing it again would only spell the same digits twice per row. `null` for an expression that is
- * not an `aliasValueAt` read (a record field's column).
- */
-export const aliasEntryNode = (value: Expr): Expr | null => {
-  if (value.kind !== 'call' || value.fn !== 'json_extract' || value.args.length !== 2) return null;
-  const [column, path] = value.args;
-  const end = (['first', 'last'] as const).find((e) => path?.kind === 'lit' && path.source === 'compiler-text' && path.value === endPath(e, 'v'));
-  if (!end) return null;
-  const entry: Expr = { kind: 'call', fn: 'json_extract', args: [column!, compilerText(end === 'first' ? '$[0]' : '$[#-1]')] };
-  return { kind: 'call', fn: 'json_remove', args: [entry, compilerText('$.k')] };
-};
 
 /**
  * A VALUE label as a `HashSet` KEY (`dedup('a')` — `DedupGlobalStep.java:80-88` adds the `List` of each
@@ -348,6 +349,9 @@ export interface AliasProjection {
   readonly entry: AliasEntry;
   readonly read: AliasRead;
   readonly payload: readonly (readonly [ColMeta, Expr])[];
+  /** A VALUE read's whole history entry (`aliasEntryAt`) — set by the one producer that knows the column
+   *  and the end, so a reader wanting value and tag together takes it. */
+  readonly labelEntry?: Expr;
 }
 
 /** An `AliasProjection` that names an ELEMENT — narrowed by `isElementAlias`, so a host builder reads
@@ -474,7 +478,7 @@ export function aliasProjection(
   // `carries('vtype')` reads — the same channel name `values()` produces, so a following
   // `is(P.gt(…))` gets the vtype-aware compare key with no further plumbing.
   return {
-    entry, read,
+    entry, read, labelEntry: aliasEntryAt(column, end),
     payload: [
       [meta('v', 'any', true), aliasValueAt(column, end)],
       ...(read.type.kind === 'perRow' ? [[meta(vtype, 'text', true), aliasTypeAt(column, end)] as const] : []),

@@ -231,6 +231,12 @@ export interface ChildValue {
    */
   readonly node?: Expr;
   /**
+   * The value label's history ENTRY the value was read from (`aliasEntryAt`) — set only by a bare
+   * `select(<label>)` of a per-row-typed value label, whose value and tag are two fields of that one entry. A
+   * comparison binds it once as its operand (`TypedOperand.node`); `node` is the same entry as a member.
+   */
+  readonly labelEntry?: Expr;
+  /**
    * The value as the stored row's own COMPARABLE `value` column (`storedForm`) — set only where the producer
    * reads a stored base-table row (a bare stored `values(k)`), so a predicate over a stored subject compares
    * against it as it is, with no tag read and no conversion (`TypedOperand.comparable`). A thunk, so a consumer
@@ -398,7 +404,11 @@ export type ChildHost =
        *  on a NULL only where it is a value. */
       readonly present?: HostPresence;
       /** Present only for a child rooted at an unfolded Map.Entry. */
-      readonly entry?: { readonly key: Expr; readonly val: Expr; readonly keyOf: import('../../sql/kernel/render.ts').MapOf; readonly valOf: import('../../sql/kernel/render.ts').MapOf } }
+      readonly entry?: { readonly key: Expr; readonly val: Expr; readonly keyOf: import('../../sql/kernel/render.ts').MapOf; readonly valOf: import('../../sql/kernel/render.ts').MapOf };
+      /** The value label's history ENTRY the host was read from (`aliasEntryAt`), where value and tag are two
+       *  fields of it (a per-row-typed label, `selectRerootHost`). A bare body yields it as
+       *  `ChildValue.labelEntry`; a body continuing past the host reads `value`/`vtype` as before. */
+      readonly labelEntry?: Expr }
   /** A PROPERTY traverser — `properties()`, addressed by the stored row's own rowid exactly as an
    *  element host is addressed by its element rowid. Its three projections (`key()`, `value()`,
    *  `element()`) are correlated reads of that row (`propertyReadOf`, `property.ts`), which is what

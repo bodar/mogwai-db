@@ -849,6 +849,10 @@ export interface TypedOperand {
    *  set only where the producer reads a stored row (a bare `values(k)`). A stored subject compares against it
    *  as it is (`storedComparable`). */
   readonly comparable?: Expr;
+  /** The operand as ONE JSON node whose `v` and `t` fields are `value` and `tag` — set only by a producer
+   *  that reads both off one node (a value label's history entry, `aliasEntryAt`; a child body's
+   *  `ChildValue.node`), so the comparison binds the node once and reads its fields (`overOperand`). */
+  readonly node?: Expr;
 }
 
 /** A predicate subject as a `valueTheta` operand — its tag already settled by its `SubjectType`. */
@@ -880,12 +884,13 @@ const cheap = (e: Expr): boolean => e.kind === 'col' || e.kind === 'lit';
 
 /** `use(value, tag)` over a nested operand, with the value and its tag bound ONCE as the one row of a `VALUES`
  *  where either is computed work (a correlated read, a label's history read) — each arm of a CASE over them
- *  would otherwise re-run it. Inline where both are cheap. */
+ *  would otherwise re-run it. Where the producer handed the operand as ONE node (`TypedOperand.node`), that node
+ *  is the row and both fields are read off it, so the source is walked once and a number keeps the spelling
+ *  its producer wrote. Inline where both are cheap. */
 function overOperand(operand: TypedOperand, use: (value: Expr, tag: Expr | null) => Expr, fresh: Minter): Expr {
-  const { value, tag } = operand;
+  const { value, tag, node } = operand;
   if (cheap(value) && (!tag || cheap(tag))) return use(value, tag);
-  const node = tag ? sharedNode(value, tag) : null;
-  if (node) {
+  if (node && tag) {
     const one = make.values({ id: fresh('cno'), channels: [], type: typeOf(meta('n', 'json', true)), rows: [[node]] });
     const field = (name: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [col(one.id, 'n'), compilerText(`$.${name}`)] });
     return { kind: 'scalar', plan: make.project({
@@ -897,23 +902,6 @@ function overOperand(operand: TypedOperand, use: (value: Expr, tag: Expr | null)
     id: fresh('cnp'), input: one, channels: [], type: typeOf(meta('k', 'any', true)),
     exprs: [['k', use(col(one.id, 'v'), tag ? col(one.id, 't') : null)]],
   }) };
-}
-
-/** A value and its tag read as the `v` and `t` fields of ONE JSON node — `json_extract(doc, '<p>.v')` beside
- *  `json_extract(doc, '<p>.t')`, the shape a value label's history read has (`aliasValueAt`/`aliasTypeAt`) — as
- *  that node, `jsonb_extract(doc, '<p>')`, so the document is built and walked once rather than per field. A
- *  number keeps its spelling: the node is the entry the label wrote (`aliasEntryNode`'s reason). `null` for
- *  any other pair. */
-function sharedNode(value: Expr, tag: Expr): Expr | null {
-  // The read's document and the path of its parent node, where it is a `json_extract` of field `field`.
-  const read = (e: Expr, field: string): { readonly doc: Expr; readonly at: string } | undefined => {
-    const path = e.kind === 'call' && e.fn === 'json_extract' && e.args.length === 2 ? e.args[1]! : undefined;
-    return path?.kind === 'lit' && typeof path.value === 'string' && path.value.endsWith(`.${field}`)
-      ? { doc: (e as Extract<Expr, { kind: 'call' }>).args[0]!, at: path.value.slice(0, -field.length - 1) } : undefined;
-  };
-  const [v, t] = [read(value, 'v'), read(tag, 't')];
-  return v && t && v.at === t.at && JSON.stringify(v.doc) === JSON.stringify(t.doc)
-    ? { kind: 'call', fn: 'jsonb_extract', args: [v.doc, compilerText(v.at)] } : null;
 }
 
 /**
@@ -956,8 +944,11 @@ function sameBucket(vtype: Expr, operand: TypedOperand, fresh: Minter): Expr {
   // Only the tag is needed where it is known for every row; the value only where the tag may be inferred.
   const tagOnly: TypedOperand | null = operand.tag && !operand.inferNullTag ? { value: operand.tag, tag: null } : null;
   if (tagOnly) return overOperand(tagOnly, (t) => guard(t), fresh);
-  return overOperand(operand, (value, tag) =>
-    guard(!tag ? inferredVtype(value) : { kind: 'call', fn: 'coalesce', args: [tag, inferredVtype(value)] }), fresh);
+  // The inferred tag is bound once more (a scalar over the operand's row), so the guard's three arms read a
+  // column rather than re-spelling the inference each.
+  return overOperand(operand, (value, tag) => overOperand(
+    { value: !tag ? inferredVtype(value) : { kind: 'call', fn: 'coalesce', args: [tag, inferredVtype(value)] }, tag: null },
+    (t) => guard(t), fresh), fresh);
 }
 
 /** `TextP` -> a LIKE pattern with the user's metacharacters escaped (`likeEscaped`). A wire parameter stays a

@@ -2076,12 +2076,6 @@ function hostRelOf(host: ChildHost): RelId | undefined {
   return at?.kind === 'col' ? at.rel : host.row?.rel.id;
 }
 
-/** A ChildValue's expressions, each rewritten. */
-const mapValue = (v: ChildValue, f: (e: Expr) => Expr): ChildValue => ({
-  ...v, expr: f(v.expr), ...(v.vtype ? { vtype: f(v.vtype) } : {}), ...(v.node ? { node: f(v.node) } : {}),
-  present: typeof v.present === 'object' ? { ...v.present, when: f(v.present.when) } : v.present,
-});
-
 /** The columns of `rel` an expression reads. */
 function colsRead(e: Expr, rel: RelId): Set<string> {
   const names = new Set<string>();
@@ -2102,10 +2096,10 @@ export function scopedValue(ctx: ChainCtx, body: readonly IRStep[], host: ChildH
   // ride it under their names, so the value is re-pointed at it — where every column it reads is there.
   const row = host.row?.rel;
   if (!row || row.id !== at) return undefined;
-  const reads = [value.expr, value.vtype, value.node, typeof value.present === 'object' ? value.present.when : undefined]
+  const reads = [value.expr, value.vtype, value.node, value.labelEntry, typeof value.present === 'object' ? value.present.when : undefined]
     .flatMap((e) => (e ? [...colsRead(e, scoped.over)] : []));
   if (!reads.every((name) => row.type.cols.some((column) => column.name === name))) return undefined;
-  return mapValue(value, (e) => substRelId(e, scoped.over, row.id));
+  return substChildValue(value, scoped.over, row.id);
 }
 
 /** WHERE A LANDED BODY STARTS — a FRESH traverser on an element (`freshTraverserRow`): a `where(k, P(k2)).by(b)`
@@ -2307,6 +2301,7 @@ function substChildValue(value: ChildValue, from: RelId, to: RelId): ChildValue 
   return {
     ...value, expr: substRelId(value.expr, from, to), present,
     ...(value.vtype ? { vtype: substRelId(value.vtype, from, to) } : {}), ...(value.node ? { node: substRelId(value.node, from, to) } : {}),
+    ...(value.labelEntry ? { labelEntry: substRelId(value.labelEntry, from, to) } : {}),
     ...(value.comparable ? { comparable: () => substRelId(value.comparable!(), from, to) } : {}),
   };
 }

@@ -349,6 +349,14 @@ const SHAPES: readonly Shape[] = [
   { name: 'range: hasLabel.has(age,gt) ~2%', query: "g.V().hasLabel('person').has('age', gt(66)).count()" },
   { name: 'range: where(has(age,gt)) ~2%', query: "g.V().where(has('age', gt(66))).count()" },
   { name: 'range: has(age,outside) ~4%', query: "g.V().has('age', outside(19, 66)).count()" },
+  // A VALUE LABEL as a predicate operand: the label's history entry is bound once per operand (`aliasEntryAt`),
+  // and the range compare stays `value OP (scalar)`, so the (key, value) seek drives it.
+  // (Output-bound: |label rows| × |range| grows ~64× from 1k to 8k by the query's meaning.)
+  { name: 'label operand: has(age,30).values.as.V.has(age,gt(select))', query: "g.V().has('age',30).values('age').as('e').V().has('age', gt(select('e'))).count()" },
+  { name: 'label operand: values.as.V.has(age,gt(select)).limit', query: "g.V().values('age').as('e').V().has('age', gt(select('e'))).limit(1)" },
+  { name: 'label operand: values(name).as.V.has(name,select).count', query: "g.V().values('name').as('e').V().has('name', select('e')).count()" },
+  { name: 'label operand: values.as.map(V.has(name).has(age,lt(select)).values).count', query: "g.V().values('age').as('e').map(V().has('name','p7').has('age', lt(select('e'))).values('name')).count()" },
+  { name: 'label operand: as.values.as.select.out.has(age,gt(select))', query: "g.V().as('v').values('age').as('e').select('v').out().has('age', gt(select('e'))).count()" },
 ];
 
 /** Deterministic xorshift, so every child and every run sees one graph. */

@@ -580,7 +580,13 @@ export function nestedFirstValue(operand: unknown, host: ElementSubject | null, 
   const value = scalarChild(body, { kind: 'element', elem: host.elem, id: host.id, row: { rel: host.rel, aliases } }, ctx, fresh);
   return value && value.framing.kind === 'scalar'
     ? { value: value.expr, tag: typed ? hostTag(value.framing.type, value.vtype) ?? null : null,
-      ...(typed && value.comparable ? { comparable: value.comparable() } : {}) }
+      ...(typed && value.comparable ? { comparable: value.comparable() } : {}),
+      // The producer's one-read node (a label's history entry, a stored row's `{t,v}`), so the comparison
+      // binds it once rather than reading value and tag apart (`TypedOperand.node`).
+      ...(typed && (value.labelEntry ?? value.node) ? { node: (value.labelEntry ?? value.node)! } : {}),
+      // A label entry's `t` is RAW — NULL where the `as()` site had no tag (an untyped injected `30`), which
+      // means "read the value" — exactly as `aliasOperandAt` states it.
+      ...(typed && value.labelEntry ? { inferNullTag: true } : {}) }
     : null;
 }
 
@@ -845,7 +851,10 @@ export function selectRerootHost(step: IRStep, host: ChildHost, fresh: Minter): 
   if (proj.read.kind === 'element') return { kind: 'element', id: key, elem: proj.read.elem, ...row, ...present };
   if (proj.read.kind === 'value') {
     const vtype = hostTag(proj.read.type, proj.payload[1]?.[1]);
-    return { kind: 'scalar', value: key, ...(vtype ? { vtype } : {}), ...row, ...present };
+    // A PER-ROW-typed label's value and tag are two fields of ONE history entry, so the host carries that
+    // entry (`aliasEntryAt`) under the key's own gate, as a stored `values(k)` carries its one-row node.
+    const labelEntry = proj.read.type.kind === 'perRow' && proj.labelEntry ? gatedByHost(host, proj.labelEntry) : null;
+    return { kind: 'scalar', value: key, ...(vtype ? { vtype } : {}), ...(labelEntry ? { labelEntry } : {}), ...row, ...present };
   }
   return null; // a list/Pop history alias in a child body is a later phase
 }
@@ -1774,7 +1783,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
       if (reHost.kind === 'element') return { expr: reHost.id, framing: { kind: 'elements', elem: reHost.elem }, present: presentOfHost(reHost), yields: 'one' };
       if (reHost.kind === 'scalar') return {
         expr: reHost.value, framing: { kind: 'scalar', type: reHost.vtype ? PER_ROW('vtype') : UNKNOWN },
-        ...(reHost.vtype ? { vtype: reHost.vtype } : {}), present: presentOfHost(reHost), yields: 'one',
+        ...(reHost.vtype ? { vtype: reHost.vtype } : {}), ...(reHost.labelEntry ? { labelEntry: reHost.labelEntry } : {}), present: presentOfHost(reHost), yields: 'one',
       };
     }
     return scalarChild(body.slice(1), reHost, ctx, fresh);
@@ -2590,6 +2599,7 @@ function selectedNodeChild(
     if (!rerooted) return null;
     const gate = (e: Expr): Expr => caseWhen(held, e);
     const gated = { ...rerooted, expr: gate(rerooted.expr), ...(rerooted.vtype ? { vtype: gate(rerooted.vtype) } : {}), ...(rerooted.node ? { node: gate(rerooted.node) } : {}),
+      ...(rerooted.labelEntry ? { labelEntry: gate(rerooted.labelEntry) } : {}),
       ...(rerooted.comparable ? { comparable: () => gate(rerooted.comparable!()) } : {}) };
     const present = rerooted.present;
     if (present === 'unknown') return null;
@@ -2612,8 +2622,9 @@ function selectedNodeChild(
   // key through `reHost`'s own presence, so it rides out as it is.
   if (typeof rerooted.present === 'object') return rerooted;
   if (rerooted.present !== 'always') return { ...rerooted, present: 'value-nullness' };
-  const gated: Expr = { kind: 'case', whens: [[isNot(node, compilerNull()), rerooted.expr]], else: compilerNull() };
-  return { ...rerooted, expr: gated, present: 'value-nullness' };
+  const gate = (e: Expr): Expr => ({ kind: 'case', whens: [[isNot(node, compilerNull()), e]], else: compilerNull() });
+  return { ...rerooted, expr: gate(rerooted.expr), ...(rerooted.node ? { node: gate(rerooted.node) } : {}),
+    ...(rerooted.labelEntry ? { labelEntry: gate(rerooted.labelEntry) } : {}), present: 'value-nullness' };
 }
 
 export function listHostChild(

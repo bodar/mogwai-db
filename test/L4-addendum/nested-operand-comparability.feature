@@ -216,3 +216,20 @@ Feature: mogwai addendum — a nested-traversal operand compares only within its
       | e |
       | f |
       | h |
+
+  # A VALUE LABEL operand of mixed types: an untyped literal `3` beside a Double records no tag in the label's
+  # history, so the guard reads the value's own type and `3` orders against the stored numbers (it compared
+  # against nothing before). Each injected value is its own traverser, so b and c match twice.
+  Scenario: g_injectX3_5d_3X_asXeX_V_hasXs_gteXselectXeXXX_valuesXkX_untagged_label_operand
+    And the traversal of
+      """
+      g.inject(3.5d, 3).as("e").V().has("s", P.gte(__.select("e"))).values("k")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | b |
+      | c |
+      | b |
+      | c |
+      | e |

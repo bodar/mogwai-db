@@ -656,6 +656,13 @@ Queries that answer correctly but grow faster than linear with data or query siz
 - **Fix:** Read the prefix once with `rootedRead`, then cross with its small result. Fix the `rankPairs` doc: the CTE is not `MATERIALIZED`, so "FENCED" is wrong.
 - **Where:** `rankPairs`, `rootedRead`
 
+#### A per-origin slice of a re-source filtered by a label operand is cubic (`reresource-label-operand-limit`)
+- **Area:** compile
+- **Reach:** plausible
+- **Problem:** `g.V().values('age').as('e').local(V().has('age', gt(select('e'))).limit(1)).count()` takes 2.0 s at 250 vertices and 16.7 s at 500 (8× per doubling). At 1k it takes about 128 s. The same filter without the slice is linear: `V().values('age').as('e').map(V().has('name','p7').has('age', lt(select('e'))).values('name'))` is 1.5 ms at 1k and 10.4 ms at 8k.
+- **Fix:** Keep the per-origin `limit(1)` a correlated first-row read with the `(key, value)` range seek. Do not cross the origins with the whole candidate set.
+- **Where:** `reSourcedBody`, `rankPairs`, `src/rel/decorrelate.ts`
+
 #### A per-origin draw over a moving re-source under a tracked path is quadratic (`reresource-path-draw`) (verify: may have landed)
 - **Area:** compile
 - **Reach:** rare
