@@ -1,7 +1,7 @@
 # LDBC findings — fix the three measured defects
 
-**Status: L1–L3 LANDED (2026-11-25). Round 2 LANDED (2026-11-25). Round 3 LANDED except item 5
-(2026-11-26). Open: "Parked in round 3", "Follow-ups from review (round 3)" and the round-4 list under
+**Status: L1–L3 LANDED (2026-11-25). Round 2 LANDED (2026-11-25). Round 3 LANDED (item 5 on
+2026-11-26, `1c5020d9`). Open: "Parked in round 3", "Follow-ups from review (round 3)" and the round-4 list under
 "Next round (round 4)".**
 
 **Source.** A head-to-head run against Relate 1.2.0 (Neo4j's embedded in-memory Cypher engine) on
@@ -287,7 +287,7 @@ byte-stable reuse.
    most 7.5× from 1k to 8k. Remains: nothing.
 4. *(Cut by owner review — subsumed by item 3.)*
 5. **Parse-cache bounds for memory** (follow-up above). Small.
-   ⏸ **Built, CI green, NOT landed** (`wf/parse-cache-bounds-1-0`, `7269cbf9`). See "Parked in round 3".
+   ✅ **Landed 2026-11-26 (`1c5020d9`)**, rebased onto trunk; the `isVolatileQuery` comment keeps both edits.
 6. **GraphBinary frames a boolean tag through `booleanOfStored`; name `vp_decimal`/`ep_decimal` in the
    index-build-on-deploy note** (round-1 follow-ups, about 5 lines).
    ✅ **Landed 2026-11-25 (first half, `71265cd0`).** `frameValue` (`src/execute.ts`) decodes a `boolean` tag with
@@ -467,7 +467,7 @@ then byte-stable reuse.
 4. **Value-join regression and one comparable authority** (the two MAJOR item-3 follow-ups above, one
    item).
 5. **Quadratic matching `mergeE`** (follow-up above).
-6. **Land round-3 item 5** from `wf/parse-cache-bounds-1-0` (see "Parked in round 3").
+6. ~~Land round-3 item 5~~ — landed as `1c5020d9`. Its two review follow-ups (test timeout, trade comment) join item 7.
 7. **The cheap and concrete round-3 follow-ups** above.
 
 ### Reuse sweep (byte-stable unless said)
