@@ -759,7 +759,9 @@ Queries that answer correctly but grow faster than linear with data or query siz
 - **Area:** compiler
 - **Reach:** plausible
 - **Problem:** `hasLabel` on a joined edge does a correlated rowid probe. `outE().as('e').inV().inE().hasLabel('created').where(neq('e'))` is about 1.5× slower than before (linear, output-bound). The old IN form has the same cost. `labelScalar` does the same for `label()`: `g.V().outE().label()` and `g.E().order().by(T.label)` seek `edges` once per row for an edge already in scope (linear: 1.82 ms at 1k, 6.91 ms at 8k).
-- **Fix:** When `ownScan(row, id, 'edges')` resolves, read `col(scan, 'label')`. Use the same rule in `hasLabelPredicate` and `labelScalar`.
+- **Fix:** Do SS1 in `docs/2026-11-26-name-interning-plan.md`: one `src/rel` pass replaces a correlated scalar self-seek (`(SELECT c FROM T WHERE rowid = outer.T.rowid)`) with `outer.c`. Do not add an `ownScan` read in each consumer: that is a (consumer, shape) special case.
+- **Depends on:** SS1 (`docs/2026-11-26-name-interning-plan.md`)
+- **Where:** `src/compiler/rel/boundgraph.ts` (`hasLabelPredicate`, `labelScalar`)
 
 ## 3. Queries we decline
 
@@ -792,9 +794,12 @@ Sensible queries that fail with `UnsupportedTraversal` today. Each one is a feat
 - **Area:** writes
 - **Reach:** common
 - **Problem:** `g.inject([[name:'x'],…]).unfold().mergeV()` and `g.inject([[lookup:[…], create:[…]],…]).unfold().mergeV(__.select('lookup')).option(Merge.onCreate, __.select('create'))` decline: an unfolded list is not Map-framed. The un-unfolded form and record-framed `project('name').by('name').mergeV()` decline with `MapScopeDeferral` `'merge-own-entry'`. This is the top write candidate.
-- **Fix:** Let `mergeFromTraversal` take record and `inject(map)` drivers, starting at `parseComputedMergeArg`'s per-driver map decomposition. Then `literalTextHint` can tell a too-large literal upsert to send `inject($rows).unfold().mergeV()`; today it can only say "send the values in smaller batches".
+  - Driver forms that decline today with "no lowering covers": `g.V().hasLabel('person').project('name').by('name').mergeV()`, `g.inject([name:'a']).project('name').by(select('name')).mergeV()`, `g.V().hasLabel('person').valueMap('name').by(unfold()).mergeV()`, `g.inject([[name:'a'],[name:'b']]).unfold().mergeV()`.
+  - Inside a child: `g.V().local(__.mergeV([name:'x']))` and `g.V().optional(__.mergeV([name:'x']))` decline with "a write (mergeV()) inside local()/optional() is not supported yet". This is `s3-write-in-child` (§4): a write lowered in a child body through the connector. Do not add a route for it here.
+  - Several traversers with `onMatch`: `g.V().hasLabel('person').mergeV([name:'marko']).option(Merge.onMatch, [age:1])` raises `RaisedByQuery` ("mergeV() over several traversers reaching one element with an onMatch … write"). This is `o-seqguard` (§1): answer from a snapshot of the input.
+- **Fix:** Let `mergeFromTraversal` take record and `inject(map)` drivers, starting at `parseComputedMergeArg`'s per-driver map decomposition. A record or Map driver is a framing the driver lowering reads, so the fix is in `mergeFromTraversal`, not a new host route. Then `literalTextHint` can tell a too-large literal upsert to send `inject($rows).unfold().mergeV()`; today it can only say "send the values in smaller batches".
 - **Depends on:** nr-fu-onmatch-scope (§1)
-- **Where:** `src/compiler/ir/write-args.ts` (`parseComputedMergeArg`); `src/sql/kernel/budget.ts` (`literalTextHint`)
+- **Where:** `src/compiler/ir/write-args.ts` (`parseComputedMergeArg`); `src/compiler/rel/lower.ts` (`mergeFromTraversal`); `src/sql/kernel/budget.ts` (`literalTextHint`)
 
 #### Explicit map over a Map driver (`merge-explicit-over-map-driver`)
 - **Area:** writes
@@ -1006,10 +1011,10 @@ Sensible queries that fail with `UnsupportedTraversal` today. Each one is a feat
 
 #### A `label()` arm beside a string `constant()` arm (`label-arm-string-constant`)
 - **Area:** branch
-- **Reach:** rare
-- **Problem:** `g.V().union(outE().label(), constant('none')).count()`, `g.V().union(constant('x'), label())`, `g.V().coalesce(outE().label(), constant('none'))`, `g.V().choose(hasLabel('person'), label(), constant('x'))` and `g.V().coalesce(outE().has(T.label, eq('likes')).label(), constant('none')).groupCount()` decline. They decline under `local()` and `where()` too. The merge, not the host, is the gap: `union(label(), constant(1))`, `union(label(), values('name'))`, `union(outE().label(), outE().label())` and `coalesce(label(), constant('x'))` answer. The cause is not found yet.
-- **Fix:** Find where the arm merge refuses a label arm beside a string constant arm. Fix it in the merge, so it composes under every host. Do not add a `(host, arm)` case.
-- **Where:** the arm merge in `src/compiler/rel/lower/branch.ts`; `labelScalar`
+- **Reach:** plausible
+- **Problem:** `g.V().union(outE().label(), constant('none')).count()`, `g.V().union(constant('x'), label())`, `g.V().coalesce(outE().label(), constant('none'))`, `g.V().choose(hasLabel('person'), label(), constant('x'))` and `g.V().coalesce(outE().has(T.label, eq('likes')).label(), constant('none')).groupCount()` decline. So do `g.V().project('l').by(coalesce(outE().label(), constant('none')))`, `g.E().union(label(), constant('x'))` and `g.V().union(label(), constant('x')).dedup()` ("no lowering covers"). They decline under `local()`, `map()` and `where()` too. The merge, not the host, is the gap: `union(label(), constant(1))`, `union(label(), values('name'))`, `union(outE().label(), outE().label())` and `coalesce(label(), constant('x'))` answer. Contrast: `g.V().union(label().fold().unfold(), constant('x')).dedup()` answers. So the cause is the shape of the label-scalar column in the arm merge, not the host.
+- **Fix:** Make the arm merge take the label-scalar column beside a string constant column, as it takes the `label().fold().unfold()` column. Fix it in the merge, so it composes under every host. Do not add a `(host, arm)` case.
+- **Where:** the arm merge in `src/compiler/rel/lower/branch.ts`; `src/compiler/rel/boundgraph.ts` (`labelScalar`, `hasLabelPredicate`)
 
 #### A drawn re-source after a host-reading filter declines under `map()` (`map-draw-host-read`)
 - **Area:** nesting
@@ -1298,7 +1303,7 @@ Sensible queries that fail with `UnsupportedTraversal` today. Each one is a feat
 - **Area:** predicates
 - **Reach:** rare
 - **Problem:** `g.E().has(T.label, regex('^k')).count()`, `g.V().has(T.label, TextP.regex('^p'))` and `g.V().has(T.id, regex('^1'))` decline. `has('name', regex('^m'))` answers through the regex barrier.
-- **Fix:** Let the regex barrier head project the label (or the external id) in place of `values(key)`. The resume is then `has(T.label, within(<survivors>))`, which already answers. Keep the one barrier; add no second regex route.
+- **Fix:** Let the regex barrier head project the label (or the external id) in place of `values(key)`. The resume is then `has(T.label, within(<survivors>))` for a label and `has(T.id, within(<survivors>))` for an id. Both already answer. For a label, run the regex over the distinct `labels` dictionary, not over the elements: the cost is O(distinct labels), not O(rows). Keep the one barrier; add no second regex route.
 - **Where:** `src/compiler/rel/regex.ts`; `hasTokenClause`
 
 ### Queries we decline: sources and movement
@@ -1354,6 +1359,13 @@ Sensible queries that fail with `UnsupportedTraversal` today. Each one is a feat
 - **Problem:** `scalarStrings` returns null, which becomes `UnsupportedTraversal`, when the service filter matches nothing. `Values([])` cannot be represented. The decline depends on registry contents, not on query text. This changes behaviour.
 - **Fix:** Build the rows as one exploded JSON array. An empty array is a zero-row relation. `call('--list',[service:'nope'])` returns `[]`.
 - **Where:** `src/services/catalog/directory.ts` `scalarStrings`
+
+#### A keyed `by()` over `call('schema')` rows declines (`schema-map-by-key`)
+- **Area:** maps
+- **Reach:** plausible
+- **Problem:** `g.call('schema').group().by(select('kind')).by(count())`, `g.call('schema').groupCount().by(select('kind'))`, `g.call('schema').order().by(select('kind'))`, `g.call('schema').order().by('kind')` and `g.call('schema').project('k').by(select('kind'))` decline with "no lowering covers". `select('kind')`, `map(select('kind'))`, `local(select('kind'))`, `filter`/`where(select('kind'))`, `dedup`, `fold`, `union` and `count` answer. So does `select('kind').groupCount()`. The gap is not in the service: a Map row from `inject([kind:'a'])` or `valueMap()` declines the same way, and so does `dedup().by(select('kind'))` there. A record row from `project('n')` answers `order()`/`dedup().by(select('n'))` but not `group()`/`groupCount().by(select('n'))`. `by('kind')` on a Map is valid (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/lambda/ValueTraversal.java`).
+- **Fix:** Lower `select(k)` and `by(k)` over a Map framing as a member read in the `by()` body's own lowering. The `group`/`groupCount`/`order`/`project`/`dedup` hosts then claim it through their CONNECTORS rows. Add no `(host, call)` case. This also closes the map-row bullet of `group-depth-gaps` and the `mapTail` part of `merge-step-hosts`.
+- **Where:** `src/compiler/rel/lower.ts` (`mapTail`); `src/compiler/rel/lower/scoped.ts` (`CONNECTORS`); `src/services/catalog/schema.ts`
 
 ### Queries we decline: compiler internals
 
