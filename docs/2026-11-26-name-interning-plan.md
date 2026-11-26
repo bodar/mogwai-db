@@ -93,9 +93,16 @@ rows (2.5 MB). The key is stored three times per row (table and two indexes): ab
 2. **A2. Route the five `write.ts` resolve copies through `nameIds`/`nameId`.** Delete `namedLabelIds`.
    Acceptance: bytes the same or smaller; no `sql-plan` regression; merge, `dropLabel` and scale tests
    green. After A1.
+   **Landed (6d52bf33), with A3.** `names.ts` adds `nameId` (one name's id, one UNIQUE seek).
+   `endpointSeek`, `labelSeek` and the mergeV/mergeE candidate tests in `write.ts` use it. `labelSeek`
+   now seeks `vertex_labels` through `vl_label`. `dropLabel` already used `nameIds` (A1). No answer change,
+   no baseline move, `sql-plan` the same. Scaling 1k→8k is 5.4×–9.8×. **Remains:** nothing.
 3. **A3. Route the mergeV and mergeE inline intern copies through `internNames`.** Use `RETURNING id,
    name` and delete the second lookup scan where the returned rows are enough. Acceptance: smaller SQL,
    net lines negative, `test/compiler/merge-scale.exec.test.ts` green. After A1.
+   **Landed (6d52bf33), with A2.** mergeE's inline upsert and second `labels` lookup are now the relation
+   form of `internNames`; the rows join its `RETURNING (id, name)` by name. mergeV already wrote through
+   `bindLabels` (7b71ba45). Net production lines -6. **Remains:** nothing.
 4. **A4. Route the decode sites through `nameOf`/`withNames`** (element.ts, source.ts, the five catalog
    scans). `hasTokenPredicate`'s P-over-name arm stays a join through `withNames`. Acceptance:
    byte-identical. After A1.
