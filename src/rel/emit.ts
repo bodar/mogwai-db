@@ -371,13 +371,14 @@ function assembler(bindings: ReadonlyMap<string, Binding>, budget?: CompileBudge
       // into each next step (`substring(0,4)` spells its input three times) otherwise grows its text by that
       // factor per step, in a correlated body where no CTE can hold it (measured: six steps under
       // `project().by` were 178 KB). A bare column, a literal or a short expression is free to repeat.
-      // NOT under a FILTER over a JOIN: the fence would keep its predicate out of the join, and a predicate there
-      // is what SQLite drives the join's index seeks from (measured: a value join `V().values('name').as('e')
-      // .V().has('name', select('e'))` fenced its product of every vertex with every name, 1k → 8k 66× slower).
-      // Nor for a FILTER reading an OUTER row's value (a correlated `has(k, select('e'))` compares the block's
-      // `value` against it): the fence would only move the block's own columns behind `OFFSET 0`, where the
-      // predicate can no longer seek them — the value join's `(key, value = ?)` became a scan per outer row.
-      if (spelled && n > 1 && render(spelled).sql.length > COMPUTED_TEXT && !(reader.kind === 'filter' && (b.joins.length || outer.get(rel)?.get(name) === spelled))) return true;
+      // EXCEPT where the reader is a predicate that SEEKS the block's own columns: a fence moves those columns
+      // behind `OFFSET 0`, where the predicate can no longer drive an index from them. Two shapes are such a
+      // predicate. A FILTER over a JOIN drives the join's index seeks (a value join `V().values('name').as('e')
+      // .V().has('name', select('e'))` fenced was its product of every vertex with every name, 1k → 8k 66×
+      // slower). A FILTER reading an OUTER row's value compares the block's `value` against it (a correlated
+      // `has(k, select('e'))`: fenced, its `(key, value = ?)` became a scan per outer row).
+      const seeksOwnColumns = reader.kind === 'filter' && (b.joins.length > 0 || outer.get(rel)?.get(name) === spelled);
+      if (spelled && n > 1 && render(spelled).sql.length > COMPUTED_TEXT && !seeksOwnColumns) return true;
       // A FILTER over an AGGREGATE is `HAVING`, which spells the aggregate column it tests a second time beside
       // the select list's own — so ONE read is already a repeat, as for a subquery column. Closed, the filter is
       // a `WHERE` on the aggregate's output and reads the column by name (an arg-extremum's guarded row count,

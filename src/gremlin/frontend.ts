@@ -101,7 +101,9 @@ function checked<T>(tree: T, errs: Errors): T {
 // all (about 9–13 MB of trees), and one text past 4K units (under 1 MB of tree) is parsed but not held.
 // They need not agree with the plan cache's: `compilePlan` returns a plan-cache hit before it parses, so
 // a held plan never reads its tree. A refused text costs one parse per compile, never a decline
-// (`compilePlan` parses once).
+// (`compilePlan` parses once). The trade: a text of 4K–64K units that misses the plan cache (a segment plan,
+// a volatile text, a long parameter key) is parsed again on each compile, at a cost linear in its length
+// (about 2 ms at 5K units, 13 ms at 60K). No answer changes.
 export const PARSE_CACHE_MAX_ENTRY_TEXT_UNITS = 4 * 1024;
 /** The most text the parse cache holds, in UTF-16 code units of query text. */
 export const PARSE_CACHE_MAX_TEXT_UNITS = 64 * 1024;

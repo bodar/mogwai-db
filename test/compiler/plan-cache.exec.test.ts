@@ -249,7 +249,8 @@ describe('the per-entry limit', () => {
     expect(await answer(store, app, hot[0]!)).toEqual([4]);
     await answer(store, app, hot[1]!);
     expect(app.planCache.stats().misses).toBe(misses);
-  });
+    // Ten compiles of the 100-row batch, about 300 ms each: 6.8 s on a cold run, past the 5 s default.
+  }, 30_000);
 });
 
 describe('the parse cache', () => {

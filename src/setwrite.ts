@@ -24,6 +24,7 @@ import * as make from './rel/factory.ts';
 import { plan } from './rel/plan.ts';
 import { insert } from './rel/stmt-factory.ts';
 import type { ColMeta, SqlType } from './rel/types.ts';
+import type { Rel } from './rel/rel.ts';
 import { jsonEachSet, meta, minter, typeOf } from './compiler/rel/build.ts';
 import { jsonChunks } from './json-chunks.ts';
 import { runProgram, type RowSource } from './program.ts';
@@ -84,14 +85,25 @@ export function insertSet(
   // The rows land as ONE json_each relation, its members the row-tuples; the project reads each
   // tuple's cells by position into the target's columns.
   const exploded = jsonEachSet('rows', rows as readonly unknown[], fresh);
-  const cellOf = (name: string): Expr => {
-    const at = columns.findIndex((c) => c.name === name);
-    if (at < 0) throw new Error(`insertSet(${table}): no column ${name}`);
-    return cellAt(col(exploded.id, 'sv'), at, columns[at]!);
-  };
-  const source = make.project({
+  const cells = make.project({
     id: fresh('sp'), input: exploded, channels: [], type: typeOf(...cols),
-    exprs: columns.map((c, at) => [c.name, c.derive ? c.derive(cellOf) : cellAt(col(exploded.id, 'sv'), at, c)] as const),
+    exprs: columns.map((c, at) => [c.name, cellAt(col(exploded.id, 'sv'), at, c)] as const),
+  });
+  // A DERIVED column reads the landed cells by name off ONE `AS MATERIALIZED` CTE of the projection above,
+  // so each cell is extracted once however often the derivation reads it (`storedForm` reads the payload
+  // about ten times). A bare outer projection is not enough: the assembler re-spells a short computed
+  // column at each read (`COMPUTED_TEXT`, rel/emit.ts), and SQLite flattens a plain CTE the same way. No
+  // derived column → the cells are the source, with no CTE.
+  const derived = columns.some((c) => c.derive);
+  const cellsName = 'cells';
+  const landed: Rel = derived ? make.ref({ id: fresh('c'), name: cellsName, channels: [], type: cells.type }) : cells;
+  const cellOf = (name: string): Expr => {
+    if (!columns.some((c) => c.name === name)) throw new Error(`insertSet(${table}): no column ${name}`);
+    return col(landed.id, name);
+  };
+  const source = !derived ? cells : make.project({
+    id: fresh('sp'), input: landed, channels: [], type: typeOf(...cols),
+    exprs: columns.map((c) => [c.name, c.derive ? c.derive(cellOf) : cellOf(c.name)] as const),
   });
   const target = make.scan({ id: fresh('t'), table: table as never, alias: fresh('wt'), channels: [], type: typeOf(...cols) });
   const stmt = insert({
@@ -99,7 +111,10 @@ export function insertSet(
   });
   const name = 'ins';
   runProgram(store, plan({
-    bindings: [{ name, node: stmt }],
+    bindings: [
+      ...(derived ? [{ name: cellsName, node: make.materialize({ id: fresh('cm'), input: cells, channels: [], type: cells.type, fenced: true }) }] : []),
+      { name, node: stmt },
+    ],
     result: make.ref({ id: fresh('r'), name, channels: [], type: stmt.type }),
   }));
   return 1;

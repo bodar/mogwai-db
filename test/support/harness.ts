@@ -22,8 +22,8 @@ import { ZOO_SEED } from '../fixtures/seed-zoo.ts';
 import { executeQuery } from './executor.ts';
 
 /** Compile and assert a READ plan — the SQL-asserting half of L2 and the compiler tests. */
-export const read = (q: string, options?: CompileOptions) => {
-  const p = compile(q, {}, options);
+export const read = (q: string, options?: CompileOptions, params: Record<string, unknown> = {}) => {
+  const p = compile(q, params, options);
   if (p.kind !== 'read') throw new Error('expected read plan');
   return p;
 };

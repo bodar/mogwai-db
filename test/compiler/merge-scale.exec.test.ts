@@ -385,3 +385,16 @@ describe('a mergeE search seeks the endpoint pair and tests the label on the row
     }
   });
 });
+
+// THE PAIR TEST SPELLS NO TAUTOLOGY. `guardMergeInterleaving` (src/compiler/rel/write.ts) conjoins the pair key, the
+// `ord` order, `couldMatch` and the create-key test, and leaves out a part that holds for every pair rather than
+// spelling it `1 = 1 AND`.
+describe('a merge interleaving guard conjoins only real terms', () => {
+  test("mergeV(constant).option(onMatch) over several traversers: the pair join has no '1 = 1'", () => {
+    const plan = compile("g.V().hasLabel('person').mergeV([name:'zz']).option(Merge.onMatch, [x:1]).count()", {});
+    if (plan.kind !== 'program') throw new Error('expected a program');
+    const pairs = plan.steps.map((step) => step.emitted.sql).filter((sql) => /g_first/.test(sql) && /g_last/.test(sql) && /JOIN/.test(sql));
+    expect(pairs.length).toBeGreaterThan(0);
+    for (const sql of pairs) expect(sql).not.toContain('1 = 1');
+  });
+});

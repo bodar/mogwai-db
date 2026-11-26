@@ -1,4 +1,4 @@
-import { always, and, col, compilerInt, compilerNull, compilerReal, compilerText, disjoin, param, type Expr } from '../../rel/expr.ts';
+import { always, and, col, compilerInt, compilerNull, compilerReal, compilerText, disjoin, param, type Expr, type StorageSlice } from '../../rel/expr.ts';
 import { comparableOf, jsonEachSet, meta, typeOf, wholeNumber, type Minter } from './build.ts';
 import * as make from '../../rel/factory.ts';
 import { inferredVtype } from './tag.ts';
@@ -295,7 +295,7 @@ const numberSpelling = (value: string): boolean => /^[-+]?(\d+\.?\d*|\.\d+)([eE]
 /**
  * AN ORDERING ON A STORED ROW IS AN INDEX RANGE. A stored row's `value` is untyped, so SQLite orders it by
  * storage class first — NULL < INTEGER/REAL < TEXT < BLOB (https://sqlite.org/datatype3.html §4.1) — and a
- * stored number is always its comparable INTEGER/REAL (`storedForm`). So the rows a Number bound can match
+ * stored number other than a Duration is its comparable INTEGER/REAL (`storedForm`). So the rows a Number bound can match
  * lie in ONE contiguous slice of `(key, value)`: `value > b AND value < ''`; a String/UUID/Binary bound's
  * (all TEXT carriers) in `value >= '' AND value < x''`. Each is a plain conjunct, so the property seek
  * (`semijoin.ts`) drives `vp_key_value` / `ep_key_value` with it. The CASE this replaces gave the same answer
@@ -308,8 +308,10 @@ const numberSpelling = (value: string): boolean => /^[-+]?(\d+\.?\d*|\.\d+)([eE]
  * It is evaluated only on the rows the range selected. A Date bound is an epoch-millis range under the
  * `datetime` residual. A Duration (stored as total-nanos TEXT) and every stream subject keep the CASE.
  *
- * `range` is `compare` plus the storage-class edge on its open side; `compare` alone serves a two-sided
- * `between`/`inside`, whose other bound closes the slice.
+ * `range` is the compare whose read names its storage-class `slice`, so the SEEK that reads it bare also closes
+ * the slice's open side (`semijoin.ts` `indexable`); a check needs no edge, because the residual already excludes
+ * the other classes. `compare` names no slice and serves a two-sided `between`/`inside`, whose other bound
+ * closes the slice.
  */
 interface StoredRange { readonly compare: Expr; readonly range: Expr; readonly residual: Expr }
 function storedRange(
@@ -319,7 +321,7 @@ function storedRange(
   const declared = flatType(boundType);
   const textSpace = textCarriedType(boundType) ?? 'string';
   // The bound's type space over a stored row; none (keep the CASE) for a stream, a Duration or a non-scalar bound.
-  const space = type.kind !== 'perRow' || !type.stored || declared === 'duration' ? null
+  const space: { readonly cls: StorageSlice; readonly residual: Expr } | null = type.kind !== 'perRow' || !type.stored || declared === 'duration' ? null
     : declared === 'datetime' ? (typeof value === 'number' ? { cls: 'number', residual: binary('=', type.vtype, compilerText('datetime')) } : null)
     : typeof value === 'number' || typeof value === 'bigint' || value instanceof BigDecimal
       ? { cls: 'number', residual: { kind: 'in-list', expr: type.vtype, values: NUMERIC_VTYPES.map(compilerText) } as Expr }
@@ -332,19 +334,18 @@ function storedRange(
   // `V().out().has('age', gt(x)).count()` 41 ms → 3.5 s (×85) that way, 0.9 → 6.6 ms (×8) unindexed. So every
   // correlated check keeps its owner lookup, and the uncorrelated seek, the one place the range should drive,
   // reads it bare (`semijoin.ts` `indexable`).
-  const stored: Expr = { kind: 'unary', op: 'unindexed', arg: subject };
-  const compare = binary(op, stored, bound);
-  const upward = op === '>' || op === '>=';
-  // The storage-class edge on the compare's open side. A Number's lower edge is NULL, which no compare passes.
-  const edge: Expr | null = space?.cls === 'number'
-    ? (upward ? binary('<', stored, compilerText('')) : null)
-    : upward ? binary('<', stored, { kind: 'cast', arg: compilerText(''), to: 'blob' }) : binary('>=', stored, compilerText(''));
-  return space && { compare, range: edge ? (upward ? and(compare, edge) : and(edge, compare)) : compare, residual: space.residual };
+  // The storage-class edge on the open side is the SEEK's (`semijoin.ts` `indexable` adds it from `slice`): a
+  // check reads its owner's row through `(node, key)`, where the residual already excludes the other classes.
+  const read = (slice?: StorageSlice): Expr => ({ kind: 'unary', op: 'unindexed', arg: subject, ...(slice ? { slice } : {}) });
+  return space && { compare: binary(op, read(), bound), range: binary(op, read(space.cls), bound), residual: space.residual };
 }
 
 /** Comparability is confined to one Gremlin type space. Each CASE combines the guard and comparison
- * so its type vocabulary is emitted once; a stored vtype outranks SQLite's storage class because an
- * exact numeric value may deliberately be stored as decimal TEXT. */
+ * so its type vocabulary is emitted once; a vtype outranks SQLite's storage class because one class holds
+ * several type spaces. A STORED row's `value` is its comparable INTEGER/REAL for every scalar except a
+ * `duration`, whose total nanos still ride as TEXT (`src/storage.ts`), and it orders as an index range
+ * (`storedRange`). A STREAM subject may carry an exact number as decimal TEXT (`inject(9.99m)`), which the
+ * CASE casts by its vtype. */
 const ordered = (
   op: Extract<Expr, { kind: 'binary' }>['op'], subject: Expr, bound: Expr, value: unknown, type: SubjectType,
   boundType: TypeNode | null = null,

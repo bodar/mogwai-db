@@ -1,4 +1,4 @@
-import { type Expr, col, compilerText, conjoin, conjuncts, disjuncts, eq, isNot, or } from '../expr.ts';
+import { type Expr, and, col, compilerText, conjoin, conjuncts, disjuncts, eq, isNot, or } from '../expr.ts';
 import * as make from '../factory.ts';
 import type { Rel, Table } from '../rel.ts';
 import { freshCopy, minter, type Minter } from '../mint.ts';
@@ -220,8 +220,7 @@ function elementFacts(plans: readonly Rel[]): ElementFacts {
   for (const plan of plans) forEachRel(plan, (r) => {
     if (r.kind !== 'filter') return;
     for (const e of conjuncts(r.pred)) {
-      const member = e.kind === 'in-list' || (e.kind === 'in-query' && !e.negated) ? e.expr
-        : e.kind === 'binary' && e.op === '=' ? (e.left.kind === 'lit' ? e.right : e.right.kind === 'lit' ? e.left : null) : null;
+      const member = membership(e)?.member;
       const leaf = member?.kind === 'col' ? rowidScan(r.input, member.rel, member.name) : null;
       if (leaf && SEEK_PROPERTIES[leaf.table]) reached.add(leaf.id);
       // Every disjunct names its own bounded set of ids (`V($ids)`: the integer ones by `id`, the rest by `uid`).
@@ -237,14 +236,25 @@ function elementFacts(plans: readonly Rel[]): ElementFacts {
  *  `uid` `=` a literal or parameter, `IN` a list of them, or `IN` a subquery reading no table (a parameter's
  *  `json_each`). A subquery over a table (`hasLabel`'s) is data-sized, so it reaches the element without pinning it. */
 function pinnedBy(input: Rel, e: Expr): Extract<Rel, { readonly kind: 'scan' }> | null {
-  const constant = (x: Expr): boolean => x.kind === 'lit';
-  const member = e.kind === 'in-list' && e.values.every(constant) ? e.expr
-    : e.kind === 'in-query' && !e.negated && !readsTable(e.plan) ? e.expr
-    : e.kind === 'binary' && e.op === '=' ? (constant(e.left) ? e.right : constant(e.right) ? e.left : null) : null;
+  const tested = membership(e);
+  const member = tested?.bounded ? tested.member : null;
   if (member?.kind !== 'col') return null;
   const path = columnPath(input, member.rel, member.name);
   const leaf = path?.rels.at(-1);
   return leaf?.kind === 'scan' && (path!.name === 'id' || path!.name === 'uid') ? leaf : null;
+}
+
+/** The expression a MEMBERSHIP conjunct tests (`x IN (…)`, `x IN (subquery)`, `x = literal`), and whether the
+ *  QUERY TEXT bounds the set (`bounded`): every list member a literal or parameter, a subquery that reads no table
+ *  (a parameter's `json_each`), or an `=` (one literal). `null` for any other conjunct. The ONE reading of a
+ *  membership that both facts use: `reached` takes any membership, `pinned` only a bounded one. */
+function membership(e: Expr): { readonly member: Expr; readonly bounded: boolean } | null {
+  const constant = (x: Expr): boolean => x.kind === 'lit';
+  if (e.kind === 'in-list') return { member: e.expr, bounded: e.values.every(constant) };
+  if (e.kind === 'in-query' && !e.negated) return { member: e.expr, bounded: !readsTable(e.plan) };
+  if (e.kind !== 'binary' || e.op !== '=') return null;
+  const member = constant(e.left) ? e.right : constant(e.right) ? e.left : null;
+  return member ? { member, bounded: true } : null;
 }
 
 /** Does `plan` read a stored table, at any depth? */
@@ -763,9 +773,27 @@ export const indexSeek: OwnerSeek = (term, target, mint) => {
  * column. A predicate hides a range it holds from the planner (`storedRange`, `compiler/rel/predicate.ts`) so a
  * correlated check keeps its owner lookup; the uncorrelated seek built here is the one place that range should
  * drive `(key, value)`. The value is the same either way — only the planner's choice of index differs.
+ *
+ * A one-sided ordering whose read names its storage-class `slice` also gets that slice's edge on its open side,
+ * so the seek reads one class's run of the index and no further: SQLite orders NULL < INTEGER/REAL < TEXT < BLOB
+ * (https://sqlite.org/datatype3.html §4.1), so a number's run ends before `''` and a TEXT run lies in
+ * `['', x'')`. A number's lower edge is NULL, which no compare passes, so `<` over a number needs none.
  */
-const indexable = (pred: Expr, rel: RelId): Expr => rewriteExpr(pred, (e) =>
-  e.kind === 'unary' && e.op === 'unindexed' && e.arg.kind === 'col' && e.arg.rel === rel ? e.arg : e);
+const indexable = (pred: Expr, rel: RelId): Expr => {
+  const own = (e: Expr): e is Extract<Expr, { readonly kind: 'unary' }> =>
+    e.kind === 'unary' && e.op === 'unindexed' && e.arg.kind === 'col' && e.arg.rel === rel;
+  // Bottom-up: a sliced read is kept until its compare is reached, which reads it bare and adds the edge.
+  return rewriteExpr(pred, (e) => {
+    if (own(e)) return e.slice ? e : e.arg;
+    if (e.kind !== 'binary' || !own(e.left) || !e.left.slice) return e;
+    const value = e.left.arg;
+    const compare: Expr = { ...e, left: value };
+    const upward = e.op === '>' || e.op === '>=';
+    const edge = (op: '<' | '>=', right: Expr): Expr => ({ kind: 'binary', op, left: value, right });
+    if (e.left.slice === 'number') return upward ? and(compare, edge('<', compilerText(''))) : compare;
+    return upward ? and(compare, edge('<', { kind: 'cast', arg: compilerText(''), to: 'blob' })) : and(edge('>=', compilerText('')), compare);
+  });
+};
 
 // ---------- trigramSeek: the property_fts trigram index (`ftsSubstringPredicate`) ----------
 

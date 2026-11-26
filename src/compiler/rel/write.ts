@@ -3517,9 +3517,11 @@ function guardMergeInterleaving(
   const e = pairs.left.id, l = pairs.right.id;
   const observable: Expr = acts || facts.repeats || facts.mutatesSearch || !createKey ? always
     : isNot(col(e, MERGE_CK), col(l, MERGE_CK));
-  raiseOnRows(selfJoin(pairs.left, pairs.right, and(and(and(pairs.on, lt(col(e, MERGE_FIRST), col(l, MERGE_LAST))),
-    couldMatch ? couldMatch(e, l) : always), observable)),
-  'where a later traverser would match what an earlier one created');
+  // `lt` is always a term, so the conjunction is never empty; an `always` term is left out rather than
+  // spelled `1 = 1 AND`.
+  const pairTest = conjoin([pairs.on, lt(col(e, MERGE_FIRST), col(l, MERGE_LAST)), couldMatch ? couldMatch(e, l) : always, observable]
+    .filter((term) => term !== always))!;
+  raiseOnRows(selfJoin(pairs.left, pairs.right, pairTest), 'where a later traverser would match what an earlier one created');
 }
 
 /**

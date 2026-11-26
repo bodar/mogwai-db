@@ -3,6 +3,7 @@ import { GraphStore } from '../src/storage.ts';
 import { BunSqlite } from '../src/bun/BunSqlite.ts';
 import { CfLimitedSql } from '../src/cf-limits.ts';
 import { insertSet, deleteMembers, type SetColumn } from '../src/setwrite.ts';
+import { storedForm } from '../src/compiler/rel/build.ts';
 
 // The set-based write substrate on its own, below the bulk loader: N rows in as ONE relational
 // Insert over json_each, a membership Delete over one json_each bind. bulk.test.ts pins the loader's
@@ -60,6 +61,33 @@ describe('insertSet', () => {
     const rows = Array.from({ length: 2000 }, (_, i) => [i + 1, `n${i}`] as const);
     expect(insertSet(store, 'nodes', [{ name: 'id', type: 'int' }, { name: 'uid', type: 'text' }], rows)).toBe(1);
     expect(store.query<{ n: number }>('SELECT count(*) AS n FROM nodes')[0].n).toBe(2000);
+  });
+
+  // A DERIVED column (a property row's `value`/`exact` from its payload and tag, `storedForm`) reads the landed
+  // cells off one MATERIALIZED projection, so each cell is extracted ONCE: `storedForm` reads the payload about
+  // ten times, and every read re-spelled `json_extract(…, '$[3]')` before.
+  test('a derived column reads each landed cell once', () => {
+    const store = fresh();
+    insertSet(store, 'nodes', [{ name: 'id', type: 'int' }], [[1]]);
+    const seen: string[] = [];
+    const recording = { query: (sql: string, binds?: readonly unknown[]) => { seen.push(sql); return store.query(sql, binds); } };
+    const derive = (c: 'value' | 'exact'): SetColumn['derive'] => (cellOf) => storedForm(cellOf('value'), cellOf('vtype'))[c];
+    insertSet(recording, 'vertex_properties', [
+      { name: 'id', type: 'int' }, { name: 'node', type: 'int' }, { name: 'key', type: 'text' },
+      { name: 'value', type: 'any', derive: derive('value') }, { name: 'vtype', type: 'text' },
+      { name: 'exact', type: 'text', derive: derive('exact') },
+    ], [
+      [1, 1, 'big', '100000000000000000000', 'bigint', null],
+      [2, 1, 'dec', '1.25', 'bigdecimal', null],
+      [3, 1, 'n', 7, 'int', null],
+    ]);
+    const [sql] = seen;
+    for (const at of [0, 1, 2, 3, 4, 5]) expect(sql!.split(`'$[${at}]'`).length - 1).toBe(1);
+    expect(store.query('SELECT key, value, typeof(value) AS tv, exact FROM vertex_properties ORDER BY id')).toEqual([
+      { key: 'big', value: 1e20, tv: 'real', exact: '100000000000000000000' },
+      { key: 'dec', value: 1.25, tv: 'real', exact: '1.25' },
+      { key: 'n', value: 7, tv: 'integer', exact: null },
+    ]);
   });
 });
 

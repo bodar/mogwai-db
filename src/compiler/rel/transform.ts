@@ -184,6 +184,18 @@ export function asNumberParts(v: Expr, spec: NumericSpec, integersGuarded = fals
 }
 
 /**
+ * `CASE WHEN every part IS NULL THEN NULL ELSE body END` — the all-null guard a `concat_ws` body owes,
+ * because `concat_ws` SKIPS nulls and would give `''` where an all-null concatenation is NULL. It tests
+ * each part IS NULL, never that the result is empty: a `''` part is a non-null contribution. `parts` is
+ * never empty (a concatenation always has the traverser's own value).
+ */
+export const allNullGuard = (parts: readonly Expr[], body: Expr): Expr => ({
+  kind: 'case',
+  whens: [[conjoin(parts.map((p): Expr => ({ kind: 'binary', op: 'is', left: p, right: compilerNull() })))!, compilerNull()]],
+  else: body,
+});
+
+/**
  * The PURE value transforms — a SQLite scalar function over `v`, and nothing else.
  *
  * NULL propagates through every one of them (SQLite's own semantics), which is exactly Gremlin's
@@ -203,18 +215,6 @@ export function asNumberParts(v: Expr, spec: NumericSpec, integersGuarded = fals
  * It reads as incomplete GValue rollout, not a principled exclusion (an upstream enhancement candidate).
  * If those overloads ever land, THIS is where the `$param` branch would light up.
  */
-/**
- * `CASE WHEN every part IS NULL THEN NULL ELSE body END` — the all-null guard a `concat_ws` body owes,
- * because `concat_ws` SKIPS nulls and would give `''` where an all-null concatenation is NULL. It tests
- * each part IS NULL, never that the result is empty: a `''` part is a non-null contribution. `parts` is
- * never empty (a concatenation always has the traverser's own value).
- */
-export const allNullGuard = (parts: readonly Expr[], body: Expr): Expr => ({
-  kind: 'case',
-  whens: [[conjoin(parts.map((p): Expr => ({ kind: 'binary', op: 'is', left: p, right: compilerNull() })))!, compilerNull()]],
-  else: body,
-});
-
 const VALUE_TX: Readonly<Record<string, (v: Expr, args: readonly unknown[], step: IRStep) => Expr | null>> = {
   // `length`/`substring` count CODE POINTS (SQLite's), not Java's UTF-16 units: `'😀'.length()` is 1 here,
   // 2 in Java — a deliberate divergence (`docs/feature-support-matrix.md`).

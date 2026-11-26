@@ -1,7 +1,10 @@
 import type { SortTerm, SqlType, WindowSpec } from './types.ts';
 import type { Rel } from './rel.ts';
 
-export type BinaryOp = '+' | '-' | '*' | '/' | '%' | '=' | '!=' | '<' | '<=' | '>' | '>='
+/** A contiguous run of SQLite's storage-class order (NULL < INTEGER/REAL < TEXT < BLOB): the numbers, or the TEXT. */
+export type StorageSlice = 'number' | 'text';
+
+export type BinaryOp ='+' | '-' | '*' | '/' | '%' | '=' | '!=' | '<' | '<=' | '>' | '>='
   | 'like' | 'glob' | 'is' | 'is not' | 'and' | 'or' | '||';
 
 export type Expr =
@@ -14,8 +17,12 @@ export type Expr =
   | { readonly kind: 'lit'; readonly value: null; readonly type: SqlType; readonly source: 'compiler-null' }
   /** `unindexed` is SQLite's unary `+`: the value unchanged (storage class kept, affinity dropped), but no longer
    *  a bare column, so the planner cannot pick an index on it. A predicate reads its column through one where
-   *  only an uncorrelated seek should drive that index, and the seek reads it bare (`semijoin.ts` `indexable`). */
-  | { readonly kind: 'unary'; readonly op: 'not' | 'neg' | 'unindexed'; readonly arg: Expr }
+   *  only an uncorrelated seek should drive that index, and the seek reads it bare (`semijoin.ts` `indexable`).
+   *  `slice` (on an `unindexed` read that a one-sided ordering compares) names the storage class the bound lies
+   *  in, so the seek that reads it bare also closes the open side of that class's slice of the index
+   *  (`storedRange`, `compiler/rel/predicate.ts`). A check reads no such edge: its type residual already
+   *  excludes the rows of the other classes. */
+  | { readonly kind: 'unary'; readonly op: 'not' | 'neg' | 'unindexed'; readonly arg: Expr; readonly slice?: StorageSlice }
   | { readonly kind: 'binary'; readonly op: BinaryOp; readonly left: Expr; readonly right: Expr }
   | { readonly kind: 'case'; readonly whens: readonly (readonly [Expr, Expr])[]; readonly else?: Expr }
   /** `numeric` is SQLite's `CAST(x AS NUMERIC)`: a whole number as INTEGER inside int64 and REAL past it,

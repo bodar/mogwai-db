@@ -223,16 +223,31 @@ describe('an ordered predicate on a stored key seeks a (key, value) range', () =
     'hasId': "g.V().hasId(51).has('name', gt('a')).values('name')",
     'V(id) in a local body': "g.V().hasLabel('software').limit(3).local(V(50).has('age', gt(10)).values('age')).count()",
   };
-  for (const [name, gremlin] of Object.entries(CORRELATED)) {
+  // A PARAMETER id set pins the element too: `V($ids)` lowers to an `id`-or-`uid` membership of the parameter's
+  // `json_each`, a subquery that reads no table (`pinnedBy`). The literal `V(50, 51)` above is an in-list and
+  // exercises neither the `json_each` nor the `uid` branch. The mixed set reaches both.
+  const PARAMETER: Readonly<Record<string, readonly [string, Record<string, unknown>]>> = {
+    'V($ids)': ["g.V(xs).has('age', between(10, 90)).values('name')", { xs: [50, 51] }],
+    'V($ids) with a string id': ["g.V(xs).has('age', gt(10)).values('name')", { xs: [50, 'u3'] }],
+  };
+  const cases = [...Object.entries(CORRELATED).map(([name, gremlin]) => [name, [gremlin, {}]] as const), ...Object.entries(PARAMETER)];
+  for (const [name, [gremlin, params]] of cases) {
     test(`${name}: the range check stays on the (node, key) owner lookup, cold and warm`, () => {
-      const { sql, binds } = read(gremlin);
+      const { sql, binds } = read(gremlin, undefined, params);
       for (const store of [noStats, withStats]) {
         const details = (store.query(`EXPLAIN QUERY PLAN ${sql}`, [...binds]) as { detail: string }[]).map((r) => r.detail);
         expect(details.filter((d) => d.includes('vp_key_value'))).toEqual([]);
         expect(details.some((d) => d.includes('vp_node_key (node=? AND key=?)'))).toBe(true);
       }
+      // A check spells no storage-class edge: the type residual already excludes the other classes, and only a
+      // seek reads the edge (`semijoin.ts` `indexable`).
+      expect(sql).not.toMatch(/\+\([^()]*\) (<|>=) (''|CAST\(''|x'')/);
     });
   }
+  test('a seek keeps the edge of its storage-class slice', () => {
+    expect(read("g.V().has('age', gt(29)).count()").sql).toMatch(/\.value > 29\) AND \(\w+\.value < ''\)/);
+    expect(read("g.V().has('name', lt('m')).count()").sql).toMatch(/\.value >= ''\) AND \(\w+\.value < 'm'\)/);
+  });
 });
 
 // A NESTED-TRAVERSAL OPERAND keeps the same two access paths (`predicateExpr`'s nested arm,
