@@ -26,6 +26,7 @@ import { ValueParseError } from '../../gremlin/coerce.ts';
 import { and, carriedCols, eq, explodeMembers, fenced, meta, storedForm, presenceFenced, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
 import { substRelId } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
+import { scanColumnOf } from './source.ts';
 import { propertyOwnerId, propertyRowId } from './property.ts';
 import { NUMERIC_VTYPES, typedValueEq, typedValueKey } from './predicate.ts';
 import { presenceOf, statedPresence, type ChildValue } from './child.ts';
@@ -5931,7 +5932,10 @@ function mergeEComputed(
   // criterion as a correlated EXISTS over the candidate edge's stored property, vtype-aware
   // (`typedValueEq` = `Compare.eq`). Endpoints do NOT narrow the search (`MergeEdgeStep` searches by the
   // MATCH map alone; `onCreate`'s endpoints are for the create). An unproductive key does not narrow.
-  const candidates = (): Rel | null => edgeCriteria(null, null, [], child, fresh);
+  const candidates = (): Rel | null => {
+    const edges = edgeCriteria(null, null, [], child, fresh);
+    return edges && idsOf(edges, fresh);
+  };
   if (!candidates()) return null;
   const matched = bind(computedMatch('edge', carrier, () => candidates()!, cKeys, ppCol, cvCol, ptCol, hasOrd, bind, fresh), true);
   // `onMatch` over the MATCHED edges. A runtime EDGE arm value is declined upstream (`writeOf`, the
@@ -6227,7 +6231,7 @@ export function elementMergeE(
   // SNAPSHOTTED for `mergeV`'s two reasons at once: the create is guarded by this relation's
   // emptiness and would otherwise read the very table its own statement inserts into, and an
   // `onMatch` write can change a property the search asked about.
-  const matched = bind(pairedWith(pairs, criteria, { bySrc: matchOut !== undefined, byTgt: matchIn !== undefined }, fresh), true);
+  const matched = bind(pairedWith(pairs, criteria, { bySrc: matchOut !== undefined, byTgt: matchIn !== undefined }, bind, fresh), true);
 
   // ONE EDGE PER DISTINCT PAIR THAT FOUND NOTHING. `Distinct` is the whole duplicate rule: two
   // traversers naming the same endpoints create one edge between them and both carry it away.
@@ -6441,6 +6445,17 @@ function endpointRowid(uid: string | number, guard: Guarder, fresh: Minter): Exp
  * them being re-expressed. What that buys is `mergeV`'s property — the merge inherits whatever `has()`
  * learns next, and a divergence between "what mergeE searches for" and "what has() finds" is not
  * expressible.
+ *
+ * **IT KEEPS THE EDGE ROW, not only its id** — `(id, src, tgt)` of the read's OWN `edges` scan — so
+ * `pairedWith` joins the incoming pairs to this read itself on `(src, tgt)`. That is SQLite's natural
+ * plan: an `e_pair (src=? AND tgt=?)` seek per pair, and the label, id and property tests as residuals on
+ * the row the seek found. Handing back the id alone made the join re-scan `edges` and test
+ * `id IN (every edge the criteria admit)` — the whole label population once per statement, and per
+ * PAIR once the planner expanded it into `rowid=?` probes: quadratic in the traversers, and O(graph)
+ * for a one-edge upsert. The element framing projects the row down to `id`, so the row is read through
+ * the renaming projections to the relation where the scan's `src`/`tgt` are still in scope, and those
+ * columns are proved to be the SAME scan's (`scanColumnOf`) — a projection is row-for-row, so dropping
+ * it changes no row the search finds.
  */
 function edgeCriteria(
   id: string | number | null,
@@ -6457,8 +6472,23 @@ function edgeCriteria(
     ...(label === null ? [] : [{ name: 'hasLabel', args: [arg(label)] }]),
     ...props.map(([key, value, type]) => ({ name: 'has', args: [arg(key), arg(value, type)] })),
   ] as IRStep[]);
-  if (!read || read.effects?.length || read.framing.kind !== 'elements' || read.framing.elem !== 'edge') return null;
-  return make.project({ id: fresh('p'), input: read.rel, channels: [], type: ID_TYPE, exprs: [['id', col(read.rel.id, 'id')]] });
+  const row = read && edgeRowOf(read.rel);
+  if (!read || !row || read.effects?.length || read.framing.kind !== 'elements' || read.framing.elem !== 'edge') return null;
+  return make.project({
+    id: fresh('p'), input: row.rel, channels: [], type: typeOf(meta('id', 'int'), meta('src', 'int'), meta('tgt', 'int')),
+    exprs: [['id', col(row.rel.id, row.id)], ['src', col(row.rel.id, 'src')], ['tgt', col(row.rel.id, 'tgt')]],
+  });
+}
+
+/** The relation under `rel`'s renaming projections whose `id`, `src` and `tgt` are one `edges` scan's
+ *  own columns — `undefined` when no such relation exists (the read is not an edge row off its own scan). */
+function edgeRowOf(rel: Rel, id = 'id'): { readonly rel: Rel; readonly id: string } | undefined {
+  const scan = scanColumnOf(rel, col(rel.id, id), 'edges', 'id');
+  const sameRow = (column: string) =>
+    rel.type.cols.some((c) => c.name === column) && scanColumnOf(rel, col(rel.id, column), 'edges', column) === scan;
+  if (scan && sameRow('src') && sameRow('tgt')) return { rel, id };
+  const renamed = rel.kind === 'project' ? rel.exprs.find(([name]) => name === id)?.[1] : undefined;
+  return rel.kind === 'project' && renamed?.kind === 'col' && renamed.rel === rel.input.id ? edgeRowOf(rel.input, renamed.name) : undefined;
 }
 
 /**
@@ -6471,22 +6501,19 @@ function edgeCriteria(
  * narrowing, every incoming row is paired with every admitted edge — a CROSS join, which is
  * `searchEdges`' bare `g.E()` arm spelled in the algebra.
  */
-function pairedWith(pairs: Rel, criteria: Rel, by: { readonly bySrc: boolean; readonly byTgt: boolean }, fresh: Minter): Rel {
-  const scan = make.scan({ id: fresh('t'), table: 'edges', alias: fresh('wt'), channels: [], type: typeOf(...EDGE_ROW_COLS) });
-  const admitted = make.filter({
-    id: fresh('f'), input: scan, channels: [], type: scan.type,
-    pred: { kind: 'in-query', expr: col(scan.id, 'id'), plan: criteria, negated: false },
-  });
-  const bySrc = by.bySrc ? eq(col(pairs.id, 'src'), col(admitted.id, 'src')) : undefined;
-  const byTgt = by.byTgt ? eq(col(pairs.id, 'tgt'), col(admitted.id, 'tgt')) : undefined;
+function pairedWith(pairs: Rel, criteria: Rel, by: { readonly bySrc: boolean; readonly byTgt: boolean }, bind: Binder, fresh: Minter): Rel {
+  const bySrc = by.bySrc ? eq(col(pairs.id, 'src'), col(criteria.id, 'src')) : undefined;
+  const byTgt = by.byTgt ? eq(col(pairs.id, 'tgt'), col(criteria.id, 'tgt')) : undefined;
   // `and` REFUSES a conjunction of nothing, deliberately, so the "narrow by neither" case is spelled
   // here as an absent ON rather than smuggled through it as a `TRUE`.
   const on = bySrc && byTgt ? and(bySrc, byTgt) : bySrc ?? byTgt;
+  // With nothing to seek by, the admitted edges are read ONCE into a FENCED relation, so their label and
+  // property tests run once per edge rather than once per (pair, edge), and no pair re-scans the base table.
+  const admitted = on ? criteria : bind(make.materialize({ id: fresh('m'), input: criteria, channels: [], type: criteria.type, fenced: true }), false);
   const joined = make.join({
     id: fresh('j'), left: pairs, right: admitted, ...(on ? { join: 'inner' as const, on } : { join: 'cross' as const }),
     channels: [],
-    type: typeOf(...pairs.type.cols,
-      ...EDGE_ROW_COLS.map((column) => meta(`e_${column.name}`, column.type, column.nullable))),
+    type: typeOf(...pairs.type.cols, ...admitted.type.cols.map((column) => meta(`e_${column.name}`, column.type, column.nullable))),
   });
   return make.project({
     id: fresh('p'), input: joined, channels: [], type: typeOf(meta(ORD, 'int'), meta('id', 'int')),

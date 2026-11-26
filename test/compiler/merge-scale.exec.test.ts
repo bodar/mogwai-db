@@ -324,3 +324,64 @@ describe('a map-valued merge guard finds a later map an earlier creation contain
     expect(run(store, 'g.V().count()').map((row: any) => row.v)).toEqual([vertices]);
   });
 });
+
+// A mergeE SEARCH JOINS ITS OWN EDGE READ. The pairs meet the criteria read `E().hasLabel(…).has(…)` on
+// `(src, tgt)`, so each pair is one endpoint-index seek, with the label and properties as residuals on the
+// row it found (`edgeCriteria`/`pairedWith`, `src/compiler/rel/write.ts`). It once re-scanned `edges` and
+// tested `id IN (every edge of the label)`, which SQLite expanded into a `rowid=?` probe per (pair, label
+// member): 5.2 s at 8k traversers (65× the 1k time), and 18 ms for ONE `mergeE` against 100k `knows` edges.
+describe('a mergeE search seeks the endpoint pair and tests the label on the row it found', () => {
+  /** `n` persons, person i knows person i%n+1, plus `extra` more `knows` edges between other vertices. */
+  const knowing = (n: number, extra = 0): GraphStore => {
+    const store = new GraphStore(new BunSqlite(':memory:'));
+    store.query(`INSERT INTO labels(id,name) VALUES (1,'person'),(2,'knows'),(3,'other')`);
+    store.query('WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<?) INSERT INTO nodes(id) SELECT i FROM c', [n + 2 * extra]);
+    store.query('INSERT INTO vertex_labels(node,label) SELECT id, CASE WHEN id<=? THEN 1 ELSE 3 END FROM nodes', [n]);
+    store.query('INSERT INTO edges(src,label,tgt) SELECT id, 2, (id % ?)+1 FROM nodes WHERE id<=?', [n, n]);
+    store.query('INSERT INTO edges(src,label,tgt) SELECT id, 2, id+? FROM nodes WHERE id>? AND id<=?', [extra, n, n + extra]);
+    return store;
+  };
+  /** Every edge-index line of the plans. The seek must be the endpoint key, never a label slice or a rowid list. */
+  const edgeSeeks = (store: GraphStore, statements: readonly { sql: string; binds: readonly unknown[] }[]): string[] =>
+    statements.flatMap(({ sql, binds }) => store.query<PlanRow>(`EXPLAIN QUERY PLAN ${sql}`, binds.map((bind) => (isRowsBind(bind) ? '[]' : bind))))
+      .map((row) => row.detail).filter((detail) => /INDEX e_/.test(detail));
+  const pairwise = (onMatch: string): string =>
+    `g.V().hasLabel('person').as('a').out('knows').as('b').mergeE([(T.label):'knows',(Direction.from):Merge.outV,(Direction.to):Merge.inV])` +
+    `.option(Merge.outV,__.select('a')).option(Merge.inV,__.select('b'))${onMatch}.count()`;
+  for (const q of [pairwise(''), pairwise('.option(Merge.onMatch,[seen:true])')]) {
+    test(`grows linearly: ${q.slice(54)}`, () => {
+      const timed = (n: number): number => {
+        const store = knowing(n);
+        const { rows, ms, statements } = runRecorded(store, q);
+        expect(rows.map((row) => row.v)).toEqual([n]);
+        expect(run(store, "g.E().hasLabel('knows').count()").map((row: any) => row.v)).toEqual([n]);
+        for (const seek of edgeSeeks(store, statements)) expect(seek).not.toMatch(/rowid=\?|e_label/);
+        expect(innerScans(store, statements)).toEqual([]);
+        return ms;
+      };
+      const k1 = timed(1000), k8 = timed(8000);
+      expect(k8).toBeLessThan(16 * Math.max(k1, 20));
+      expect(k8).toBeLessThan(BUDGET_MS);
+    }, 60_000);
+  }
+  test('one mergeE against 100k knows edges reads its pair, not the label population', () => {
+    const store = knowing(10, 100_000);
+    // Matches, creates, then matches what it created. The plans are read after the last run: an EXPLAIN of
+    // an `INSERT … RETURNING` between two runs leaves bun:sqlite's cached statement open across the commit.
+    const runs = [
+      ["g.mergeE([(T.label):'knows',(Direction.from):1,(Direction.to):2]).id()", 100_010],
+      ["g.mergeE([(T.label):'knows',(Direction.from):1,(Direction.to):3]).id()", 100_011],
+      ["g.mergeE([(T.label):'knows',(Direction.from):1,(Direction.to):3]).id()", 100_011],
+    ] as const;
+    const recorded = runs.map(([q, edges]) => {
+      const { statements } = runRecorded(store, q);
+      expect(run(store, 'g.E().count()').map((row: any) => row.v)).toEqual([edges]);
+      return statements;
+    });
+    for (const statements of recorded) {
+      const seeks = edgeSeeks(store, statements);
+      expect(seeks.some((seek) => /src=\? AND|tgt=\? AND/.test(seek))).toBe(true);
+      for (const seek of seeks) expect(seek).not.toMatch(/rowid=\?|e_label/);
+    }
+  });
+});

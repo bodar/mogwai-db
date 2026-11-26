@@ -416,6 +416,16 @@ export function withExtraBindings(base: GraphSource, extra: readonly Binding[]):
  *  hides its inputs from the enclosing scope, so the trace stops there; any unresolved step answers
  *  "not its own scan", which only costs the per-row probe. */
 function ownScan(row: Rel | undefined, id: Expr, table: 'nodes' | 'edges'): Extract<Rel, { kind: 'scan' }> | undefined {
+  return scanColumnOf(row, id, table, 'id');
+}
+
+/** The `table` SCAN whose own `column` the expression `ref` IS — `ownScan`'s trace for any column, not
+ *  only the rowid. Two columns of one row are the SAME element's iff both trace to the same scan, which
+ *  is how a reader proves that a relation's `src`/`tgt` belong to the edge its `id` names (`mergeE`'s
+ *  search joins its endpoints on exactly that row). */
+export function scanColumnOf(
+  row: Rel | undefined, ref: Expr, table: 'nodes' | 'edges', column: string,
+): Extract<Rel, { kind: 'scan' }> | undefined {
   const find = (r: Rel, rel: string): Rel | undefined => {
     if (r.id === rel) return r;
     if (r.kind === 'union' || r.kind === 'recursive') return undefined;
@@ -429,7 +439,7 @@ function ownScan(row: Rel | undefined, id: Expr, table: 'nodes' | 'edges'): Extr
   };
   const trace = (r: Rel, name: string): Extract<Rel, { kind: 'scan' }> | undefined => {
     switch (r.kind) {
-      case 'scan': return r.table === table && name === 'id' ? r : undefined;
+      case 'scan': return r.table === table && name === column ? r : undefined;
       case 'project': {
         const e = r.exprs.find(([n]) => n === name)?.[1];
         return e && resolve(r.input, e);
@@ -443,7 +453,7 @@ function ownScan(row: Rel | undefined, id: Expr, table: 'nodes' | 'edges'): Extr
       default: return undefined;
     }
   };
-  return row && resolve(row, id);
+  return row && resolve(row, ref);
 }
 
 /** THE BASE GRAPH — the SQLite physical schema. Every method is the CURRENT inline SQL the traversal
