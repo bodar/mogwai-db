@@ -99,6 +99,11 @@ rows (2.5 MB). The key is stored three times per row (table and two indexes): ab
 4. **A4. Route the decode sites through `nameOf`/`withNames`** (element.ts, source.ts, the five catalog
    scans). `hasTokenPredicate`'s P-over-name arm stays a join through `withNames`. Acceptance:
    byte-identical. After A1.
+   **Landed (87a38aa3).** `names.ts` adds `nameOf` (one id's name, one primary-key seek) and `withNames`
+   (a relation's ids decoded to `lid`/`name`). `element.ts`, `source.ts` `BaseGraph` and the five
+   `services/catalog/schema.ts` scans use them; `labelTable` and `edgeLabel` are deleted. The SQL plan is
+   the same; only alias numbers and `=` operand order change (corpus total -1873 bytes). No answer
+   change, no baseline move. **Remains:** nothing.
 5. **A5. Add store-side twins and route the raw-SQL sites.** `GraphStore.nameId`, `internName`,
    `namesOf(dict, ids)`. Route `labelId`, `dropVertexLabels`, `vertexLabels`, `labelName`, the bulk memo,
    the olap `directedAdjacency`, drain, graphson, csv `fill` and refresh. Acceptance: format, replication
