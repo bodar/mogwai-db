@@ -174,3 +174,104 @@ Feature: mogwai addendum — a map-VALUED mergeV driver (the traverser IS the me
       | vadas |
     And the graph should return 7 for count of "g.V()"
     And the graph should return 6 for count of "g.V().has(\"name\")"
+
+  # A COLLECTION T.label: MergeElementStep.validate admits a Collection<String>, the search needs EVERY
+  # member (searchVerticesLabelConstraint's AND, vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeElementStep.java:381-396),
+  # and a miss creates one vertex carrying them all.
+  @gap:merge-search-map-vertex
+  Scenario: g_injectXlabel_person_employee_name_zzX_mergeV_labels
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([T.label:["person","employee"],name:"zz"]).mergeV().labels()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | person |
+      | employee |
+    And the graph should return 1 for count of "g.V().hasLabel(\"employee\").has(\"name\",\"zz\")"
+    And the graph should return 1 for count of "g.V().hasLabel(\"person\").has(\"name\",\"zz\")"
+
+  # A collection label matches only a vertex carrying EVERY member: marko is a person, not an employee.
+  @gap:merge-search-map-vertex
+  Scenario: g_injectXlabel_person_employee_name_markoX_mergeV_needs_every_label
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([T.label:["person","employee"],name:"marko"]).mergeV().count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[1].l |
+    And the graph should return 2 for count of "g.V().has(\"name\",\"marko\")"
+
+  # A single label finds a vertex created under a collection that holds it.
+  @gap:merge-search-map-vertex
+  Scenario: g_injectXlabel_person_name_markoX_mergeV_matches_one_member
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([T.label:["person"],name:"marko"]).mergeV().values("age")
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[29].i |
+    And the graph should return 6 for count of "g.V()"
+
+  # Two drivers that share a name under DIFFERENT labels are two creations, not an interleaving refusal:
+  # the later search (hasLabel city) cannot find the earlier person.
+  @gap:merge-search-map-vertex
+  Scenario: g_injectXperson_parisX_Xcity_parisX_mergeV_label
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([T.label:"person",name:"paris"],[T.label:"city",name:"paris"]).mergeV().label()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | person |
+      | city |
+    And the graph should return 2 for count of "g.V().has(\"name\",\"paris\")"
+
+  # The same map twice is ONE creation both drivers carry.
+  @gap:merge-search-map-vertex
+  Scenario: g_injectXperson_parisX_Xperson_parisX_mergeV_creates_one
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([T.label:"person",name:"paris"],[T.label:"person",name:"paris"]).mergeV().count()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | d[2].l |
+    And the graph should return 1 for count of "g.V().has(\"name\",\"paris\")"
+
+  # A later map whose labels the earlier creation DOES carry would have matched it — still refused.
+  @gap:merge-search-map-vertex
+  Scenario: g_injectXperson_employee_qX_Xemployee_qX_mergeV_is_refused
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([T.label:["person","employee"],name:"q"],[T.label:"employee",name:"q"]).mergeV().count()
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "a later traverser would match what an earlier one created"
+
+  # A non-string label is its JavaScript String() spelling (docs/limitations.md §3), one name everywhere.
+  @gap:merge-search-map-vertex
+  Scenario: g_injectXlabel_5_name_zzX_mergeV_label
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([T.label:5,name:"zz"]).mergeV().label()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | 5 |
+    And the graph should return 1 for count of "g.V().hasLabel(\"5\")"

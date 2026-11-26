@@ -115,6 +115,7 @@ Without `order()`, rows come in the order of the SQL plan. Wherever the query as
 | Visibility | A write step sees its input as it was before the step. Later steps see all of its writes. `g.V().not(out()).drop()` drops exactly the leaf vertices. |
 | Bulked rows | One element per row: `g.V().both().addV('x')` creates 12 vertices. Java creates 6. |
 | String vs integer id | A string id does not match the integer it spells: `V('1')` does not find vertex `1`. Both kinds of id can exist, so a conversion would be ambiguous. |
+| Non-string label in a merge map | A `T.label` that is not a string becomes its text: `inject([(T.label):5]).mergeV()` creates label `'5'`. Java raises an error. |
 
 ### Side effects, sacks and labels
 

@@ -3583,11 +3583,13 @@ function raiseOnCreateOverride(unmatched: Rel, overrides: Expr, token: string, v
 }
 
 /** The LABEL half of the per-driver `validateNoOverrides`: a driver map naming a label (`mapLabel`, NULL
- *  where it names none) is overridden by an onCreate label unless onCreate names exactly that one. */
-function onCreateLabelGuard(unmatched: Rel, mapLabel: Expr, labels: readonly string[], guard: Guarder, fresh: Minter): void {
+ *  where it names none) is overridden by an onCreate label unless onCreate names exactly that one. A map
+ *  label that is a COLLECTION (`listed`, 1 where it is) is never one String's equal, so it is overridden. */
+function onCreateLabelGuard(unmatched: Rel, mapLabel: Expr, labels: readonly string[], guard: Guarder, fresh: Minter, listed?: Expr): void {
   if (!labels.length) return;
   const overridden = labels.length === 1 ? isNot(mapLabel, compilerText(labels[0]!)) : always;
-  raiseOnCreateOverride(unmatched, and(isNot(mapLabel, compilerNull('text')), overridden), 'label', labels, guard, fresh);
+  const named = and(isNot(mapLabel, compilerNull('text')), overridden);
+  raiseOnCreateOverride(unmatched, listed ? or(eq(listed, compilerInt(1)), named) : named, 'label', labels, guard, fresh);
 }
 
 /**
@@ -3636,10 +3638,16 @@ const MERGE_CK = 'g_ck', MERGE_FIRST = 'g_first', MERGE_LAST = 'g_last';
  *    so it only narrows), a signature the sorted entries — equal entry sets spell one text. A later map with
  *    no searched entry has the empty key set, contained in every one. An `onCreate` key is left out of
  *    both — `mapCouldMatch` reads it as "could".
+ *  - A MAP's LABEL (`map.createdLabels` given): the later search needs its every label name carried by the
+ *    earlier creation, so in particular its FIRST name (`labelFirst`). Each earlier tuple is crossed with
+ *    the names it CARRIES — its map's own (`mapLabelNames`), else `createdLabels`, the label a creation
+ *    whose map names none falls back to — plus once with NULL, and meets the later tuple's first name by
+ *    `IS`: a later map naming no label meets only the NULL row, every earlier tuple. Without it a batch of
+ *    one name under N labels (a person and a city both `paris`) was N² pairs for `couldMatch` to read.
  * Cost is the earlier tuples × the masks and present key sets each contains, plus one seek per pair the
  * key admits; `couldMatch` stays the residual.
  */
-function searchKeying(fixed: readonly MergeKey[], map: { readonly excluded: readonly string[] } | null): PairKeying {
+function searchKeying(fixed: readonly MergeKey[], map: { readonly excluded: readonly string[]; readonly createdLabels?: readonly string[] } | null): PairKeying {
   const ENTRY = 'g_e', ENTRY_KEY = 'g_ek', KEYS = 'g_ks', SIG = 'g_sig', SUB = 'g_kl', SUB_SIG = 'g_ksig';
   const maskCols = fixed.map((_, i) => maskCol(i));
   const text = (name: string): ColMeta => meta(name, 'text', true);
@@ -3745,13 +3753,49 @@ function searchKeying(fixed: readonly MergeKey[], map: { readonly excluded: read
     return make.distinct({ id: fresh('d'), channels: [], type: typeOf(text(KEYS), text(SUB)),
       input: make.project({ id: fresh('p'), input: contained, channels: [], type: typeOf(text(KEYS), text(SUB)), exprs: [[KEYS, col(contained.id, KEYS)], [SUB, col(contained.id, SUB)]] }) });
   };
+  const createdLabels = map?.createdLabels;
+  /** Each `left` tuple once per label name it carries (`g_lc`), and once with NULL (`labelKeying`). */
+  const carriedLabels = (left: Rel, fresh: Minter, bind: Binder): Rel => {
+    const base = left.kind === 'ref' ? left : spool(left, fresh, bind);
+    const type = typeOf(...base.type.cols, text(LABEL_CARRIED));
+    const named = refOf(base, fresh);
+    const own = mapLabelNames(col(named.id, MAP_COL), fresh, named);
+    const parts: Rel[] = [
+      make.project({ id: fresh('p'), input: own, channels: [], type, exprs: [...base.type.cols.map((column) => [column.name, col(own.id, column.name)] as const), [LABEL_CARRIED, col(own.id, 'name')]] }),
+    ];
+    const any = refOf(base, fresh);
+    parts.push(make.project({ id: fresh('p'), input: any, channels: [], type, exprs: [...keep(any), [LABEL_CARRIED, compilerNull('text')]] }));
+    if (createdLabels?.length) {
+      const bare = refOf(base, fresh);
+      const unnamed = make.filter({ id: fresh('f'), input: bare, channels: [], type: bare.type,
+        pred: { kind: 'exists', negated: true, plan: mapLabelNames(col(bare.id, MAP_COL), fresh) } });
+      const fallback = make.values({ id: fresh('lv'), channels: [], type: typeOf(text('g_lv')), rows: createdLabels.map((label) => [compilerText(label)]) });
+      const crossed = make.join({ id: fresh('j'), left: unnamed, right: fallback, join: 'cross', channels: [], type: typeOf(...bare.type.cols, text('g_lv')) });
+      parts.push(make.project({ id: fresh('p'), input: crossed, channels: [], type, exprs: [...bare.type.cols.map((column) => [column.name, col(crossed.id, column.name)] as const), [LABEL_CARRIED, col(crossed.id, 'g_lv')]] }));
+    }
+    return spool(make.union({ id: fresh('u'), all: true, channels: [], type, inputs: parts }), fresh, bind);
+  };
   return {
-    columns: (rel) => fixed.flatMap((key, i) => [
-      [meta(maskCol(i), 'int'), key.present(rel)] as const,
-      ...key.key(rel).map((part, j) => [meta(keyCol(i, j), 'any', true),
-        { kind: 'case', whens: [[eq(key.present(rel), compilerInt(1)), part]], else: compilerNull('any') } as Expr] as const),
-    ]),
+    columns: (rel, fresh) => [
+      ...fixed.flatMap((key, i) => [
+        [meta(maskCol(i), 'int'), key.present(rel)] as const,
+        ...key.key(rel).map((part, j) => [meta(keyCol(i, j), 'any', true),
+          { kind: 'case', whens: [[eq(key.present(rel), compilerInt(1)), part]], else: compilerNull('any') } as Expr] as const),
+      ]),
+      ...(createdLabels ? [[text(LABEL_FIRST), mapLabelOf(col(rel, MAP_COL), labelFirst, 'text', fresh)] as const] : []),
+    ],
     pairs: (earlier, later, fresh, bind) => {
+      if (createdLabels) {
+        const { left, right, on } = searchPairs(earlier, later, fresh, bind);
+        const carried = carriedLabels(left, fresh, bind);
+        return { left: carried, right, on: and(substRelId(on, left.id, carried.id), { kind: 'binary', op: 'is', left: col(carried.id, LABEL_CARRIED), right: col(right.id, LABEL_FIRST) }) };
+      }
+      return searchPairs(earlier, later, fresh, bind);
+    },
+  };
+
+  function searchPairs(earlier: Rel, later: Rel, fresh: Minter, bind: Binder): { left: Rel; right: Rel; on: Expr } {
+    {
       // NOTHING TO KEY BY — every criterion is an `onCreate` key (read as "could"), so every pair is a
       // candidate and `couldMatch` decides alone: the pair test stays exact, it simply has no seek.
       if (!maskCols.length && !map) return { left: earlier, right: later, on: always };
@@ -3819,9 +3863,10 @@ function searchKeying(fixed: readonly MergeKey[], map: { readonly excluded: read
         ...(map ? [eq(col(left.id, SUB), col(right.id, KEYS)), eq(col(left.id, SUB_SIG), col(right.id, SIG))] : []),
       ])!;
       return { left, right, on };
-    },
-  };
+    }
+  }
 }
+const LABEL_FIRST = 'g_lf', LABEL_CARRIED = 'g_lc';
 const maskCol = (i: number): string => `g_m${i}`;
 const keyCol = (i: number, j: number): string => `g_k${i}_${j}`;
 const pairKeyCol = (i: number, j: number): string => `g_p${i}_${j}`;
@@ -4162,15 +4207,78 @@ function computedCouldMatch(
   };
 }
 
+/**
+ * THE `T.label` OF A MAP-VALUED DRIVER (`inject(map).mergeV()`/`.mergeE()`). The value is a String or a
+ * Collection<String> (`MergeElementStep.validate`,
+ * `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeElementStep.java:291-306`):
+ * a collection searches for a vertex carrying ALL its members (`searchVerticesLabelConstraint`, `:381-396`)
+ * and creates one carrying them all. So every reader goes through ONE spelling of a label value node
+ * (`{t,v}`): a list/set is its members, a scalar is one member, and a member's NAME is its `v` as TEXT.
+ * The CAST keeps a non-string label (`(T.label):5`) one name everywhere — the `labels` row, the search
+ * and the interleaving compare all read `'5'` (JavaScript's `String(5)`, a deliberate divergence in
+ * `docs/limitations.md` §3) rather than an INTEGER that meets no TEXT name.
+ */
+const LABEL_PAIR = { value: 'lp_v', ord: 'lp_o' } as const;
+const LABEL_MEMBER = { value: 'lm_v', ord: 'lm_o' } as const;
+const jsonAt = (e: Expr, path: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [e, compilerText(path)] });
+/** Is this pair's key `T.label`? */
+const isLabelKey = (pair: Expr): Expr =>
+  and(eq(jsonAt(pairSide(pair, 'keys'), '$.t'), compilerText('T')), eq(jsonAt(pairSide(pair, 'keys'), '$.v'), compilerText('label')));
+/** Is a label value node a collection (a list or set — its `v` a JSON array)? */
+const labelIsList = (node: Expr): Expr => eq({ kind: 'call', fn: 'json_type', args: [node, compilerText('$.v')] }, compilerText('array'));
+/** A label MEMBER node's name. */
+const labelName = (node: Expr): Expr => ({ kind: 'cast', arg: jsonAt(node, '$.v'), to: 'text' });
+/** A label value's FIRST name (NULL for an empty collection) — what a search SEEKS by and what says a map
+ *  names a label at all; the residual checks every member (`mapLabelNames`). */
+const labelFirst = (node: Expr): Expr =>
+  ({ kind: 'cast', arg: { kind: 'case', whens: [[labelIsList(node), jsonAt(node, '$.v[0].v')]], else: jsonAt(node, '$.v') }, to: 'text' });
+
+/** `derive` over the map's `T.label` value node, read in ONE correlated subquery (NULL where the map names
+ *  no label). */
+function mapLabelOf(map: Expr, derive: (node: Expr) => Expr, type: ColMeta['type'], fresh: Minter): Expr {
+  const p = pairsOf(map, fresh);
+  const hits = make.filter({ id: fresh('f'), input: p, channels: [], type: p.type, pred: isLabelKey(col(p.id, PAIR.value)) });
+  return { kind: 'scalar', plan: make.limit({
+    id: fresh('li'), channels: [], type: typeOf(meta('lbl', type, true)), count: compilerInt(1),
+    input: make.project({ id: fresh('p'), input: hits, channels: [], type: typeOf(meta('lbl', type, true)),
+      exprs: [['lbl', derive(pairSide(col(hits.id, PAIR.value), 'values'))]] }) }) };
+}
+
+/** The map's label NAMES as rows (`name`) — beside `input`'s columns when `map` is read off `input`'s rows,
+ *  else correlated to the one map `map` names. A collection explodes to its members; a scalar is one. */
+function mapLabelNames(map: Expr, fresh: Minter, input?: Rel): Rel {
+  const inputCols = input?.type.cols ?? [];
+  const pairs = make.explode({
+    id: fresh('px'), ...(input ? { input } : {}), expr: map, channels: [], as: LABEL_PAIR,
+    type: typeOf(...inputCols, meta(LABEL_PAIR.value, 'any', true), meta(LABEL_PAIR.ord, 'int')),
+  });
+  const labelPairs = make.filter({ id: fresh('f'), input: pairs, channels: [], type: pairs.type, pred: isLabelKey(col(pairs.id, LABEL_PAIR.value)) });
+  const node = pairSide(col(labelPairs.id, LABEL_PAIR.value), 'values');
+  const members = make.explode({
+    id: fresh('ex'), input: labelPairs, channels: [], as: LABEL_MEMBER,
+    expr: { kind: 'case', whens: [[labelIsList(node), jsonAt(node, '$.v')]],
+      else: { kind: 'call', fn: 'json_array', args: [{ kind: 'call', fn: 'json', args: [node] }] } },
+    type: typeOf(...labelPairs.type.cols, meta(LABEL_MEMBER.value, 'any', true), meta(LABEL_MEMBER.ord, 'int')),
+  });
+  return make.project({
+    id: fresh('p'), input: members, channels: [], type: typeOf(...inputCols, meta('name', 'text', true)),
+    exprs: [...inputCols.map((column) => [column.name, col(members.id, column.name)] as const), ['name', labelName(col(members.id, LABEL_MEMBER.value))]],
+  });
+}
+
 /** `guardMergeInterleaving`'s `couldMatch` for a MAP-VALUED driver (`inject(map).mergeV()`): could the
  *  LATER driver's map find what the EARLIER driver's map created? Every STRING entry of the later map must
  *  be carried by the creation — an equal entry of the earlier map (`typedValueEq`, the search's compare),
- *  or an `onCreate` key (read as "could", fail closed). A `T.label` entry is read as "could" too: over-
- *  refusing a pair whose labels differ is a refusal, never a wrong answer. */
-function mapCouldMatch(onCreate: MergeSpec | null, fresh: Minter): (earlier: RelId, later: RelId) => Expr {
+ *  or an `onCreate` key (read as "could", fail closed). Every LABEL name of the later map must be carried
+ *  too: a name of the earlier map's own `T.label` (a text equality — both sides are names in the driver
+ *  maps), or, where the earlier map names none, one of `createdLabels` — the label the creation falls back
+ *  to (`onCreate`'s, an edge's default; none for a labelless vertex, which no `hasLabel` finds). So a
+ *  person and a city both named `paris` are two creations, not a refusal. */
+function mapCouldMatch(onCreate: MergeSpec | null, createdLabels: readonly string[], fresh: Minter): (earlier: RelId, later: RelId) => Expr {
   const created = Object.keys(onCreate?.props ?? {});
-  const ext = (e: Expr, path: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [e, compilerText(path)] });
-  const side = (p: Rel, which: 'keys' | 'values', path: string): Expr => ext(pairSide(col(p.id, PAIR.value), which), path);
+  const side = (p: Rel, which: 'keys' | 'values', path: string): Expr => jsonAt(pairSide(col(p.id, PAIR.value), which), path);
+  const never = eq(compilerInt(1), compilerInt(0));
+  const not = (arg: Expr): Expr => ({ kind: 'unary', op: 'not', arg });
   return (earlier, later) => {
     const need = pairsOf(col(later, MAP_COL), fresh);
     const have = pairsOf(col(earlier, MAP_COL), fresh);
@@ -4181,13 +4289,24 @@ function mapCouldMatch(onCreate: MergeSpec | null, fresh: Minter): (earlier: Rel
     });
     const fromOnCreate: Expr = created.length
       ? { kind: 'in-list', expr: side(need, 'keys', '$.v'), values: created.map(compilerText) }
-      : eq(compilerInt(1), compilerInt(0));
+      : never;
     const uncarried = make.filter({
       id: fresh('f'), input: need, channels: [], type: need.type,
-      pred: and(and(eq(side(need, 'keys', '$.t'), compilerText('string')), { kind: 'unary', op: 'not', arg: fromOnCreate }),
+      pred: and(and(eq(side(need, 'keys', '$.t'), compilerText('string')), not(fromOnCreate)),
         { kind: 'exists', plan: carried, negated: true }),
     });
-    return { kind: 'exists', plan: uncarried, negated: true };
+    // A later LABEL name the earlier creation does not carry.
+    const needNames = mapLabelNames(col(later, MAP_COL), fresh);
+    const haveNames = mapLabelNames(col(earlier, MAP_COL), fresh);
+    const sameName = make.filter({ id: fresh('f'), input: haveNames, channels: [], type: haveNames.type, pred: eq(col(haveNames.id, 'name'), col(needNames.id, 'name')) });
+    const unnamed: Expr = { kind: 'exists', plan: mapLabelNames(col(earlier, MAP_COL), fresh), negated: true };
+    const fallback: Expr | null = createdLabels.length
+      ? and(unnamed, { kind: 'in-list', expr: col(needNames.id, 'name'), values: createdLabels.map(compilerText) }) : null;
+    const labelUncarried = make.filter({
+      id: fresh('f'), input: needNames, channels: [], type: needNames.type,
+      pred: fallback ? and({ kind: 'exists', plan: sameName, negated: true }, not(fallback)) : { kind: 'exists', plan: sameName, negated: true },
+    });
+    return and({ kind: 'exists', plan: uncarried, negated: true }, { kind: 'exists', plan: labelUncarried, negated: true });
   };
 }
 
@@ -5063,12 +5182,11 @@ function mergeVComputed(
  * (key,value) entries are decomposed PER DRIVER at runtime via `json_each` over `MAP_COL`, so the search
  * KEY SET is DATA, not compile-time strings (which is what separates this from `mergeV(__.project(…))`).
  *
- * FIRST SUB-INCREMENT — a SCALAR-valued map with STRING property keys (`inject`/`select` of a scalar map).
- * Deferred, fail-closed, each a later sub-increment: a LIST-valued map (`valueMap()`, `valOf` list — its
- * value would compare a stored scalar against a JSON list, never equal); TOKEN keys (`T.label`/`T.id`,
- * declined by the map producer `mapLiteralBlob` upstream so they cannot arrive here) — so the search
- * narrows by properties alone and the create's label is `onCreate`'s or the default `vertex`; and a RUNTIME
- * arm value, which roots at the (map) driver and needs a map host.
+ * A SCALAR-valued map with STRING property keys and an optional `T.label` — a String or a collection of
+ * them (`mapLabelNames`): the search needs every name, the create writes every name. Deferred, fail-closed:
+ * a LIST-valued map (`valueMap()`, `valOf` list — its value would compare a stored scalar against a JSON
+ * list, never equal); a `T.id` (refused per driver below); and a RUNTIME arm value, which roots at the
+ * (map) driver and needs a map host.
  */
 export function mergeVFromMap(
   input: Rel, maps: MergeMaps, valOf: MapOf, keys: MapKeyFacts, propertySteps: readonly IRStep[],
@@ -5117,15 +5235,9 @@ export function mergeVFromMap(
   const valV = (p: Rel): Expr => ext(pairSide(col(p.id, PAIR.value), 'values'), '$.v');
   const valT = (p: Rel): Expr => ext(pairSide(col(p.id, PAIR.value), 'values'), '$.t');
   const isToken = (p: Rel, name: 'label' | 'id'): Expr => and(eq(keyT(p), compilerText('T')), eq(keyV(p), compilerText(name)));
-  // The map's `T.label` value as a per-row scalar (NULL when the map names none) — narrows the search and
-  // labels the created vertex.
-  const mapLabelScalar = (mapCol: Expr): Expr => {
-    const p = pairsOf(mapCol, fresh);
-    const hits = make.filter({ id: fresh('f'), input: p, channels: [], type: p.type, pred: isToken(p, 'label') });
-    return { kind: 'scalar', plan: make.limit({
-      id: fresh('li'), channels: [], type: typeOf(meta('lbl', 'any', true)), count: compilerInt(1),
-      input: make.project({ id: fresh('p'), input: hits, channels: [], type: typeOf(meta('lbl', 'any', true)), exprs: [['lbl', valV(hits)]] }) }) };
-  };
+  // The map's FIRST label name per row (NULL when the map names none) — what the search seeks by; every
+  // name is checked by the residual (`allMatch`) and written by the create (`mapLabelNames`).
+  const mapLabelScalar = (mapCol: Expr): Expr => mapLabelOf(mapCol, labelFirst, 'text', fresh);
   // FAIL CLOSED on a `T.id` in the map — search-by-id / create-with-id is its own machinery (a per-driver
   // id and its collision guards); until then a map carrying it REFUSES rather than silently ignoring the
   // id criterion (a wrong answer). The guard fires per driver whose map holds a T.id.
@@ -5151,20 +5263,22 @@ export function mergeVFromMap(
         typedValueEq(col(vp.id, 'value'), col(vp.id, 'vtype'), valV(pairs), valT(pairs))),
     });
     const propProbe = make.project({ id: fresh('p'), input: vpMatch, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-    // A `T.label` key satisfied by the candidate carrying that label (hasLabel over vertex_labels).
+    // A `T.label` NAME satisfied by the candidate carrying it (hasLabel over vertex_labels) — every name
+    // of a collection label, `searchVerticesLabelConstraint`'s AND (`mapLabelNames`).
+    const names = mapLabelNames(col(driver, MAP_COL), fresh);
     const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rl'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
     const lb = dictScan('labels', fresh, ['lb', 'rb']);
     const vlJoin = make.join({ id: fresh('j'), left: vl, right: lb, join: 'inner', on: eq(col(vl.id, 'label'), col(lb.id, 'id')), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int'), meta('id', 'int'), meta('name', 'text')) });
-    const vlMatch = make.filter({ id: fresh('f'), input: vlJoin, channels: [], type: vlJoin.type, pred: and(eq(col(vlJoin.id, 'node'), candId), eq(col(vlJoin.id, 'name'), valV(pairs))) });
+    const vlMatch = make.filter({ id: fresh('f'), input: vlJoin, channels: [], type: vlJoin.type, pred: and(eq(col(vlJoin.id, 'node'), candId), eq(col(vlJoin.id, 'name'), col(names.id, 'name'))) });
     const labelProbe = make.project({ id: fresh('p'), input: vlMatch, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-    // A pair the candidate FAILS: a string property it lacks, or the T.label it does not carry. (A T.id
-    // pair cannot reach here — the guard above refused any map holding one.) `allMatch` = no such pair.
+    // A pair the candidate FAILS: a string property it lacks; a label name it does not carry. (A T.id
+    // pair cannot reach here — the guard above refused any map holding one.) `allMatch` = neither.
     const unsat = make.filter({
       id: fresh('f'), input: pairs, channels: [], type: pairs.type,
-      pred: or(and(eq(keyT(pairs), compilerText('string')), { kind: 'exists', negated: true, plan: propProbe }),
-        and(isToken(pairs, 'label'), { kind: 'exists', negated: true, plan: labelProbe })),
+      pred: and(eq(keyT(pairs), compilerText('string')), { kind: 'exists', negated: true, plan: propProbe }),
     });
-    return { kind: 'exists', plan: unsat, negated: true };
+    const unlabelled = make.filter({ id: fresh('f'), input: names, channels: [], type: names.type, pred: { kind: 'exists', negated: true, plan: labelProbe } });
+    return and({ kind: 'exists', plan: unsat, negated: true }, { kind: 'exists', plan: unlabelled, negated: true });
   };
   const candidates = (): Rel => {
     const candScan = make.scan({ id: fresh('t'), table: 'nodes', alias: fresh('nc'), channels: [], type: typeOf(...NODES_COLS) });
@@ -5189,12 +5303,15 @@ export function mergeVFromMap(
   // properties, and its label against the map's own `T.label`.
   const createOwners = onCreateOverrideGuards(unmatched, createExtra, onCreate, mapDriverEntry(fresh), guard, fresh);
   if (!createOwners) return null;
-  onCreateLabelGuard(unmatched, mapLabelScalar(col(unmatched.id, MAP_COL)), (onCreate?.label as string[] | null) ?? [], guard, fresh);
+  const onCreateLabels = (onCreate?.label as string[] | null) ?? [];
+  onCreateLabelGuard(unmatched, mapLabelScalar(col(unmatched.id, MAP_COL)), onCreateLabels, guard, fresh,
+    onCreateLabels.length ? mapLabelOf(col(unmatched.id, MAP_COL), (node) => ({ kind: 'case', whens: [[labelIsList(node), compilerInt(1)]], else: compilerInt(0) }), 'int', fresh) : undefined);
   // ONE TRAVERSER AT A TIME, before any write (`guardMergeInterleaving`). The search's key set is DATA,
   // bounded by the stream's MAY set (`mapSearchedKeys`), and a driver's `[name:x]` finds another's
-  // `[name:x, age:1]` creation — `mapCouldMatch`.
+  // `[name:x, age:1]` creation — `mapCouldMatch`. A map naming no label creates under `onCreate`'s label,
+  // or labelless, which no later label search finds.
   guardMergeInterleaving('mergeV', incoming, matched,
-    { rel: unmatched, createKey: (rel) => jsonText(col(rel, MAP_COL)), couldMatch: mapCouldMatch(onCreate, fresh), keying: searchKeying([], { excluded: Object.keys(onCreate?.props ?? {}) }) },
+    { rel: unmatched, createKey: (rel) => jsonText(col(rel, MAP_COL)), couldMatch: mapCouldMatch(onCreate, onCreateLabels, fresh), keying: searchKeying([], { excluded: Object.keys(onCreate?.props ?? {}), createdLabels: onCreateLabels }) },
     { ...mergeWriteFacts('vertex', matchWrites, appended, tailWrites, mapSearchedKeys(keys), propertySteps, child.writes), perDriverSearch: true }, bind, guard, fresh);
   // `onMatch` CONSTANT writes over the matched vertices (runtime declined above, so the callback is never
   // reached). Shared with the other vertex-merge paths.
@@ -5215,39 +5332,33 @@ export function mergeVFromMap(
     id: fresh('j'), left: rankedCreated, right: wanted, join: 'inner', on: eq(col(rankedCreated.id, ORD), col(wanted.id, 'word')), channels: [],
     type: typeOf(...rankedCreated.type.cols, ...wanted.type.cols),
   }), true);
-  // Each created vertex's map `T.label` (NULL where it names none), read ONCE for both label writers.
-  const namedCreated = bind(make.project({ id: fresh('p'), input: createdMaps, channels: [], type: typeOf(meta('id', 'int'), meta('name', 'any', true)),
-    exprs: [['id', col(createdMaps.id, 'id')], ['name', mapLabelScalar(col(createdMaps.id, MAP_COL))]] }), true);
+  // Each created vertex's map label NAMES (`mapLabelNames` — a collection's members, a scalar's one; none
+  // where the map names no label), read ONCE for both label writers.
+  const mapsById = make.project({ id: fresh('p'), input: createdMaps, channels: [], type: typeOf(meta('o', 'int'), meta(MAP_COL, 'json')),
+    exprs: [['o', col(createdMaps.id, 'id')], [MAP_COL, col(createdMaps.id, MAP_COL)]] });
+  const exploded = mapLabelNames(col(mapsById.id, MAP_COL), fresh, mapsById);
+  const namedRows = make.filter({ id: fresh('f'), input: exploded, channels: [], type: exploded.type, pred: isNot(col(exploded.id, 'name'), compilerNull('text')) });
+  const createdNames = bind(make.project({ id: fresh('p'), input: namedRows, channels: [], type: typeOf(meta('o', 'int'), meta('name', 'text')),
+    exprs: [['o', col(namedRows.id, 'o')], ['name', col(namedRows.id, 'name')]] }), true);
   // The `onCreate` CONSTANT label, onto a created vertex whose map names none — where the map does name
   // one, the guard above proved it is onCreate's, and the map's own label write below lands it once.
   const labelRow = internNames('labels', createLabels.names, bind, fresh);
   if (labelRow) {
     const labelTargetRows = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
-    const unnamed = make.filter({ id: fresh('f'), input: namedCreated, channels: [], type: namedCreated.type,
-      pred: { kind: 'binary', op: 'is', left: col(namedCreated.id, 'name'), right: compilerNull('text') } });
+    const ownNames = make.filter({ id: fresh('f'), input: createdNames, channels: [], type: createdNames.type, pred: eq(col(createdNames.id, 'o'), col(createdMaps.id, 'id')) });
+    const unnamed = make.filter({ id: fresh('f'), input: createdMaps, channels: [], type: createdMaps.type, pred: { kind: 'exists', negated: true, plan: ownNames } });
     const labelPairs = make.join({ id: fresh('j'), left: idsOf(unnamed, fresh), right: labelRow, join: 'cross', channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
     bind(insert({ target: labelTargetRows, cols: ['node', 'label'], source: labelPairs, channels: [], type: typeOf(), returning: [] }));
   }
   // WRITE THE MAP'S PROPERTIES onto each created vertex (`mapEntryProperties`).
   bind(mapEntryProperties('vertex', createdMaps, fresh));
-  // THE CREATED VERTEX'S LABEL, from the map's `T.label` (per created map). Intern the distinct label
-  // names — an upsert, `internNames`' idiom, but data-sized over the created maps rather than a
-  // compile-time list — then link each created vertex to its label id by name. A map with no `T.label`
-  // yields NULL and contributes no row (the labelless default, as g.addV()). The `onCreate` CONSTANT
-  // label (above) is the fallback when the map names none.
-  const labelled = bind(make.filter({ id: fresh('f'), input: namedCreated, channels: [], type: namedCreated.type,
-    pred: { kind: 'binary', op: 'is not', left: col(namedCreated.id, 'name'), right: compilerNull('text') } }), true);
-  const distinctNames = make.distinct({ id: fresh('d'), channels: [], type: typeOf(meta('name', 'text')),
-    input: make.project({ id: fresh('p'), input: labelled, channels: [], type: typeOf(meta('name', 'text')), exprs: [['name', col(labelled.id, 'name')]] }) });
-  const labelsTable = dictScan('labels', fresh, ['t', 'wt']);
-  bind(insert({ target: labelsTable, cols: ['name'], source: distinctNames, channels: [], type: typeOf(),
-    onConflict: { target: ['name'], set: [['name', col(EXCLUDED, 'name')]] }, returning: [] }));
-  const lbLookup = dictScan('labels', fresh, ['t', 'rb']);
-  const vlJoined = make.join({ id: fresh('j'), left: labelled, right: lbLookup, join: 'inner', on: eq(col(labelled.id, 'name'), col(lbLookup.id, 'name')), channels: [],
-    type: typeOf(meta('id', 'int'), meta('name', 'text'), meta('lid', 'int'), meta('lname', 'text')) });
-  const vlTarget = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
-  bind(insert({ target: vlTarget, cols: ['node', 'label'], channels: [], type: typeOf(), returning: [],
-    source: make.project({ id: fresh('p'), input: vlJoined, channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')), exprs: [['node', col(vlJoined.id, 'id')], ['label', col(vlJoined.id, 'lid')]] }) }));
+  // THE CREATED VERTEX'S LABELS, from the map's `T.label` — every name of a collection, a multi-label
+  // creation like `addV(__.constant([…]))`: the relation-form intern and the `(node, label)` insert
+  // (`bindLabels`), data-sized over the created maps. A map with no `T.label` contributes no row (the
+  // labelless default, as g.addV()); the `onCreate` CONSTANT label (above) is its fallback.
+  const owners = make.project({ id: fresh('p'), input: createdMaps, channels: [], type: typeOf(meta('o', 'int'), meta('owner', 'int')),
+    exprs: [['o', col(createdMaps.id, 'id')], ['owner', col(createdMaps.id, 'id')]] });
+  bindLabels({ targets: owners, names: createdNames }, bind, fresh);
   // `onCreate`'s own CONSTANT properties, over the created vertices whose map does not already hold the key
   // (`createOwners` — a restated key is one entry of the union, not a second value).
   for (const write of createExtra) if (!propertyStatements('vertex', createOwners(write, createdMaps), write, bind, fresh, child, NO_ALIASES, guard)) return null;
@@ -5396,15 +5507,19 @@ export function mergeEFromMap(
         pred: { kind: 'exists', negated: false, plan: make.filter({ id: fresh('f'), input: idProbe, channels: [], type: idProbe.type, pred: isToken(idProbe, 'id') }) } }) }),
   }), { message: 'mergeE with a T.id in a map-valued driver is not yet supported', raiseWhen: 'rows' });
 
-  // The map's `T.label` value as a per-row scalar (NULL when the map names none) — narrows the search and
+  // The map's `T.label` name per row (NULL when the map names none, `mapLabelOf`) — narrows the search and
   // labels the created edge.
-  const mapLabelScalar = (mapCol: Expr): Expr => {
-    const p = pairsOf(mapCol, fresh);
-    const hits = make.filter({ id: fresh('f'), input: p, channels: [], type: p.type, pred: isToken(p, 'label') });
-    return { kind: 'scalar', plan: make.limit({
-      id: fresh('li'), channels: [], type: typeOf(meta('lbl', 'any', true)), count: compilerInt(1),
-      input: make.project({ id: fresh('p'), input: hits, channels: [], type: typeOf(meta('lbl', 'any', true)), exprs: [['lbl', valV(hits)]] }) }) };
-  };
+  const mapLabelScalar = (mapCol: Expr): Expr => mapLabelOf(mapCol, labelFirst, 'text', fresh);
+  // AN EDGE HAS EXACTLY ONE LABEL. `validate` admits a Collection for `T.label` on either merge, but
+  // `MergeEdgeStep` reads it as one String (`(String) search.get(T.label)`,
+  // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeEdgeStep.java:169`),
+  // so a collection label is refused per driver rather than written as a name.
+  guard(make.limit({
+    id: fresh('li'), channels: [], type: typeOf(meta('n', 'int')), count: compilerInt(1),
+    input: make.project({ id: fresh('p'), channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', compilerInt(1)]],
+      input: make.filter({ id: fresh('f'), input: carrier0, channels: [], type: carrier0.type,
+        pred: eq(mapLabelOf(map0, (node) => ({ kind: 'case', whens: [[labelIsList(node), compilerInt(1)]], else: compilerInt(0) }), 'int', fresh), compilerInt(1)) }) }),
+  }), { message: 'mergeE() expects T.label to be a String - an edge has exactly one label, found: a list', raiseWhen: 'rows' });
   // Does the map carry this Direction key at all — the `containsKey(direction)` the create raise reads.
   const hasDir = (mapCol: Expr, side: 'OUT' | 'IN'): Expr => {
     const p = pairsOf(mapCol, fresh);
@@ -5521,14 +5636,15 @@ export function mergeEFromMap(
   onCreateLabelGuard(unmatched, col(unmatched.id, 'lbl'), onCreateLabels, guard, fresh);
   // ONE TRAVERSER AT A TIME, before any write — `mergeVFromMap`'s reading (the search's key set is DATA),
   // plus the endpoints: a later map's named side must be the earlier creation's.
-  const mapCould = mapCouldMatch(onCreate, fresh);
+  // A map naming no label creates under `fallbackLabel`.
+  const mapCould = mapCouldMatch(onCreate, [fallbackLabel], fresh);
   const sameSide = (earlier: RelId, later: RelId, has: string, side: string): Expr =>
     or(eq(col(later, has), compilerInt(0)), { kind: 'binary', op: 'is', left: col(earlier, side), right: col(later, side) });
   guardMergeInterleaving('mergeE', incoming, matched, {
     rel: unmatched,
     createKey: (rel) => ({ kind: 'call', fn: 'json_array', args: [col(rel, 'src'), col(rel, 'tgt'), jsonText(col(rel, MAP_COL))] }),
     couldMatch: (earlier, later) => and(mapCould(earlier, later), and(sameSide(earlier, later, 'hasOut', 'src'), sameSide(earlier, later, 'hasIn', 'tgt'))),
-    keying: searchKeying(([['hasOut', 'src'], ['hasIn', 'tgt']] as const).map(([has, side]) => ({ present: (rel: RelId) => col(rel, has), key: (rel: RelId) => [col(rel, side)] })), { excluded: Object.keys(onCreate?.props ?? {}) }),
+    keying: searchKeying(([['hasOut', 'src'], ['hasIn', 'tgt']] as const).map(([has, side]) => ({ present: (rel: RelId) => col(rel, has), key: (rel: RelId) => [col(rel, side)] })), { excluded: Object.keys(onCreate?.props ?? {}), createdLabels: [fallbackLabel] }),
   }, { ...mergeWriteFacts('edge', matchWrites, [], tailWrites, mapSearchedKeys(keys), propertySteps, child.writes), perDriverSearch: true }, bind, guard, fresh);
   // `onMatch` CONSTANT writes over the matched edges (runtime declined above). Empty on the create path.
   for (const write of matchWrites) if (!propertyStatements('edge', idsOf(matched, fresh), write, bind, fresh, child, NO_ALIASES, guard)) return null;

@@ -162,6 +162,11 @@ describe(`a merge search over ${N} traversers seeks its most selective criterion
     // `string or blob too big` at 8k); and half the maps' key sets strictly inside the other half's.
     [`g.inject(${maps((i) => `[a${i % 19}:1,b${Math.floor(i / 19) % 19}:1,c${Math.floor(i / 361)}:1]`)}).mergeV().count()`, () => shaped(N, () => []), N, "g.V().count()", 2 * N],
     [`g.inject(${maps((i) => i % 2 ? `[a${i % 50}:1,b${i}:1]` : `[a${(i + 1) % 50}:1,b${i + 1}:2,c:1]`)}).mergeV().count()`, () => shaped(N, () => []), N, "g.V().count()", 2 * N],
+    // ONE NAME UNDER N LABELS — every pair shares the key set and signature, so the interleaving guard
+    // meets them by label too (`searchKeying`'s carried label names); a collection label the same way.
+    [`g.inject(${maps((i) => `[(T.label):'l${i}',name:'paris']`)}).mergeV().count()`, () => shaped(N, () => []), N, "g.V().has('name','paris').count()", N],
+    [`g.inject(${maps((i) => `[(T.label):['a${i}','b'],name:'paris']`)}).mergeV().count()`, () => shaped(N, () => []), N, "g.V().hasLabel('b').count()", N],
+    [`g.inject(${maps((i) => `[(T.label):'k${i}',(Direction.OUT):1,(Direction.IN):2]`)}).mergeE().count()`, () => shaped(N, () => []), N, "g.E().count()", N],
     // N edges out of one hub, re-upserted.
     [`g.inject(${maps((i) => `[(T.label):'x',(Direction.OUT):${N + 1},(Direction.IN):${i}]`)}).mergeE().count()`, () => shaped(N, () => [], true), N, "g.E().count()", N],
   ] as const) {

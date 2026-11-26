@@ -53,7 +53,7 @@ An item marked "verify" may have landed already. Check it against the code befor
 ## Contents
 
 1. [Wrong answers](#1-wrong-answers) — 33 items
-2. [Performance](#2-performance) — 57 items
+2. [Performance](#2-performance) — 58 items
 3. [Queries we decline](#3-queries-we-decline) — 89 items
 4. [Shared substrate](#4-shared-substrate) — 19 items
 5. [Product capabilities](#5-product-capabilities) — 7 items
@@ -71,7 +71,7 @@ Queries that run and return a wrong result today. Fix these first.
 #### Merge writes refuse on traverser count (`o-seqguard`)
 - **Area:** writes
 - **Reach:** plausible
-- **Problem:** `sequentialGuard` raises at run time when `count(*) > 1`. This is a data-size refusal. `g.V().mergeV([name:'zz']).option(Merge.onMatch,[age:1])` raises over 6 traversers and answers over 1. A label-only multi-driver `mergeV` with different labels declines (r7-fu11).
+- **Problem:** `sequentialGuard` raises at run time when `count(*) > 1`. This is a data-size refusal. `g.V().mergeV([name:'zz']).option(Merge.onMatch,[age:1])` raises over 6 traversers and answers over 1.
 - **Fix:** Answer from a snapshot of the input. This retires `sequentialGuard`, `guardMergeInterleaving` and `mergeObservesOtherWrites`.
 - **Where:** `src/compiler/rel/write.ts` (`sequentialGuard`)
 
@@ -326,6 +326,13 @@ Queries that answer correctly but grow faster than linear with data or query siz
 - **Reach:** plausible
 - **Problem:** A write fed by `order().by(…).V().has(…)`, or the label filter of a write-body `V()` re-source, renumbers holders × V first. Also tracked as r4-fu0.
 - **Fix:** Run `fuse` on the write path too.
+
+#### A map-driver search seeks a shared value, not its label (`merge-map-label-seek`)
+- **Area:** writes
+- **Reach:** plausible
+- **Problem:** A map driver seeks by its most selective string entry and never by its `T.label`. Re-upserting N maps that share a name under N labels (`[(T.label):'l<i>',name:'paris']`) finds N candidates per driver. Measured: 4.9 s at 1k drivers, 321 s at 8k (65×). The first run (all creations) is linear.
+- **Fix:** Rank the label beside the string entries in `mapDrivers`' pick, and seek through `labelSeek` when it is the most selective.
+- **Where:** `src/compiler/rel/write.ts` (`mapDrivers`, `mergeVFromMap`)
 
 #### K-entry map driver and related shapes (`r7-fu9`)
 - **Area:** writes

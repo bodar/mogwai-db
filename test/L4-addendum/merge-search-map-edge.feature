@@ -210,3 +210,40 @@ Feature: mogwai addendum — a map-VALUED mergeE driver (the traverser IS the me
       | result |
       | w |
     And the graph should return 6 for count of "g.E().has(\"weight\")"
+
+  # Two relationship types between one pair are two creations, not an interleaving refusal.
+  @gap:merge-search-map-edge
+  Scenario: g_injectXkk_1_2X_Xjj_1_2X_mergeE_label
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([(T.label):"kk",(OUT):1,(IN):2],[(T.label):"jj",(OUT):1,(IN):2]).mergeE().label()
+      """
+    When iterated to list
+    Then the result should be unordered
+      | result |
+      | kk |
+      | jj |
+    And the graph should return 3 for count of "g.V(1).outE().where(inV().hasId(2))"
+
+  # An unlabelled map creates under the edge default, which a later "edge" map would have matched.
+  @gap:merge-search-map-edge
+  Scenario: g_injectXvadas_lopX_Xedge_vadas_lopX_mergeE_is_refused
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([(OUT):2,(IN):3],[(T.label):"edge",(OUT):2,(IN):3]).mergeE().count()
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "a later traverser would match what an earlier one created"
+
+  # An edge has exactly ONE label: MergeEdgeStep reads T.label as one String (MergeEdgeStep.java:169).
+  @gap:merge-search-map-edge
+  Scenario: g_injectXkk_jj_1_2X_mergeE_list_label_raises
+    Given the modern graph
+    And the traversal of
+      """
+      g.inject([(T.label):["kk","jj"],(OUT):1,(IN):2]).mergeE()
+      """
+    When iterated to list
+    Then the traversal will raise an error with message containing text of "an edge has exactly one label"

@@ -242,7 +242,7 @@
   "has": {
     "binds": 0,
     "bytes": 2637,
-    "compiler": 75,
+    "compiler": 73,
     "bound": 0
   },
   "hasId": {
@@ -392,13 +392,13 @@
   "mergeE": {
     "binds": 2,
     "bytes": 1628,
-    "compiler": 18,
+    "compiler": 17,
     "bound": 0
   },
   "mergeV": {
     "binds": 3,
-    "bytes": 6611,
-    "compiler": 412,
+    "bytes": 8622,
+    "compiler": 462,
     "bound": 0
   },
   "min": {
@@ -518,7 +518,7 @@
   "select": {
     "binds": 0,
     "bytes": 15545,
-    "compiler": 278,
+    "compiler": 225,
     "bound": 0
   },
   "skip": {
@@ -607,8 +607,8 @@
   },
   "values": {
     "binds": 3,
-    "bytes": 5760,
-    "compiler": 168,
+    "bytes": 5604,
+    "compiler": 164,
     "bound": 0
   },
   "where": {
