@@ -216,6 +216,12 @@ describe('an ordered predicate on a stored key seeks a (key, value) range', () =
   const CORRELATED: Readonly<Record<string, string>> = {
     'after a hop': "g.V().out('knows').has('age', between(10, 90)).count()",
     'in a where body': "g.V().where(out('knows').has('born', gt(datetime('2001-01-01T00:00:00Z')))).count()",
+    // An element the query PINS by id is a point read; no seek is lifted in front of it (`ElementFacts.pinned`,
+    // src/rel/passes/semijoin.ts), else the read grows with the key's range (measured ×7.6 over 1k → 8k, one row).
+    'V(id)': "g.V(50).has('age', gt(10)).count()",
+    'V(ids)': "g.V(50, 51).has('age', between(10, 90)).values('name')",
+    'hasId': "g.V().hasId(51).has('name', gt('a')).values('name')",
+    'V(id) in a local body': "g.V().hasLabel('software').limit(3).local(V(50).has('age', gt(10)).values('age')).count()",
   };
   for (const [name, gremlin] of Object.entries(CORRELATED)) {
     test(`${name}: the range check stays on the (node, key) owner lookup, cold and warm`, () => {

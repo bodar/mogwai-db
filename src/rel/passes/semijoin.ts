@@ -138,6 +138,14 @@ export function semijoinAll(plans: readonly Rel[], strategies: readonly OwnerSee
  *   slower. A fixed "value beats label" rule was measured turning an ordinary fact-to-dimension join
  *   (`…values('country').as('c').V().hasLabel('office').has('country', select('c'))`) from 7× to 60×
  *   over 1k → 8k users.
+ * - `pinned`: the `reached` elements whose id (or external `uid`) is a member of a set the QUERY TEXT bounds — a
+ *   literal or parameter `=`/`IN` list (`V(1)`, `hasId(5)`), or a membership of a parameter's `json_each` (`V($ids)`,
+ *   as an `id`-or-`uid` disjunction). That is a point read per id, so each candidate is CHECKED through the
+ *   property's `(node, key)` lookup, in time independent of the graph. A seek, by contrast, reads every row of the
+ *   key the value predicate matches — a whole range for an ordered one — so lifting it in front of a pinned element
+ *   (the bare-scan placement, which `reached` does not stop) makes a point read grow with the graph: measured on
+ *   `V(50).has('age', gt(10)).count()`, 0.02 ms flat against 0.17 → 1.3 → 6.3 ms over 1k → 8k → 32k vertices. No
+ *   selectivity guess is made: a set the query names is never larger than the query, a seek can be the whole key.
  * - `narrowed`: elements a narrowing already drives, filled as the walk places them, so an element gets
  *   ONE — a second correlated `IN` could only be a per-row CHECK re-running its subquery per candidate. A
  *   correlated pick is read ONCE per host (`correlatedFirst`, `src/compiler/rel/lower/scoped.ts`), so no copy
@@ -150,6 +158,7 @@ export function semijoinAll(plans: readonly Rel[], strategies: readonly OwnerSee
  */
 interface ElementFacts {
   readonly reached: ReadonlySet<RelId>;
+  readonly pinned: ReadonlySet<RelId>;
   readonly narrowed: Set<RelId>;
   readonly above: ReadonlyMap<Rel, readonly Expr[]>;
 }
@@ -207,6 +216,7 @@ const ROW_WISE: ReadonlySet<Rel['kind']> = new Set(['distinct', 'project']);
 
 function elementFacts(plans: readonly Rel[]): ElementFacts {
   const reached = new Set<RelId>();
+  const pinned = new Set<RelId>();
   for (const plan of plans) forEachRel(plan, (r) => {
     if (r.kind !== 'filter') return;
     for (const e of conjuncts(r.pred)) {
@@ -214,9 +224,34 @@ function elementFacts(plans: readonly Rel[]): ElementFacts {
         : e.kind === 'binary' && e.op === '=' ? (e.left.kind === 'lit' ? e.right : e.right.kind === 'lit' ? e.left : null) : null;
       const leaf = member?.kind === 'col' ? rowidScan(r.input, member.rel, member.name) : null;
       if (leaf && SEEK_PROPERTIES[leaf.table]) reached.add(leaf.id);
+      // Every disjunct names its own bounded set of ids (`V($ids)`: the integer ones by `id`, the rest by `uid`).
+      const sets = disjuncts(e).map((alt) => conjuncts(alt).map((c) => pinnedBy(r.input, c)).find((s) => s) ?? null);
+      const scan = sets[0];
+      if (scan && sets.every((s) => s === scan) && SEEK_PROPERTIES[scan.table]) { pinned.add(scan.id); reached.add(scan.id); }
     }
   });
-  return { reached, narrowed: new Set(), above: stackedAbove(plans) };
+  return { reached, pinned, narrowed: new Set(), above: stackedAbove(plans) };
+}
+
+/** The element scan conjunct `e` pins to a set the QUERY TEXT bounds (`ElementFacts.pinned`), or `null`: its `id` or
+ *  `uid` `=` a literal or parameter, `IN` a list of them, or `IN` a subquery reading no table (a parameter's
+ *  `json_each`). A subquery over a table (`hasLabel`'s) is data-sized, so it reaches the element without pinning it. */
+function pinnedBy(input: Rel, e: Expr): Extract<Rel, { readonly kind: 'scan' }> | null {
+  const constant = (x: Expr): boolean => x.kind === 'lit';
+  const member = e.kind === 'in-list' && e.values.every(constant) ? e.expr
+    : e.kind === 'in-query' && !e.negated && !readsTable(e.plan) ? e.expr
+    : e.kind === 'binary' && e.op === '=' ? (constant(e.left) ? e.right : constant(e.right) ? e.left : null) : null;
+  if (member?.kind !== 'col') return null;
+  const path = columnPath(input, member.rel, member.name);
+  const leaf = path?.rels.at(-1);
+  return leaf?.kind === 'scan' && (path!.name === 'id' || path!.name === 'uid') ? leaf : null;
+}
+
+/** Does `plan` read a stored table, at any depth? */
+function readsTable(plan: Rel): boolean {
+  let reads = false;
+  forEachRel(plan, (r) => { if (r.kind === 'scan' || r.kind === 'ref' || r.kind === 'self-ref') reads = true; });
+  return reads;
 }
 
 /**
@@ -237,6 +272,8 @@ function semijoinFilter(node: Extract<Rel, { readonly kind: 'filter' }>, above: 
   // this excludes is a Filter over a join/project/union, where "drive from the seek" is a claim about
   // a plan this pass did not build.
   if (element.kind !== 'scan') return narrowFilter(node, terms, above, strategies, mint, facts) ?? node;
+  // An element the query already pins by id is a point read; a seek in front of it would read the key's range.
+  if (facts.pinned.has(element.id)) return node;
   const target: SeekTarget = { rel: element.id, name: 'id', table: element.table, local: null };
   for (const seek of strategies) {
     for (const term of terms) {
@@ -414,7 +451,9 @@ function keyedJoin(
     id: mint.id('kf'), input: scan, channels: [], type: scan.type,
     // Non-empty: the one caller passes non-empty `constants`.
     pred: conjoin([
-      ...(localPred ? [indexable(substRelId(localPred, props.id, scan.id), scan.id)] : []),
+      // NOT `indexable`: the constant owners drive `kv` through `(node, key)`, so a range among the local terms
+      // stays a check on those rows rather than a rival `(key, value)` read of the key's whole range.
+      ...(localPred ? [substRelId(localPred, props.id, scan.id)] : []),
       ...constants.map((c): Expr => ({ kind: 'in-query', expr: col(scan.id, properties.owner), plan: c.kind === 'distinct' ? c.input : c, negated: false })),
     ])!,
   });

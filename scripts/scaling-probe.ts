@@ -335,6 +335,20 @@ const SHAPES: readonly Shape[] = [
   { name: 'range: has(age,gt) ~2%', query: "g.V().has('age', gt(66)).count()" },
   { name: 'range: has(age,between) ~50%', query: "g.V().has('age', between(30, 55)).count()" },
   { name: 'range: out.has(age,between)', query: "g.V().out().has('age', between(30, 55)).count()" },
+  // An id already pins the element: the range is a per-element CHECK through `(node, key)`, never a seek of the key's
+  // whole range (`ElementFacts.reached`, src/rel/passes/semijoin.ts) — constant in the graph's size.
+  { name: 'range: V(id).has(age,gt)', query: "g.V(50).has('age', gt(10)).count()" },
+  { name: 'range: V.hasId.has(name,gt).values', query: "g.V().hasId(51).has('name', gt('a')).values('name')" },
+  { name: 'range: V(ids).has(age,between)', query: "g.V(50, 51, 52).has('age', between(10, 90)).count()" },
+  { name: 'range: as.map(V.where(eq(a)).has(age,gt).count)', query: "g.V().as('a').map(V().where(eq('a')).has('age', gt(10)).count()).sum()" },
+  { name: 'range: where(out.hasId.has(age,gt))', query: "g.V().where(out().hasId(50).has('age', gt(10))).count()" },
+  { name: 'range: local(V(id).has(age,gt).values)', query: "g.V().local(V(50).has('age', gt(10)).values('age')).count()" },
+  { name: 'range: union(V(id).has(age,gt),V(id).has(name,gt))', query: "g.union(V(50).has('age', gt(10)), V(51).has('name', gt('a'))).count()" },
+  { name: 'range: E(id).has(weight,gt)', query: "g.E(50).has('weight', gt(0.1)).count()" },
+  { name: 'range: has(age,gt).has(name,gt) 1%', query: "g.V().has('age', gt(66)).has('name', gt('p')).count()" },
+  { name: 'range: hasLabel.has(age,gt) ~2%', query: "g.V().hasLabel('person').has('age', gt(66)).count()" },
+  { name: 'range: where(has(age,gt)) ~2%', query: "g.V().where(has('age', gt(66))).count()" },
+  { name: 'range: has(age,outside) ~4%', query: "g.V().has('age', outside(19, 66)).count()" },
 ];
 
 /** Deterministic xorshift, so every child and every run sees one graph. */

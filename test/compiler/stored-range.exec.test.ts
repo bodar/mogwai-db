@@ -77,4 +77,12 @@ describe('the range composes', () => {
     expect(await answer("g.V().has('k', gt(29).or(lt('b'))).count()")).toEqual(['6']);
     expect(await answer("g.V().union(has('k', gt(29)), has('k', gt('m'))).count()")).toEqual(['6']);
   });
+  test('on an element the query pins by id (a point read, no seek): the same answer', async () => {
+    // Vertex 3 is the 29.5m row, 7 the Boolean, 10 'zebra', 11 the UUID.
+    expect(await answer("g.V(3).has('k', gt(29)).count()")).toEqual(['1']);
+    expect(await answer("g.V(7).has('k', gt(0)).count()")).toEqual(['0']);
+    expect(await answer("g.V(1, 2, 3, 7).has('k', between(29, 30)).count()")).toEqual(['2']);
+    expect(await answer("g.V().hasId(10, 11).has('k', gt('m')).values('k')")).toEqual(['"zebra"']);
+    expect(await answer("g.V(1).local(V(3).has('k', gt(29)).values('k'))")).toEqual(['295e-1m']);
+  });
 });
