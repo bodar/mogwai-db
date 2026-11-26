@@ -1,6 +1,12 @@
 # One name authority for labels and property keys, then intern property keys
 
-**Status: Stage A LANDED (2026-11-26); Gate A waits for owner review. Stage B not started.**
+**Status: Stage A LANDED (2026-11-26). Gate A PASSED (owner, 2026-11-26): a sane path. Next: the Stage A
+finish round (A-f1–A-f6, N1–N3, A-w1–A-w3), then Stage B.**
+
+**How a gate works (owner, 2026-11-26).** A gate asks one question: is this a sane path? The numbers
+(line counts, stop rules) are evidence for that judgement, not automatic stops. If the path is sane,
+run more rounds on the same stage until it lands properly (follow-ups, fixes, clean-ups). Then start
+the next stage. Stop only for a wrong direction.
 
 **Source.** `docs/outstanding-work.md` §4 "Shared substrate: compiler internals": `name-interning`, then
 `property-key-interning`. Background is in `docs/2026-11-25-storage-density-plan.md` S6 and Q3.
@@ -180,9 +186,24 @@ Stage A: `label()` as a `choose`/`coalesce` arm (`g.V().coalesce(outE().label(),
   declares the same columns. Do it with N1; optionally add one `labelTargets(fresh)` for the four
   write-target scans (`bindLabels`, addV, mergeV, mergeE). No SQL change.
 
-**Gate A (owner review).** Report net production lines (expected negative), the `sql-hygiene` byte
-delta and the `sql-plan` diff. **Stop rule:** stop and report if the net change is above +40 lines or any
-`sql-plan` query regresses. Stage A is worth landing alone.
+### Stage A finish — review notes to verify (dropped as low-reach, but cheap to settle)
+
+- **A-w1. The §3 row from `7b71ba45` says a non-string map label "becomes its text".** A boolean does
+  not: `g.inject([(T.label):true,name:'n']).mergeV().label()` gives `'1'`, not `'true'` (`json_extract`
+  then `CAST AS TEXT`). Make the label text follow the one value-to-text rule the rest of the system
+  uses, or correct the row. Pick the smaller change; no Java emulation.
+- **A-w2. A NULL label in a mergeE map matches an existing edge.** `g.inject([(T.label):null,(OUT):1,
+  (IN):2]).mergeE()` matches `knows`. The constant `mergeE` path and the reference refuse a null map
+  value ("mergeE() does not allow null Map values - check: label"). Make the map path agree with the
+  constant path. Also check the mergeV map path for a NULL label (it may treat the map as named).
+- **A-w3. A labelless vertex and the default label.** `g.inject([name:'x'],[(T.label):'vertex',name:'x'])
+  .mergeV()` now creates 2 vertices; the reference gives 1 (`Vertex.DEFAULT_LABEL`). Trunk refused it
+  before. Decide from the existing labelless-vertex model in `docs/limitations.md`: if a labelless
+  vertex is a documented divergence, add this case to that row; otherwise fix it.
+
+**Gate A (owner review) — PASSED 2026-11-26.** Evidence: the A1–A6 refactors are net −20 production
+lines (A1 +26, A2+A3 −6, A4 −7, A5 −31, A6 −2); A4 is −1,873 SQL bytes over the corpus; `sql-plan`
+unchanged. The separate answer fix `7b71ba45` is +116 lines. Stage A is worth landing alone.
 
 ## Stage B — property keys go through the same authority, still stored as TEXT
 
