@@ -137,11 +137,11 @@ const staticKey = (subject: Expr, canonical: string, text: boolean | undefined, 
 
 /** The tags `storedCompareOn` keys as a whole number (`wholeNumber`) and as a REAL. A fixed compile-time
  *  vocabulary — never user input — so there is no injection surface in the names themselves. */
-const CAST_TO_INT = ['byte', 'short', 'int', 'long', 'bigint', 'datetime', 'duration'];
+const WHOLE_NUMBER_TAGS = ['byte', 'short', 'int', 'long', 'bigint', 'datetime', 'duration'];
 export const CAST_TO_REAL: readonly string[] = ['float', 'double', 'bigdecimal'];
-export const NUMERIC_CAST_TO_INT: readonly string[] = CAST_TO_INT.filter((type) => type !== 'datetime' && type !== 'duration');
+export const NUMERIC_WHOLE_NUMBER_TAGS: readonly string[] = WHOLE_NUMBER_TAGS.filter((type) => type !== 'datetime' && type !== 'duration');
 /** The vtypes that name a `Number` — a `datetime`/`duration` is numeric to SQLite and not to Gremlin. */
-export const NUMERIC_VTYPES: readonly string[] = [...NUMERIC_CAST_TO_INT, ...CAST_TO_REAL];
+export const NUMERIC_VTYPES: readonly string[] = [...NUMERIC_WHOLE_NUMBER_TAGS, ...CAST_TO_REAL];
 
 /**
  * The vtype-aware ordering key for a stored property value: `(value, vtype) -> a correctly-ordered
@@ -256,7 +256,7 @@ function wideBound(value: unknown): Expr | null {
 function byValue(
   op: Extract<Expr, { kind: 'binary' }>['op'], subject: Expr, type: Exclude<SubjectType, { kind: 'static' }>,
   against: Expr, value: unknown, wide: boolean, edge: boolean, otherwise: Expr,
-  intVtypes: readonly string[] = NUMERIC_CAST_TO_INT, realVtypes: readonly string[] = CAST_TO_REAL,
+  intVtypes: readonly string[] = NUMERIC_WHOLE_NUMBER_TAGS, realVtypes: readonly string[] = CAST_TO_REAL,
 ): Expr {
   const cast = (to: SqlType): Expr => wide ? wideKey(subject, value) : to !== 'int' ? { kind: 'cast', arg: subject, to } : intKey(subject, edge);
   if (type.kind === 'perRow') {
@@ -368,7 +368,7 @@ const ordered = (
   // rule. Reading only the bound's VALUE put a UUID bound in the String space, so `values(<uuid>)
   // .is(P.gt(UUID(…)))` matched no stored UUID at all.
   const textSpace = textCarriedType(boundType) ?? 'string';
-  const intVtypes = temporal ? [temporal] : NUMERIC_CAST_TO_INT;
+  const intVtypes = temporal ? [temporal] : NUMERIC_WHOLE_NUMBER_TAGS;
   const realVtypes = temporal ? [] : CAST_TO_REAL;
   // The exact tail rides as decimal TEXT, so its ORDERING bound is cast to the column's numeric class
   // (`compareBound`) — otherwise `CAST(col AS REAL) > '9.99'` would compare a REAL against unconverted
@@ -646,7 +646,7 @@ const sameSpaceEquality = (subject: Expr, bound: Expr, value: unknown, type: Sub
 };
 
 /**
- * THE COMPARE KEY of a value by its tag: a whole-number tag (`CAST_TO_INT` — the integers, datetime, duration)
+ * THE COMPARE KEY of a value by its tag: a whole-number tag (`WHOLE_NUMBER_TAGS` — the integers, datetime, duration)
  * keys through `wholeNumber`, so a carrier past int64 keys as its REAL rather than clamping onto ±2^63; a
  * floating or decimal tag through `CAST AS REAL`; anything else is itself.
  *
@@ -666,14 +666,14 @@ const sameSpaceEquality = (subject: Expr, bound: Expr, value: unknown, type: Sub
 export const storedCompareOn = (vtype: Expr) => (subject: Expr): Expr => {
   const staticVtype = vtype.kind === 'lit' && vtype.source === 'compiler-text' ? vtype.value : undefined;
   if (staticVtype !== undefined) {
-    if (CAST_TO_INT.includes(staticVtype)) return wholeNumber(subject);
+    if (WHOLE_NUMBER_TAGS.includes(staticVtype)) return wholeNumber(subject);
     if (CAST_TO_REAL.includes(staticVtype)) return { kind: 'cast', arg: subject, to: 'real' };
     return subject;
   }
   return {
     kind: 'case',
     whens: [
-      [{ kind: 'in-list', expr: vtype, values: CAST_TO_INT.map(compilerText) }, wholeNumber(subject)],
+      [{ kind: 'in-list', expr: vtype, values: WHOLE_NUMBER_TAGS.map(compilerText) }, wholeNumber(subject)],
       [{ kind: 'in-list', expr: vtype, values: CAST_TO_REAL.map(compilerText) }, { kind: 'cast', arg: subject, to: 'real' }],
     ],
     else: subject,
@@ -704,40 +704,39 @@ export const storedCompareOnce = (vtype: Expr, subject: Expr, fresh: Minter): Ex
  * → `.../util/GremlinValueComparator.java:97-153`), NOT the cross-type total order ORDERABILITY that
  * `order(Scope.local)` uses: an ordering op is defined ONLY within one `Type` bucket (`comparable()` =
  * `ft == st`, `GremlinValueComparator.java:314-363`) and is simply FALSE across buckets (the guard
- * returns false before `compare` would throw). So this is a same-bucket-else-false CASE, not a sort
- * key — the shape `ordered()` already builds for the one-static-side case, one axis over (both per-row).
+ * returns false before `compare` would throw). So this is the bucket guard (`bucketGuard`) AND one compare,
+ * not a sort key.
  *
- * The reachable scalar buckets for a value alias are Number / Date(datetime) / Duration / String /
- * Boolean / UUID; the tag→bucket mapping and the uuid-as-lexical compare mirror `orderability.ts`'s
- * `kindOf`/`cmpNatural` so the ordering and orderability comparators agree on every bucket. Within
- * Number (one bucket across int/real, `GremlinValueComparator.Type.Number`) each side is cast by its OWN
- * storage class (`storedCompareOn`) and SQLite's exact int/real comparison decides — NumberHelper's
- * numeric equivalence. Callers guarantee a runtime `t` tag on both sides (an `unknown`-typed alias
- * declines upstream), so the `else` fires only for a genuine cross-bucket pair.
+ * Each side is keyed by its OWN tag (`storedCompareOn`): a Number by its storage class, so SQLite's exact
+ * int/real comparison decides across int/real (NumberHelper's numeric equivalence); a datetime (epoch) or
+ * duration (total nanos) as a whole number, so order is chronological; a string/char, boolean (0/1), uuid
+ * (lexical, per `orderability.ts`) or binary (its hex carrier orders as unsigned bytes) as itself. The guard
+ * makes a cross-bucket pair FALSE whatever the compare says; a NULL compare stays NULL, as before.
  */
 export const comparableTheta = (
   op: Extract<Expr, { kind: 'binary' }>['op'], valA: Expr, typeA: Expr, valB: Expr, typeB: Expr,
-): Expr => {
-  const inList = (t: Expr, names: readonly string[]): Expr => ({ kind: 'in-list', expr: t, values: names.map(compilerText) });
-  const bothIn = (names: readonly string[]): Expr => and(inList(typeA, names), inList(typeB, names));
-  const bothEq = (name: string): Expr => and(binary('=', typeA, compilerText(name)), binary('=', typeB, compilerText(name)));
-  return {
-    kind: 'case',
-    whens: [
-      // Number: ONE bucket across int/real — cast each side by its own storage class, then compare.
-      [bothIn([...NUMERIC_CAST_TO_INT, ...CAST_TO_REAL]), binary(op, storedCompareOn(typeA)(valA), storedCompareOn(typeB)(valB))],
-      // Date (epoch) and Duration (total nanos) each ride as a whole number → chronological order.
-      [bothEq('datetime'), binary(op, wholeNumber(valA), wholeNumber(valB))],
-      [bothEq('duration'), binary(op, wholeNumber(valA), wholeNumber(valB))],
-      // String/char (lexical), Boolean (0/1) and UUID (lexical, per `orderability.ts`) compare the value.
-      [bothIn(['string', 'char']), binary(op, valA, valB)],
-      [bothEq('boolean'), binary(op, valA, valB)],
-      [bothEq('uuid'), binary(op, valA, valB)],
-      // A Binary's hex carrier orders as its unsigned bytes (`binaryCarrier`).
-      [bothEq('binary'), binary(op, valA, valB)],
-    ],
-    else: compilerFalse,
-  };
+): Expr => and(bucketGuard(typeA, typeB), binary(op, storedCompareOn(typeA)(valA), storedCompareOn(typeB)(valB)));
+
+/** The buckets an ordering is defined within (`GremlinValueComparator.Type`): every Number tag is one bucket,
+ *  String and char one, and each `OWN_BUCKET_VTYPES` tag a bucket on its own. */
+const TEXT_VTYPES: readonly string[] = ['string', 'char'];
+const OWN_BUCKET_VTYPES: readonly string[] = ['datetime', 'duration', 'boolean', 'uuid', 'binary'];
+
+/**
+ * THE ONE COMPARABILITY TABLE: TRUE only where two tags sit in one ordering bucket, else FALSE (a NULL tag
+ * too). `comparableTheta` conjoins it with ONE compare; `sameBucket` uses it as a residual beside a seek.
+ * A compile-time `typeA` picks its row HERE, not in SQLite (`storedCompareOn`'s rule).
+ */
+export const bucketGuard = (typeA: Expr, typeB: Expr): Expr => {
+  const inList = (e: Expr, names: readonly string[]): Expr => ({ kind: 'in-list', expr: e, values: names.map(compilerText) });
+  const rows: readonly (readonly [readonly string[], (e: Expr) => Expr])[] = [
+    [NUMERIC_VTYPES, (e) => inList(e, NUMERIC_VTYPES)],
+    [TEXT_VTYPES, (e) => inList(e, TEXT_VTYPES)],
+    [OWN_BUCKET_VTYPES, (e) => binary('=', e, typeA)],
+  ];
+  const staticA = typeA.kind === 'lit' && typeA.source === 'compiler-text' ? String(typeA.value) : undefined;
+  if (staticA !== undefined) return rows.find(([names]) => names.includes(staticA))?.[1](typeB) ?? compilerFalse;
+  return { kind: 'case', whens: rows.map(([names, test]) => [inList(typeA, names), test(typeB)]), else: compilerFalse };
 };
 
 /**
@@ -755,7 +754,7 @@ export const comparableTheta = (
  * It is `comparableTheta`'s `eq` sibling — the same same-bucket-else-false shape, collapsed to the two
  * arms an EQUALITY needs (numbers as one bucket; every other tag compared only within itself).
  *
- * The numeric guard is `NUMERIC_VTYPES`, NOT `CAST_TO_INT`: `datetime`/`duration` are numeric to SQLite
+ * The numeric guard is `NUMERIC_VTYPES`, NOT `WHOLE_NUMBER_TAGS`: `datetime`/`duration` are numeric to SQLite
  * but are NOT `Number`s to Gremlin, so a `datetime` must not compare-equal to an `int` that happens to
  * share its epoch — they take the same-vtype arm and only compare within their own tag.
  */
@@ -914,11 +913,6 @@ function overOperand(operand: TypedOperand, use: (value: Expr, tag: Expr | null)
 const storedComparable = (operand: TypedOperand, fresh: Minter): Expr =>
   operand.comparable ?? (operand.tag ? overOperand(operand, (value, tag) => comparableOf(value, tag!), fresh) : operand.value);
 
-/** The `comparableTheta` buckets an ordering is defined within: every Number tag is one bucket, String and
- *  char one, and each of these one tag on its own. */
-const TEXT_VTYPES: readonly string[] = ['string', 'char'];
-const OWN_BUCKET_VTYPES: readonly string[] = ['datetime', 'duration', 'boolean', 'uuid', 'binary'];
-
 /**
  * COMPARABILITY'S TYPE GUARD for an ordering between a STORED row (its `vtype` column) and a nested operand:
  * TRUE only where both sit in one `comparableTheta` bucket. An incomparable pair is FALSE, never SQLite's
@@ -931,16 +925,7 @@ const OWN_BUCKET_VTYPES: readonly string[] = ['datetime', 'duration', 'boolean',
  * every per-row tag that may be NULL.
  */
 function sameBucket(vtype: Expr, operand: TypedOperand, fresh: Minter): Expr {
-  const inList = (e: Expr, names: readonly string[]): Expr => ({ kind: 'in-list', expr: e, values: names.map(compilerText) });
-  const guard = (t: Expr): Expr => ({
-    kind: 'case',
-    whens: [
-      [inList(vtype, NUMERIC_VTYPES), inList(t, NUMERIC_VTYPES)],
-      [inList(vtype, TEXT_VTYPES), inList(t, TEXT_VTYPES)],
-      [inList(vtype, OWN_BUCKET_VTYPES), binary('=', t, vtype)],
-    ],
-    else: compilerFalse,
-  });
+  const guard = (t: Expr): Expr => bucketGuard(vtype, t);
   // Only the tag is needed where it is known for every row; the value only where the tag may be inferred.
   const tagOnly: TypedOperand | null = operand.tag && !operand.inferNullTag ? { value: operand.tag, tag: null } : null;
   if (tagOnly) return overOperand(tagOnly, (t) => guard(t), fresh);

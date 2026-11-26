@@ -221,6 +221,10 @@ describe('two value labels compare by type', () => {
   test('not(lt) is gte', () => expect(count(`${VW}.where('a', P.not(P.lt('b'))).count()`)).toBe(1));
   test('a connective', () => expect(count(`${VW}.where('a', P.eq('b').or(P.gt('b'))).count()`)).toBe(1));
   test('neq', () => expect(count(`${VW}.where('a', P.neq('b')).count()`)).toBe(2));
+  // A Number against a String is in no one bucket (`bucketGuard`): the ordering is FALSE, its `P.not` TRUE.
+  const AN = "g.V().has('age').as('v').values('age').as('a').select('v').values('name').as('b').select('v')";
+  test('across buckets an ordering is false', () => expect(count(`${AN}.where('a', P.lt('b')).count()`)).toBe(0));
+  test('across buckets not(lt) is true', () => expect(count(`${AN}.where('a', P.not(P.lt('b'))).count()`)).toBe(4));
   test('a value label against an element label', () =>
     expect(count("g.V().has('age').as('v').values('name').as('a').select('v').where('a', P.eq('v')).count()")).toBe(0));
 });
