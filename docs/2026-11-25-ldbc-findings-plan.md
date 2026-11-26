@@ -554,7 +554,8 @@ Major first. Minor items are kept only when they are cheap and concrete.
   spells the same partition as a 7-arm CASE, which mirrors `kindOf` in `orderability.ts`. The two copies
   already differ on duration: `comparableTheta` keys it through `wholeNumber`, the nested guard compares
   the stored TEXT. That wrong answer is recorded as `duration-stored-comparable`, so it is not new. Fix:
-  one exported bucket table, read by both (see round-5 item 3).
+  one exported bucket table, read by both (see round-5 item 3). ✅ Fixed by round-5 item 3 (`a180b839`):
+  `bucketGuard` is the one table.
 - **Pre-existing wrong answer — `P.not` around an ordering keeps incomparable rows**
   (`src/compiler/rel/predicate.ts` `negated()`). Store `s` in {`'10'`, `10`, `10.00m`, `'x'`, `3`, `true`,
   `1`}. `g.V().has('k','e').as('x').V().has('s', P.not(P.gt(select('x').values('s')))).values('k')`
@@ -584,8 +585,8 @@ Major first. Minor items are kept only when they are cheap and concrete.
 - **Cheap and concrete:**
   - Stale comments after `8211161e`: the `storedValue` doc in `src/compiler/rel/build.ts` (about l.702)
     names the deleted `storedCompare`; `src/compiler/rel/decorate.ts:100` names "`storedCompareOn`'s CAST".
-  - Rename `CAST_TO_INT` (`src/compiler/rel/predicate.ts:141`) to a name such as `WHOLE_NUMBER_TAGS`.
-    Those tags key through `wholeNumber` (CAST AS NUMERIC), not CAST AS INTEGER.
+  - ✅ *(Landed `a180b839`.)* Rename `CAST_TO_INT` (`src/compiler/rel/predicate.ts:141`) to a name such as
+    `WHOLE_NUMBER_TAGS`. Those tags key through `wholeNumber` (CAST AS NUMERIC), not CAST AS INTEGER.
   - The `edgeCriteria` doc (`src/compiler/rel/write.ts`) says the plan is "an `e_pair` seek per pair".
     The measured plan seeks `e_in (tgt=? AND label=? AND src=?)`. Say "an endpoint-index seek".
   - `insertSet` (`src/setwrite.ts`) projects a derived column's placeholder (`exact`) into the
@@ -620,7 +621,11 @@ Order: wrong answer, then the SQL doubling, then cheap fixes, then byte-stable r
      both the semijoin and the residual EXISTS. This is outside the item. The emit spike was not tried.
    - `local(V().has(gt(select(…))).limit(1))` is cubic, also on the base. Recorded as
      `reresource-label-operand-limit`.
-3. **One bucket table for ordering comparability.** Extract `bucketGuard(typeA, typeB)` from `sameBucket`.
+3. ✅ **LANDED (`a180b839`, round-5 item 3, with item 4's rename).** `bucketGuard(typeA, typeB)`
+   (`src/compiler/rel/predicate.ts`) is the one ordering-bucket table; `sameBucket` calls it.
+   `comparableTheta` is `bucketGuard` AND one compare over `storedCompareOn` of each side. Answers are
+   unchanged. SQL on `where('a', P.lt('b'))` falls from 10745 to 8668 B. No baseline moved. Remains: nothing.
+   Original item text: Extract `bucketGuard(typeA, typeB)` from `sameBucket`.
    Then `comparableTheta` = `bucketGuard(typeA, typeB)` AND `op(storedCompareOn(typeA)(valA),
    storedCompareOn(typeB)(valB))`. `storedCompareOn` already keys datetime and duration through
    `wholeNumber`, every Number tag by its class, and passes the other tags raw, so each arm computes what
@@ -628,7 +633,7 @@ Order: wrong answer, then the SQL doubling, then cheap fixes, then byte-stable r
    `where('a', gt('b'))` emits one compare, not seven. Do it after item 2 (same file).
 4. ✅ **LANDED (`d9befdba`, round-5 item 4), except the rename.** The two stale comments and the
    `edgeCriteria` doc are fixed. `insertSet`'s `cells` CTE holds only the cells a column or a derivation
-   reads (`src/setwrite.ts`). Remains: the `CAST_TO_INT` rename (`src/compiler/rel/predicate.ts:140`).
+   reads (`src/setwrite.ts`). The `CAST_TO_INT` rename landed with item 3 (`a180b839`): it is now `WHOLE_NUMBER_TAGS`. Remains: nothing.
 5. **`storedCompareOnce` is `overOperand` specialised — delete it.** `storedCompareOnce`
    (`src/compiler/rel/predicate.ts` about l.688, one caller `modulator.ts:284`) binds `(subject, vtype)`
    once in a VALUES row. `overOperand` (about l.883) does the same. Call `overOperand` directly. About 9
