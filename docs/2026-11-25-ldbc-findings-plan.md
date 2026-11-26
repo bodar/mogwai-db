@@ -295,6 +295,13 @@ byte-stable reuse.
    item above). Linear today, but common reach (range filters, LDBC dates). It is a range derivation
    (Calcite `Sarg`, `vendor/calcite/core/src/main/java/org/apache/calcite/rex/RexSimplify.java`), and
    it can use `disjuncts` from round 2.
+   ✅ **Landed 2026-11-26 (`6fb4f9fe`, `34d6d6d1`).** `storedRange` (`src/compiler/rel/predicate.ts`)
+   lowers an ordered predicate on a stored property to a range in SQLite storage-class order plus a
+   vtype residual, not a `CASE`. The owner seek reads the range through `(key, value)`; a correlated
+   check hides it (`unindexed`) and keeps `(node, key)`. An element pinned by id (`ElementFacts.pinned`,
+   `src/rel/passes/semijoin.ts`) gets no lifted seek. Tests: `test/compiler/stored-range.exec.test.ts`,
+   `test/plan-stability.test.ts`. Selective ranges are now near flat from 1k to 8k; wide ones are at
+   most 9.8×. Remains: nothing.
 8. **Prerequisite for item 9: `UUID()` returns a value** (`docs/outstanding-work.md` `uuid-literal`).
    `g.inject(UUID())` returns `[]` today. Lower it to a random v4 value tagged `uuid`, or decline it
    with a limitations line.
