@@ -486,6 +486,10 @@ then byte-stable reuse.
    1k/8k: 10.5 / 74 ms (7.1×), was 65×. Remains: nothing.
 6. ~~Land round-3 item 5~~ — landed as `1c5020d9`. Its two review follow-ups (test timeout, trade comment) join item 7.
 7. **The cheap and concrete round-3 follow-ups** above.
+   ✅ **Landed 2026-11-26 (`325506c2`).** All eight cheap items and the two item-5 follow-ups. A derived
+   `insertSet` column reads its cells off one `MATERIALIZED` CTE (`src/setwrite.ts`). The storage-class edge
+   is added only by the seek (`StorageSlice`, `src/rel/passes/semijoin.ts` `indexable`). One `membership`
+   extractor serves `pinnedBy` and `reached`. No answer changes, no baseline moved. Remains: nothing.
 
 ### Reuse sweep (byte-stable unless said)
 
