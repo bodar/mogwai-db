@@ -40,7 +40,7 @@ import { BRANCH_KINDS, FILTER_HOSTS, nondeterministic } from '../ir/step.ts';
 import type { ChildWrite } from '../unsupported.ts';
 import { eachChildChain, valueNodes, type BodyReader } from '../ir/walk.ts';
 import { pastBudget } from '../../sql/kernel/budget.ts';
-import { dictScan, internNames, isConstantNames, nameIds, type CreationNames } from './names.ts';
+import { internNames, isConstantNames, nameId, nameIds, type CreationNames } from './names.ts';
 
 /** The presence of a computed match value ADMITTED by its `'unknown'` check — the two merge carriers
  *  below refuse an unknown presence before they reach here, so this is that admission read back. */
@@ -4135,30 +4135,21 @@ function endpointSeek(driving: Rel, sides: readonly ('src' | 'tgt')[], label: bo
     id: fresh('p'), input: scan, channels: [], type: typeOf(meta('se_id', 'int'), meta('se_src', 'int'), meta('se_label', 'int'), meta('se_tgt', 'int')),
     exprs: [['se_id', col(scan.id, 'id')], ['se_src', col(scan.id, 'src')], ['se_label', col(scan.id, 'label')], ['se_tgt', col(scan.id, 'tgt')]],
   });
-  const labelId = (): Expr => {
-    const names = dictScan('labels', fresh, ['sl', 'rsl']);
-    const named = make.filter({ id: fresh('f'), input: names, channels: [], type: names.type, pred: eq(col(names.id, 'name'), col(driving.id, 'lbl')) });
-    return { kind: 'scalar', plan: make.project({ id: fresh('p'), input: named, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(named.id, 'id')]] }) };
-  };
   // Non-empty: every caller names at least one side.
-  const on = conjoin([...sides.map((side) => eq(col(edges.id, `se_${side}`), col(driving.id, side))), ...(label ? [eq(col(edges.id, 'se_label'), labelId())] : [])])!;
+  const on = conjoin([...sides.map((side) => eq(col(edges.id, `se_${side}`), col(driving.id, side))),
+    ...(label ? [eq(col(edges.id, 'se_label'), nameId('labels', col(driving.id, 'lbl'), fresh, ['sl', 'rsl']))] : [])])!;
   return seekOwners(driving, edges, on, 'se_id', fresh);
 }
 
 /** The LABEL seek of a vertex search that names a label (`label`, a name per driver): the vertices
- *  carrying it, through `labels(name)` and `vl_label`. */
+ *  carrying it — the name's id read once per driver (`nameId`), then `vl_label`. */
 function labelSeek(driving: Rel, label: (driver: RelId) => Expr, fresh: Minter): Rel {
-  const names = dictScan('labels', fresh, ['sl', 'rsl']);
   const owners = make.scan({ id: fresh('sv'), table: 'vertex_labels', alias: fresh('rsv'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
-  const labelled = make.join({
-    id: fresh('j'), left: names, right: owners, join: 'inner', ordered: true, channels: [], on: eq(col(owners.id, 'label'), col(names.id, 'id')),
-    type: typeOf(...names.type.cols, ...VERTEX_LABEL_COLS),
-  });
   const index = make.project({
-    id: fresh('p'), input: labelled, channels: [], type: typeOf(meta('sl_name', 'text'), meta('sl_node', 'int')),
-    exprs: [['sl_name', col(labelled.id, 'name')], ['sl_node', col(labelled.id, 'node')]],
+    id: fresh('p'), input: owners, channels: [], type: typeOf(meta('sl_label', 'int'), meta('sl_node', 'int')),
+    exprs: [['sl_label', col(owners.id, 'label')], ['sl_node', col(owners.id, 'node')]],
   });
-  return seekOwners(driving, index, eq(col(index.id, 'sl_name'), label(driving.id)), 'sl_node', fresh);
+  return seekOwners(driving, index, eq(col(index.id, 'sl_label'), nameId('labels', label(driving.id), fresh, ['sl', 'rsl'])), 'sl_node', fresh);
 }
 
 /**
@@ -5267,9 +5258,8 @@ export function mergeVFromMap(
     // of a collection label, `searchVerticesLabelConstraint`'s AND (`mapLabelNames`).
     const names = mapLabelNames(col(driver, MAP_COL), fresh);
     const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rl'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
-    const lb = dictScan('labels', fresh, ['lb', 'rb']);
-    const vlJoin = make.join({ id: fresh('j'), left: vl, right: lb, join: 'inner', on: eq(col(vl.id, 'label'), col(lb.id, 'id')), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int'), meta('id', 'int'), meta('name', 'text')) });
-    const vlMatch = make.filter({ id: fresh('f'), input: vlJoin, channels: [], type: vlJoin.type, pred: and(eq(col(vlJoin.id, 'node'), candId), eq(col(vlJoin.id, 'name'), col(names.id, 'name'))) });
+    const vlMatch = make.filter({ id: fresh('f'), input: vl, channels: [], type: vl.type,
+      pred: and(eq(col(vl.id, 'node'), candId), eq(col(vl.id, 'label'), nameId('labels', col(names.id, 'name'), fresh, ['lb', 'rb']))) });
     const labelProbe = make.project({ id: fresh('p'), input: vlMatch, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
     // A pair the candidate FAILS: a string property it lacks; a label name it does not carry. (A T.id
     // pair cannot reach here — the guard above refused any map holding one.) `allMatch` = neither.
@@ -5597,11 +5587,8 @@ export function mergeEFromMap(
     const propsOk: Expr = { kind: 'exists', negated: true, plan: unsat };
     // The label: no `T.label` in the map matches any label, else the candidate's label must be that name.
     const lblCol = col(driver, 'lbl');
-    const lb = dictScan('labels', fresh, ['t', 'rb']);
-    const lblFilter = make.filter({ id: fresh('f'), input: lb, channels: [], type: lb.type, pred: eq(col(lb.id, 'name'), lblCol) });
-    const lblIds = make.project({ id: fresh('p'), input: lblFilter, channels: [], type: ID_TYPE, exprs: [['id', col(lblFilter.id, 'id')]] });
     const labelOk: Expr = or({ kind: 'binary', op: 'is', left: lblCol, right: compilerNull('text') },
-      { kind: 'in-query', expr: col(cand, 'clabel'), plan: lblIds, negated: false });
+      eq(col(cand, 'clabel'), nameId('labels', lblCol, fresh, ['t', 'rb'])));
     // The endpoints: a side the map did not name does not narrow; one it named must equal the candidate's.
     const outOk: Expr = or(eq(col(driver, 'hasOut'), compilerInt(0)), eq(col(cand, 'csrc'), col(driver, 'src')));
     const inOk: Expr = or(eq(col(driver, 'hasIn'), compilerInt(0)), eq(col(cand, 'ctgt'), col(driver, 'tgt')));
@@ -5681,13 +5668,9 @@ export function mergeEFromMap(
       ['name', { kind: 'call', fn: 'COALESCE', args: [mapLabelScalar(col(wanted.id, MAP_COL)), text(fallbackLabel)] }]],
   });
   const labelling = bind(wantedLbl, true);
-  const distinctNames = make.distinct({ id: fresh('d'), channels: [], type: typeOf(meta('name', 'text')),
-    input: make.project({ id: fresh('p'), input: labelling, channels: [], type: typeOf(meta('name', 'text')), exprs: [['name', col(labelling.id, 'name')]] }) });
-  const labelsTable = dictScan('labels', fresh, ['t', 'wt']);
-  bind(insert({ target: labelsTable, cols: ['name'], source: distinctNames, channels: [], type: typeOf(),
-    onConflict: { target: ['name'], set: [['name', col(EXCLUDED, 'name')]] }, returning: [] }));
-  const lbLookup = dictScan('labels', fresh, ['t', 'rb']);
-  const withLid = make.join({ id: fresh('j'), left: labelling, right: lbLookup, join: 'inner', on: eq(col(labelling.id, 'name'), col(lbLookup.id, 'name')), channels: [],
+  // The relation form returns each interned name with its id, so the wanted rows join it by name.
+  const labelRows = internNames('labels', labelling, bind, fresh)!;
+  const withLid = make.join({ id: fresh('j'), left: labelling, right: labelRows, join: 'inner', on: eq(col(labelling.id, 'name'), col(labelRows.id, 'name')), channels: [],
     type: typeOf(meta('word', 'int'), meta('src', 'int'), meta('tgt', 'int'), meta(MAP_COL, 'json', true), meta('name', 'text'), meta('lid', 'int'), meta('lname', 'text')) });
 
   // THE CREATE — an edge per wanted tuple, in `word` order so the assigned rowids recover their tuple.

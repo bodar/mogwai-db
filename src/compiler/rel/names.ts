@@ -101,6 +101,17 @@ export function withNames(
 }
 
 /**
+ * The id of ONE name in `dict`, as a scalar: `(SELECT id FROM labels WHERE name = <name>)` — one UNIQUE
+ * seek, correlated when `name` reads a column (a merge driver's map label), and NULL for a name never
+ * interned, so an `=` against it holds for no row.
+ */
+export function nameId(dict: NameDict, name: Expr, fresh: Minter, hints?: ScanHints): Expr {
+  const scan = dictScan(dict, fresh, hints);
+  const named = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: eq(col(scan.id, 'name'), name) });
+  return { kind: 'scalar', plan: make.project({ id: fresh('p'), input: named, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(named.id, 'id')]] }) };
+}
+
+/**
  * A creation's names as it WRITES them: the compile-time names (a constant creation, cross-joined onto
  * every new row), or the `(o, name)` relation that gives each traverser its own — a label ASSIGNMENT,
  * joined onto the new rows by position.

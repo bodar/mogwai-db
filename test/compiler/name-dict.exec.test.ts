@@ -72,3 +72,37 @@ describe('nameOf / withNames — an id decodes to its name', () => {
     expect(values(run(store, 'g.E().label()')).sort()).toEqual(['created', 'created', 'created', 'created', 'knows', 'knows']);
   });
 });
+
+describe('nameId — one name as its id, per merge driver', () => {
+  test('a merge search by label seeks the interned id; an unknown label matches nothing and creates', () => {
+    const store = seededStore();
+    expect(values(run(store, "g.inject([(T.label):'person']).mergeV().count()"))).toEqual([4]);
+    expect(values(run(store, "g.inject([(T.label):'nope']).mergeV().label()"))).toEqual(['nope']);
+    expect(values(run(store, "g.inject([(T.label):'nope']).mergeV().count()"))).toEqual([1]);
+    expect(values(run(store, "g.inject([(T.label):['person','x'],name:'marko']).mergeV().label()"))).toEqual(['person']);
+  });
+
+  test('a map label that is not a string is one name, written once and found again', () => {
+    const store = seededStore();
+    expect(values(run(store, 'g.inject([(T.label):5,k:1]).mergeV().label()'))).toEqual(['5']);
+    expect(values(run(store, 'g.inject([(T.label):5,k:1]).mergeV().count()'))).toEqual([1]);
+    expect(values(run(store, "g.V().hasLabel('5').count()"))).toEqual([1]);
+  });
+
+  test('a mergeE label is interned once per name and its id joined by name', () => {
+    const store = seededStore();
+    const kk = "[(T.label):'kk',(Direction.OUT):1,(Direction.IN):2]";
+    expect(values(run(store, `g.inject(${kk},${kk},[(T.label):'knows',(Direction.OUT):1,(Direction.IN):2]).mergeE().label()`))).toEqual(['kk', 'kk', 'knows']);
+    expect(values(run(store, `g.inject(${kk}).mergeE().count()`))).toEqual([1]);
+    expect(values(run(store, "g.E().hasLabel('kk').count()"))).toEqual([1]);
+    expect(store.query("SELECT count(*) AS n FROM labels WHERE name IN ('kk', 'knows')", [])).toEqual([{ n: 2 }]);
+  });
+
+  test('a per-vertex mergeE self-loop resolves its constant label once per driver', () => {
+    const store = seededStore();
+    const q = "g.V().as('d').mergeE([(T.label):'self',(Direction.from):Merge.outV,(Direction.to):Merge.inV]).option(Merge.outV,__.select('d')).option(Merge.inV,__.select('d')).count()";
+    expect(values(run(store, q))).toEqual([6]);
+    expect(values(run(store, q))).toEqual([6]);
+    expect(values(run(store, "g.E().hasLabel('self').count()"))).toEqual([6]);
+  });
+});
