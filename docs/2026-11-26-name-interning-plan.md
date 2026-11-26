@@ -164,6 +164,13 @@ rows (2.5 MB). The key is stored three times per row (table and two indexes): ab
   `write.ts`. Fix the header comment of `test/compiler/element-id-param.exec.test.ts` (`labelIds` →
   `nameIds`).
 
+**A-f1, A-f3, A-f5 and the A-f6 test header landed (648eec92).** `dictScan` is private to
+`src/compiler/rel/names.ts`, so `tsc` rejects a bypass of the name authority. The `nameId` docstring
+says the result is NULL for an unknown name and is safe only in a positive `=`; mergeE's `labelOk`
+points at it. `ScanHints` is gone from the `names.ts` signatures (SQL aliases only, no baseline moved).
+A new test in `test/compiler/name-dict.exec.test.ts` covers mergeE with an unknown label. **Remains:**
+nothing for these items. A-f2, A-f4 and the A-f6 `labelListed` lambda are separate items.
+
 **Open item from 7b71ba45:** `merge-map-label-seek` (see A1 above and `docs/outstanding-work.md`).
 
 **Depth gaps seen in review (pre-existing, not Stage A scope).** These decline on trunk before and after
