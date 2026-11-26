@@ -611,8 +611,9 @@ Order: wrong answer, then the SQL doubling, then cheap fixes, then byte-stable r
    `wholeNumber`, every Number tag by its class, and passes the other tags raw, so each arm computes what
    it does today. A cross-bucket pair is false in both forms; a NULL stays NULL. About 12 fewer lines, and
    `where('a', gt('b'))` emits one compare, not seven. Do it after item 2 (same file).
-4. **The cheap round-4 follow-ups** above: the two stale comments, the `CAST_TO_INT` rename, the
-   `edgeCriteria` doc, and the unread `cells` column.
+4. ✅ **LANDED (`d9befdba`, round-5 item 4), except the rename.** The two stale comments and the
+   `edgeCriteria` doc are fixed. `insertSet`'s `cells` CTE holds only the cells a column or a derivation
+   reads (`src/setwrite.ts`). Remains: the `CAST_TO_INT` rename (`src/compiler/rel/predicate.ts:140`).
 5. **`storedCompareOnce` is `overOperand` specialised — delete it.** `storedCompareOnce`
    (`src/compiler/rel/predicate.ts` about l.688, one caller `modulator.ts:284`) binds `(subject, vtype)`
    once in a VALUES row. `overOperand` (about l.883) does the same. Call `overOperand` directly. About 9
