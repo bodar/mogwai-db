@@ -3,7 +3,7 @@ import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../elem.ts';
-import { and, eq, jsonExtract, meta, rowNumberWindow, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
+import { and, eq, jsonExtract, existsOf, meta, rowNumberWindow, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 import type { Binding } from '../../rel/plan.ts';
 import { foreignPayloadCols, landedCols } from './foreign.ts';
 import { boundPropertyRelation } from './property.ts';
@@ -59,11 +59,6 @@ const inlineNames = (labels: readonly Arg[]): string[] =>
  *  opens with. `cte` is this read's own fresh copy of the landed relation. */
 const rowById = (cte: Rel, id: Expr, fresh: Minter): Rel =>
   make.filter({ id: fresh('brow'), input: cte, channels: [], type: cte.type, pred: eq(col(cte.id, 'id'), id) });
-
-/** Wrap a member-matching relation as a correlated `EXISTS` over the landed row — the shared tail of the
- *  `has`/`hasLabel` rejoins. */
-const existsOf = (matched: Rel, fresh: Minter): Expr =>
-  ({ kind: 'exists', negated: false, plan: make.project({ id: fresh('bex'), input: matched, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] }) });
 
 export function boundGraph(vertexBinding: string | null, edgeBinding: string | null): GraphSource {
   // Each read REFERENCES the landed relation by NAME — a `Ref` to its Plan binding, which

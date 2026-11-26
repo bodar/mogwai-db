@@ -10,7 +10,7 @@ import { ValueParseError } from '../../gremlin/coerce.ts';
 import { mapSlot, valueNodeOf, type TypeNode, type ValueNode } from '../../gremlin/types.ts';
 import { stringifyExact } from '../../json-exact.ts';
 import { isDirectionArg, isTokenArg } from '../../gremlin/frontend.ts';
-import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, fencedWhereSelfContained, firstArrival, firstOf, rowNumberWindow, jsonExtract, jsonField, jsonOf, listNode, mapNode, seedPerOrigin, meta, presenceFenced, typeOf, typedNode, valueFamily, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
+import { and, byEncounter, originOf, coalesce, collectedArray, collectedOf, eq, explodeMembers, fenced, fencedWhereSelfContained, firstArrival, firstOf, rowNumberWindow, jsonExtract, jsonField, jsonOf, listNode, mapNode, seedPerOrigin, existsOf, meta, presenceFenced, typeOf, typedNode, valueFamily, VALUEMAP_PAIR, withPayload, type Minter } from './build.ts';
 import { LIST_COL, listNodeExpr } from './list.ts';
 import { propertyNode } from './property.ts';
 import { byExpr, byNode, isProductiveBy, memberNodeOf, modulations, productivityFilter, type Modulation } from './modulator.ts';
@@ -1578,13 +1578,7 @@ export function mapKey(input: Rel, key: string, valOf: MapOf, fresh: Minter): Re
   // spends the `map` column, so a filter after it would reference a column that no longer exists.
   const kept = make.filter({
     id: fresh('kg'), input: rel, channels: rel.channels, type: rel.type,
-    pred: {
-      kind: 'exists', negated: false,
-      plan: make.project({
-        id: fresh('kp'), channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]],
-        input: make.filter({ id: fresh('kf'), input: probePairs, channels: [], type: probePairs.type, pred: matching(probePairs) }),
-      }),
-    },
+    pred: existsOf(make.filter({ id: fresh('kf'), input: probePairs, channels: [], type: probePairs.type, pred: matching(probePairs) }), fresh),
   });
   const valuePairs = pairsOf(col(kept.id, MAP_COL), fresh);
   // The value and the order are written in the inner FILTER's scope, not the explode's — every node
@@ -1682,13 +1676,7 @@ export function mapSelect(
   // a map FILTERS on a missing key rather than binding a null entry (the `EmptyTraverser` above).
   const present = keys.map((key): Expr => {
     const pairs = pairsOf(map, fresh);
-    return {
-      kind: 'exists', negated: false,
-      plan: make.project({
-        id: fresh('sp'), channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]],
-        input: make.filter({ id: fresh('sf'), input: pairs, channels: [], type: pairs.type, pred: matching(pairs, key) }),
-      }),
-    };
+    return existsOf(make.filter({ id: fresh('sf'), input: pairs, channels: [], type: pairs.type, pred: matching(pairs, key) }), fresh);
   });
   const kept = make.filter({
     id: fresh('sg'), input: rel, channels: rel.channels, type: rel.type,

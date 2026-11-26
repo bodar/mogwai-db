@@ -24,7 +24,7 @@ import {
   LABEL_ITEM_NAME, LABEL_MEMBER_NAME, LABEL_NAME, type NameRules, validateLabel, validatePropertyKey,
 } from '../../gremlin/validate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
-import { and, carriedCols, eq, explodeMembers, fenced, LABEL_OWNERS, meta, PROPERTIES, storedForm, presenceFenced, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
+import { and, carriedCols, eq, explodeMembers, fenced, LABEL_OWNERS, existsOf, meta, PROPERTIES, storedForm, presenceFenced, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
 import { substRelId } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import { scanColumnOf } from './source.ts';
@@ -4042,8 +4042,7 @@ function computedMatch(
       pred: and(and(eq(col(scan.id, spec.owner), col(candidate, 'id')), eq(col(scan.id, 'key'), compilerText(key))),
         typedValueEq(col(scan.id, 'value'), col(scan.id, 'vtype'), col(driver, cvCol(i)), col(driver, ptCol(i)))),
     });
-    const probe = make.project({ id: fresh('p'), input: found, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-    return or(productive(driver, i, false), { kind: 'exists', plan: probe, negated: false } as Expr);
+    return or(productive(driver, i, false), existsOf(found, fresh));
   })) ?? always;
   const arms = cKeys.flatMap((key, i) => propertySeeks(elem, (narrow) => drivers((rel) => and(drives(i)(rel), narrow?.(rel))),
     () => compilerText(key), (driver) => col(driver, cvCol(i)), (driver) => col(driver, ptCol(i)), fresh));
@@ -5339,21 +5338,19 @@ export function mergeVFromMap(
       pred: and(and(eq(col(vp.id, 'node'), candId), eq(col(vp.id, 'key'), keyV(pairs))),
         typedValueEq(col(vp.id, 'value'), col(vp.id, 'vtype'), valV(pairs), valT(pairs))),
     });
-    const propProbe = make.project({ id: fresh('p'), input: vpMatch, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
     // A `T.label` NAME satisfied by the candidate carrying it (hasLabel over vertex_labels) — every name
     // of a collection label, `searchVerticesLabelConstraint`'s AND (`mapLabelNames`).
     const names = mapLabelNames(col(driver, MAP_COL), fresh);
     const vl = labelOwners('vertex', fresh, candId);
     const vlMatch = make.filter({ id: fresh('f'), input: vl, channels: [], type: vl.type,
       pred: eq(col(vl.id, 'label'), nameId('labels', col(names.id, 'name'), fresh)) });
-    const labelProbe = make.project({ id: fresh('p'), input: vlMatch, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
     // A pair the candidate FAILS: a string property it lacks; a label name it does not carry. (A T.id
     // pair cannot reach here — the guard above refused any map holding one.) `allMatch` = neither.
     const unsat = make.filter({
       id: fresh('f'), input: pairs, channels: [], type: pairs.type,
-      pred: and(eq(keyT(pairs), compilerText('string')), { kind: 'exists', negated: true, plan: propProbe }),
+      pred: and(eq(keyT(pairs), compilerText('string')), existsOf(vpMatch, fresh, true)),
     });
-    const unlabelled = make.filter({ id: fresh('f'), input: names, channels: [], type: names.type, pred: { kind: 'exists', negated: true, plan: labelProbe } });
+    const unlabelled = make.filter({ id: fresh('f'), input: names, channels: [], type: names.type, pred: existsOf(vlMatch, fresh, true) });
     return and({ kind: 'exists', plan: unsat, negated: true }, { kind: 'exists', plan: unlabelled, negated: true });
   };
   const candidates = (): Rel => {
@@ -5656,12 +5653,11 @@ export function mergeEFromMap(
       pred: and(and(eq(col(ep.id, spec.owner), candId), eq(col(ep.id, 'key'), keyV(pairs))),
         typedValueEq(col(ep.id, 'value'), col(ep.id, 'vtype'), valV(pairs), valT(pairs))),
     });
-    const propProbe = make.project({ id: fresh('p'), input: epMatch, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
     // A STRING-key pair the candidate FAILS. (A `T.label`/`Direction`/`T.id` pair cannot reach here — the
     // label/endpoints narrow via columns below, and a `T.id` was refused by the guard.)
     const unsat = make.filter({
       id: fresh('f'), input: pairs, channels: [], type: pairs.type,
-      pred: and(eq(keyT(pairs), compilerText('string')), { kind: 'exists', negated: true, plan: propProbe }),
+      pred: and(eq(keyT(pairs), compilerText('string')), existsOf(epMatch, fresh, true)),
     });
     const propsOk: Expr = { kind: 'exists', negated: true, plan: unsat };
     // The label: no `T.label` in the map matches any label, else the candidate's label must be that name.

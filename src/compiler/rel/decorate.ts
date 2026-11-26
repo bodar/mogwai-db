@@ -2,7 +2,7 @@ import { col, compilerInt, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Binding } from '../../rel/plan.ts';
-import { and, carriedCols, elementCols, eq, jsonOf, meta, renumber, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
+import { and, carriedCols, elementCols, eq, jsonOf, existsOf, meta, renumber, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 import { type GraphSource } from './source.ts';
 
 // ---------- DecorateGraph — a GraphSource that answers ONE synthetic property off a landed relation ----------
@@ -79,8 +79,6 @@ export function decorateGraph(base: GraphSource, run: number, round: number, cha
     const r = ref(fresh);
     return make.filter({ id: fresh('drow'), input: r, channels: [], type: r.type, pred: eq(col(r.id, 'id'), id) });
   };
-  const existsOf = (matched: Rel, fresh: Minter): Expr =>
-    ({ kind: 'exists', negated: false, plan: make.project({ id: fresh('dex'), input: matched, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] }) });
 
   return {
     ...base,

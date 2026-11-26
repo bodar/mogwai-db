@@ -15,7 +15,7 @@ import type { ChildSeam, RootedRead } from './child.ts';
 import type { RelFraming } from './framing.ts';
 import { raiseInRow } from '../../rel/raise.ts';
 import { mapHoldsRowids, mapNodePayload } from './map.ts';
-import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedColumn, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, seedPerOrigin, jsonOf, listNode, mapNode, meta, typedNode, typeOf, valueFamily, withPayload, type Minter } from './build.ts';
+import { byEncounter, carriedCols, originOf, coalesce, collectedArray, collectedOf, EMPTY_ARRAY, explodeMembers, fenced, firstOf, firstRootedColumn, firstRootedValue, rowNumberWindow, jsonField, jsonMember, jsonMemberByTypeof, seedPerOrigin, jsonOf, listNode, mapNode, existsOf, meta, typedNode, typeOf, valueFamily, withPayload, type Minter } from './build.ts';
 import { comparabilityClass, predicateExpr, storedCompareOn, SUBJECT_UNKNOWN, type NestedScalar } from './predicate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
 import { realJsonText, stringifyExact } from '../../json-exact.ts';
@@ -642,13 +642,9 @@ export function listMemberOp(
     const pred = memberPredicate(memberPayload(of, members), args[0], resolveScalar);
     if (!pred) return null;
     const failing: Expr = { kind: 'binary', op: 'is not', left: pred, right: compilerInt(1) };
-    const probe = (test: Expr): Rel => make.project({
-      id: fresh('mp'), input: make.filter({ id: fresh('mf'), input: members, channels: [], type: members.type, pred: test }),
-      channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]],
-    });
-    const keep: Expr = step.name === 'all'
-      ? { kind: 'exists', plan: probe(failing), negated: true }
-      : { kind: 'exists', plan: probe(pred), negated: step.name === 'none' };
+    const exists = (test: Expr, negated: boolean): Expr =>
+      existsOf(make.filter({ id: fresh('mf'), input: members, channels: [], type: members.type, pred: test }), fresh, negated);
+    const keep = step.name === 'all' ? exists(failing, true) : exists(pred, step.name === 'none');
     return { rel: make.filter({ id: fresh('lf'), input: rel, channels: rel.channels, type: rel.type, pred: keep }), of };
   }
 

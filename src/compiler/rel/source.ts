@@ -11,7 +11,7 @@ import { CONSTANT } from './predicate.ts';
 import { valueIsKind } from './receiver.ts';
 import type { ValueEvidence } from './tag.ts';
 import { propertyRelation } from './property.ts';
-import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, LABEL_OWNERS, meta, NODE_COLS, PROPERTIES, renumber, storedOrderKey, storedPayload, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
+import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, LABEL_OWNERS, existsOf, meta, NODE_COLS, PROPERTIES, renumber, storedOrderKey, storedPayload, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 import { labelOwners, nameIds, nameOf, ownedNames, withNames } from './names.ts';
 
 // ---------- GraphSource: one traversal vocabulary over two physical graph shapes ----------
@@ -582,8 +582,7 @@ export const BaseGraph: GraphSource = {
     // `e_out`), and SQLite expands the whole label POPULATION into index probes PER OUTER ROW — measured
     // 66× for 8× the rows on `out('created').in('created').hasLabel('person')`. A probe costs one seek.
     const mine = labelled(labelOwners(kind, fresh, id));
-    const probe = make.project({ id: fresh('p'), input: mine, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-    return { kind: 'exists', plan: probe, negated: false };
+    return existsOf(mine, fresh);
   },
 
   hasPropertyPredicate: (kind, id, key, valuePred, fresh) => {
@@ -601,8 +600,7 @@ export const BaseGraph: GraphSource = {
       id: fresh('f'), input: props, channels: [], type: props.type,
       pred: matches ? and(base, matches) : base,
     });
-    const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-    return { kind: 'exists', plan: probe, negated: false };
+    return existsOf(matching, fresh);
   },
 
   hasTokenPredicate: (kind, id, token, valuePred, fresh, idQuery, row) => {
@@ -635,10 +633,9 @@ export const BaseGraph: GraphSource = {
               return { kind: 'in-query', expr: id, plan: owners, negated };
             }
             const matching = make.filter({ id: fresh('f'), input: ids, channels: [], type: ids.type, pred: and(eq(col(ids.id, 'id'), id), positive) });
-            const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
             // `NOT EXISTS` of the positive probe is the exact complement — as `NOT IN` was, it holds for
             // an id no row carries too.
-            return { kind: 'exists', plan: probe, negated };
+            return existsOf(matching, fresh, negated);
           }
         }
       }
@@ -647,8 +644,7 @@ export const BaseGraph: GraphSource = {
       const matches = valuePred(external);
       if (!matches) return null;
       const matching = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: and(eq(col(scan.id, 'id'), id), matches) });
-      const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-      return { kind: 'exists', plan: probe, negated: false };
+      return existsOf(matching, fresh);
     }
     // `has(T.label, P)`: `P` is an arbitrary predicate over the decoded NAME, so it tests the owner's
     // decoded label rows rather than looking a name up.
@@ -656,8 +652,7 @@ export const BaseGraph: GraphSource = {
     const matches = valuePred(col(joined.id, 'name'));
     if (!matches) return null;
     const matching = make.filter({ id: fresh('f'), input: joined, channels: [], type: joined.type, pred: matches });
-    const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-    return { kind: 'exists', plan: probe, negated: false };
+    return existsOf(matching, fresh);
   },
 
   // The COMPACT correlated external id (`nodeExternalId`/the edge scalar) — an id is unique, so the
@@ -734,8 +729,7 @@ export const BaseGraph: GraphSource = {
   hasAnyLabel: (kind, id, fresh) => {
     // A vertex in practice (an edge always carries one): one seek on the owner's own label rows.
     const mine = labelOwners(kind, fresh, id);
-    const probe = make.project({ id: fresh('lp'), input: mine, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-    return { kind: 'exists', plan: probe, negated: false };
+    return existsOf(mine, fresh);
   },
 
   // One path for both kinds: an edge has one `labelOwners` row, so its array is the one name.

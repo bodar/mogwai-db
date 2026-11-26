@@ -270,6 +270,11 @@ export const EDGE_COLS = [meta('id', 'int'), meta('uid', 'text', true), meta('sr
 export type Minter = (hint: string) => RelId;
 export const minter = (): Minter => { let n = 0; return (hint) => relId(`${hint}${n++}`); };
 
+/** `[NOT] EXISTS (SELECT 1 FROM matched)` — the one existence probe. The projection drops `matched`'s
+ *  columns so the subquery says what it tests (presence) and nothing else; SQLite stops at the first row. */
+export const existsOf = (matched: Rel, fresh: Minter, negated = false): Expr =>
+  ({ kind: 'exists', negated, plan: make.project({ id: fresh('p'), input: matched, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] }) });
+
 /** The two element tables' property side-tables, and the column each keys its owner by. The
  *  asymmetry (`node` vs `edge`) is the physical schema's, so it lives beside the `Scan` tables. */
 export const PROPERTIES = {

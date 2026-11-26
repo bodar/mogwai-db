@@ -1,6 +1,6 @@
 import * as make from '../../../rel/factory.ts';
 import { col, compilerInt, compilerNull, compilerText, type Expr } from '../../../rel/expr.ts';
-import { and, labelSetArgs, meta, or, typeOf, type Minter } from '../build.ts';
+import { and, labelSetArgs, existsOf, meta, or, typeOf, type Minter } from '../build.ts';
 import type { Rel } from '../../../rel/rel.ts';
 import type { RelFraming } from '../framing.ts';
 import type { GraphSource, IdQuery } from '../source.ts';
@@ -452,14 +452,11 @@ function scalarMembership(subject: TypedOperand, members: Rel, member: TypedOper
   const set = make.project({
     id: fresh('cmk'), input: tagged, channels: [], type: typeOf(meta('f', 'text', true), meta('k', 'any', true)), exprs: [['f', mf], ['k', mk]],
   });
-  const nulls = make.project({
-    id: fresh('cmn'), channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]],
-    input: make.filter({ id: fresh('cmz'), input: members, channels: [], type: members.type, pred: isNull(member.value) }),
-  });
+  const nulls = existsOf(make.filter({ id: fresh('cmz'), input: members, channels: [], type: members.type, pred: isNull(member.value) }), fresh);
   const test = (value: Expr, tag: Expr | null): Expr => {
     const [f, k] = typedValueKey(value, tag ?? inferredVtype(value));
     const hit = memberOf({ kind: 'row', items: [f, k] }, set);
-    return { kind: 'case', whens: [[isNull(value), { kind: 'exists', plan: nulls, negated: false }]], else: hit };
+    return { kind: 'case', whens: [[isNull(value), nulls]], else: hit };
   };
   const cheap = (e: Expr | null): boolean => !e || e.kind === 'col' || e.kind === 'lit';
   if (cheap(subject.value) && cheap(subject.tag)) return test(subject.value, subject.tag);
