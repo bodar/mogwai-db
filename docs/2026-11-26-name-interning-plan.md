@@ -1,6 +1,6 @@
 # One name authority for labels and property keys, then intern property keys
 
-**Status: PROPOSED (2026-11-26). Waiting for owner review.**
+**Status: Stage A LANDED (2026-11-26); Gate A waits for owner review. Stage B not started.**
 
 **Source.** `docs/outstanding-work.md` §4 "Shared substrate: compiler internals": `name-interning`, then
 `property-key-interning`. Background is in `docs/2026-11-25-storage-density-plan.md` S6 and Q3.
@@ -31,14 +31,15 @@ Step labels (`as()`/`select()`) are out of scope.
   `hasLabelPredicate` (`source.ts`) use it. Five hand-written copies are in `src/compiler/rel/write.ts`:
   `namedLabelIds` (`dropLabel`), the `labelId()` scalar in `endpointSeek`, `labelSeek`, the `T.label`
   probe in the mergeV candidate test, and the label filter in the mergeE candidate test. Raw SQL is in
-  `directedAdjacency` (`src/services/catalog/olap/kernel.ts`) and `GraphStore.dropVertexLabels`.
+  `directedAdjacency` (`src/services/catalog/olap/kernel.ts`). (`GraphStore.dropVertexLabels` was
+  here; A5 deleted it.)
 - **Intern (write), 6 sites.** `internLabels` (`write.ts`, addV/addE). Two inline copies of its upsert
   plus a lookup join (mergeV and mergeE creation paths). `GraphStore.labelId`, memoized per load by
   `BatchingLoader` (`src/bulk.ts`); GraphSON, CSV and replication `_bulk_docs` all use it.
 - **Decode (id to name), about 15 sites.** `labelTable`, `vertexLabels`, `edgeLabel`
   (`src/compiler/rel/element.ts`); `labelScalar`, `labelNames` and the `has(T.label, P)` arm of
   `hasTokenPredicate` (`source.ts`); five `scanAs('labels', …)` in `src/services/catalog/schema.ts`; raw
-  SQL in `GraphStore.vertexLabels`, `GraphStore.labelName`, `formats/drain.ts`, `formats/graphson.ts`,
+  SQL in `formats/drain.ts`, `formats/graphson.ts`,
   `fill` in `formats/csv.ts`, and `refresh.ts`.
 - **Natural home:** a new `src/compiler/rel/names.ts` (resolve a set, resolve one name, decode, intern),
   plus a pure shape recognizer in `src/rel/names.ts` (passes in `src/rel/` never import
@@ -119,7 +120,7 @@ rows (2.5 MB). The key is stored three times per row (table and two indexes): ab
    The test graph helper (`test/support/graph.ts`) no longer uses them. The six raw-SQL label sites stay
    as they are: each is a one-line JOIN or IN, and a `names.ts` fragment adds lines. No SQL change, no
    baseline move. **Remains:** the `src/sql/names.ts` fragment (`labelIdsIn` plus the decode join) goes to
-   B5. Lines 34 and 90 of this doc still name the deleted methods.
+   B5. F1 no longer names the deleted methods.
 6. **A6. Add a guard.** In `scripts/arch-check.ts`: only `names.ts` builds a scan of `labels`; only
    `storage.ts` names `labels` in raw SQL. One L2 test: `hasLabel('nope')`, `out('nope')`,
    `has('nope','k',v)`, `E().hasLabel('nope')`, `dropLabel('nope')` give no rows or a no-op, never an
@@ -129,6 +130,55 @@ rows (2.5 MB). The key is stored three times per row (table and two indexes): ab
    tests the five unknown-label shapes. No baseline move. **Remains:** the raw-SQL half of the guard
    (`\b(FROM|JOIN|INTO)\s+labels\b`) goes to B6. The raw sites do not go through `names.ts` yet. No
    allowlist was added.
+
+**Stage A landed (2026-11-26).** A1–A6 are on trunk (3419cdb5, 6d52bf33, 87a38aa3, 61a3f576,
+95f6651d), plus the answer-changing merge fix 7b71ba45. No baseline moved except the mergeV
+`sql-hygiene` bytes in 7b71ba45 (6611 → 8622, reason in that commit). A4 met "same plan, smaller SQL"
+(-1873 bytes over the corpus), not "byte-identical": only alias numbers and `=` operand order changed.
+
+**Stage A follow-ups (from review, order of value).**
+- **A-f1. Close the arch-rule bypass: un-export `dictScan`.** A6's rule matches only `table: 'labels'`
+  and `scanAs('labels'`. A file outside `names.ts` that calls `dictScan('labels', fresh)` passes the
+  check (planted probe, exit 0). Only `names.ts` uses `dictScan`. Remove its `export`; this closes the
+  hole by structure. Do it before Stage B adds `'keys'` to the same seam.
+- **A-f2. Remove the `withNames` `on`-callback side channel.** `BaseGraph.hasTokenPredicate`
+  (`src/compiler/rel/source.ts`) gets `valuePred`'s result by assignment inside the `on` callback. It is
+  correct only because `withNames` calls `on` once, synchronously. Lower P on a name column first, or
+  let `withNames` return "no predicate". No answer changes today.
+- **A-f3. Document that `nameId` is NULL for an unknown name.** mergeE's `labelOk` is now
+  `clabel = nameId(lbl)`, which is NULL, not FALSE, for an unknown label. It is safe in a positive ON
+  clause. Add a comment at `labelOk` and in the `nameId` docstring: do not negate it. Fix the docstring
+  SQL example, which names `labels` but the function takes `dict`.
+- **A-f4. Add a mergeE numeric-label test.** A3 joins wanted rows (integer `5`) to the `RETURNING`
+  text `'5'`. That join is the one place where affinity could drop a row. Probed correct; the test in
+  `test/compiler/name-dict.exec.test.ts` covers mergeV only.
+- **A-f5. Remove the `ScanHints` alias pair from the `names.ts` signatures** (`dictScan`, `nameIds`,
+  `nameId`). It only keeps old alias spelling. Do it when a baseline may move for another reason.
+- **A-f6. Small cleanups.** Name the `labelIsList` CASE lambda once (`labelListed`), used twice in
+  `write.ts`. Fix the header comment of `test/compiler/element-id-param.exec.test.ts` (`labelIds` →
+  `nameIds`).
+
+**Open item from 7b71ba45:** `merge-map-label-seek` (see A1 above and `docs/outstanding-work.md`).
+
+**Depth gaps seen in review (pre-existing, not Stage A scope).** These decline on trunk before and after
+Stage A: `label()` as a `choose`/`coalesce` arm (`g.V().coalesce(outE().label(), constant('none'))`),
+`has(T.label, TextP.regex(…))`, `hasLabel(TextP.startingWith(…))`, and `hasLabel(within(…))`/
+`without(…)` (tracked as `haslabel-predicate` in `docs/outstanding-work.md`).
+
+### Next round — reuse proposals (Stage A residue, before B1)
+
+- **N1. `labelOwners(kind, fresh, hints?)` in `names.ts`.** One builder for the (owner, label) relation:
+  `vertex_labels(node, label)` for a vertex, `edges(id, label)` for an edge. Route about 10 hand-built
+  scans through it: `source.ts` `hasLabelPredicate`, `hasTokenPredicate`'s `T.label` arm, `labelScalar`,
+  `labelNames`, `hasAnyLabel`; `element.ts` `vertexLabels`; `write.ts` `labelSeek` and the mergeV
+  candidate probe. Four `kind` ternaries go. Expect about 25–30 lines removed; SQL the same apart from
+  aliases. Optional: extend A6's arch rule to `vertex_labels` read scans.
+- **N2. Merge the vertex and edge arms of `labelScalar` and `labelNames`.** After N1. One path:
+  `labelOwners(kind)` → `withNames` → `firstOf` ordered by `lid` (equal to the vertex arm's `label`). The
+  edge arm scans `(id, label)` instead of all edge columns. Expect about 15 lines removed.
+- **N3. Delete `VERTEX_LABEL_COLS` in `write.ts`.** Use `OWNED_BY.vertexLabels.cols`, which already
+  declares the same columns. Do it with N1; optionally add one `labelTargets(fresh)` for the four
+  write-target scans (`bindLabels`, addV, mergeV, mergeE). No SQL change.
 
 **Gate A (owner review).** Report net production lines (expected negative), the `sql-hygiene` byte
 delta and the `sql-plan` diff. **Stop rule:** stop and report if the net change is above +40 lines or any
