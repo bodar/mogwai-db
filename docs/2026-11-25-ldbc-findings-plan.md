@@ -391,7 +391,7 @@ Major first. Minor items are kept only when they are cheap and concrete.
   `c2e13ae8` the BigDecimal arm is `CAST AS REAL`, as `storedForm` stores it. The long/bigint arm is
   still `+ 0`, a parallel rule. Make `comparableOf` reuse `storedForm`'s value arm, spelled with one
   payload read. Do this with the item above; it is the same code.
-- **MAJOR, pre-existing wrong answer — an infix connective inside `local()` drops the whole chain**
+- ✅ **LANDED (`7474be16`, round-4 item 2).** **MAJOR, pre-existing wrong answer — an infix connective inside `local()` drops the whole chain**
   (`src/compiler/ir/strategies.ts`). `g.V().hasLabel('person').local(__.has('age').or().has('lang')).count()`
   returns all 6 modern vertices as element rows; the reference is `[4]`. `local(__.has('age').and().has('name'))`
   fails the same way. `map(...)`, `filter(...)` and the step form `local(__.or(...))` answer correctly. The
@@ -463,6 +463,8 @@ then byte-stable reuse.
    nodes, reducer `vt`). Check first that datetime and duration are stored as INTEGER. Delete
    `storedCompare` (dead export, 0 references).
 2. **Infix connective inside `local()`** (follow-up above).
+   ✅ **Landed 2026-11-26 (`7474be16`).** `spliceIdentityHosts` folds the body's top-level connectives
+   with `canonicalizeConnectivesLevel` before the splice (`src/compiler/ir/strategies.ts`). Remains: nothing.
 3. **Comparability guard for a nested-operand ordering** (follow-up above).
 4. **Value-join regression and one comparable authority** (the two MAJOR item-3 follow-ups above, one
    item).
