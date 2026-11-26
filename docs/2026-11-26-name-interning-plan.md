@@ -1,8 +1,8 @@
 # One name authority for labels and property keys, then intern property keys
 
 **Status: Stage A LANDED (2026-11-26). Gate A PASSED (owner, 2026-11-26): a sane path. The Stage A
-finish round landed A-f1, A-f2, A-f3, A-f5, N1–N3 (648eec92, e24da098). Next: land the parked
-`merge-map-null-token` branch (M0, M1 below), then the reuse items N4–N7, then Stage B.**
+finish round landed A-f1, A-f2, A-f3, A-f5, N1–N3 (648eec92, e24da098) and merge-map-null-token
+(420e020f, 6be6de05: A-w1–A-w3, A-f4, A-f6). Next: the reuse items N4–N7, then Stage B.**
 
 **How a gate works (owner, 2026-11-26).** A gate asks one question: is this a sane path? The numbers
 (line counts, stop rules) are evidence for that judgement, not automatic stops. If the path is sane,
@@ -217,7 +217,9 @@ changed. The `sql-hygiene` baseline moved for alias churn only. **Remains:** not
 
 ### Stage A finish — parked item (resume point)
 
-**`merge-map-null-token` is BUILT but NOT LANDED.** It covers A-w2, A-w3, the A-w1 docs fix, A-f4 and
+**LANDED as `420e020f` + `6be6de05` (M0, M1 done; `CI passed`).** A-w3 is not a wrong answer: under the TinkerPop 4 multi-label default, `addV()` makes a vertex with no labels (`ElementMap.feature` `zero_label_vertex`), so 2 vertices is correct. `6be6de05` rewords the §3 row to say so.
+
+~~**`merge-map-null-token` is BUILT but NOT LANDED.**~~ It covers A-w2, A-w3, the A-w1 docs fix, A-f4 and
 the A-f6 `labelListed` lambda. The commit is `4f95f2db` on branch `wf/merge-map-null-token-1-0`
 (worktree `.claude/worktrees/wf_bc503f19-1bd-8`). The builder had to report before `mise run ci`
 printed a verdict. Its logs show check, lint, arch, binds, sql-hygiene and build clean, all 10 test
