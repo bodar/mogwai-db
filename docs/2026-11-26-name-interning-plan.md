@@ -193,6 +193,12 @@ Stage A: `label()` as a `choose`/`coalesce` arm (`g.V().coalesce(outE().label(),
   declares the same columns. Do it with N1; optionally add one `labelTargets(fresh)` for the four
   write-target scans (`bindLabels`, addV, mergeV, mergeE). No SQL change.
 
+**N1, N2, N3 and A-f2 landed (e24da098).** `labelOwners(kind, fresh, of?)` in
+`src/compiler/rel/names.ts` (backed by `LABEL_OWNERS` in `build.ts`) is the one (owner, label) relation.
+`labelScalar` and `labelNames` use one path for both kinds. `withNames` has no `on` callback.
+`VERTEX_LABEL_COLS` is gone; the label write targets use one `ownedTarget` from `OWNED_BY`. No answer
+changed. The `sql-hygiene` baseline moved for alias churn only. **Remains:** nothing.
+
 ### Stage A finish — review notes to verify (dropped as low-reach, but cheap to settle)
 
 - **A-w1. The §3 row from `7b71ba45` says a non-string map label "becomes its text".** A boolean does
