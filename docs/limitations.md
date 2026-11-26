@@ -115,7 +115,8 @@ Without `order()`, rows come in the order of the SQL plan. Wherever the query as
 | Visibility | A write step sees its input as it was before the step. Later steps see all of its writes. `g.V().not(out()).drop()` drops exactly the leaf vertices. |
 | Bulked rows | One element per row: `g.V().both().addV('x')` creates 12 vertices. Java creates 6. |
 | String vs integer id | A string id does not match the integer it spells: `V('1')` does not find vertex `1`. Both kinds of id can exist, so a conversion would be ambiguous. |
-| Non-string label in a merge map | A `T.label` that is not a string becomes its text: `inject([(T.label):5]).mergeV()` creates label `'5'`. Java raises an error. |
+| Non-string label in a merge map | A `T.label` that is not a string becomes its SQLite text. An integer gives its digits (`5` gives `'5'`). A boolean gives `'1'` or `'0'`. A whole double loses its `.0` (`2.0d` gives `'2'`). A date gives its epoch milliseconds. Java raises an error. |
+| Merge map with no label | With the default `ZERO_OR_MORE` cardinality, `addV()` and a `mergeV()` map without `T.label` create a vertex with no label. No label matches it, also not `'vertex'`. TinkerGraph's default gives it `Vertex.DEFAULT_LABEL` (`'vertex'`). |
 
 ### Side effects, sacks and labels
 

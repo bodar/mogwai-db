@@ -17,6 +17,7 @@ import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } f
 import { propertyFtsText } from '../../services/fts-index.ts';
 import { constFromNested, Deferral, onCreateOverrideMessage, parseProperty, readCardinality, type MergeMaps, type MergeSpec, type MetaPropSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
 import { correlatedMapKey, MAP_COL, PAIR, pairsOf, pairSide } from './map.ts';
+import { nodeIsNull } from './tag.ts';
 import type { MapOf } from '../../sql/kernel/render.ts';
 import {
   ADD_LABEL_ITEM_NAME, ADD_LABEL_MEMBER_NAME, ADD_LABEL_NAME, collectionMembers, constantName, DROP_LABEL_ITEM_NAME, DROP_LABEL_MEMBER_NAME, DROP_LABEL_NAME, KEY_NAME,
@@ -4211,17 +4212,55 @@ function computedCouldMatch(
  * and creates one carrying them all. So every reader goes through ONE spelling of a label value node
  * (`{t,v}`): a list/set is its members, a scalar is one member, and a member's NAME is its `v` as TEXT.
  * The CAST keeps a non-string label (`(T.label):5`) one name everywhere — the `labels` row, the search
- * and the interleaving compare all read `'5'` (JavaScript's `String(5)`, a deliberate divergence in
- * `docs/limitations.md` §3) rather than an INTEGER that meets no TEXT name.
+ * and the interleaving compare all read `'5'` (the value's SQLite TEXT — a boolean `'1'`, a whole double
+ * `'2'`; a deliberate divergence in `docs/limitations.md` §3, the reference raises) rather than an INTEGER
+ * that meets no TEXT name. A NULL label value never reaches here: `refuseNullTokens` raises first.
  */
 const LABEL_PAIR = { value: 'lp_v', ord: 'lp_o' } as const;
 const LABEL_MEMBER = { value: 'lm_v', ord: 'lm_o' } as const;
 const jsonAt = (e: Expr, path: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [e, compilerText(path)] });
+/** Is this pair's key the token `t`.`v` (`T.label`, `T.id`, `Direction.OUT`, …)? */
+const isTokenKey = (pair: Expr, t: 'T' | 'D', v: string): Expr =>
+  and(eq(jsonAt(pairSide(pair, 'keys'), '$.t'), compilerText(t)), eq(jsonAt(pairSide(pair, 'keys'), '$.v'), compilerText(v)));
 /** Is this pair's key `T.label`? */
-const isLabelKey = (pair: Expr): Expr =>
-  and(eq(jsonAt(pairSide(pair, 'keys'), '$.t'), compilerText('T')), eq(jsonAt(pairSide(pair, 'keys'), '$.v'), compilerText('label')));
+const isLabelKey = (pair: Expr): Expr => isTokenKey(pair, 'T', 'label');
 /** Is a label value node a collection (a list or set — its `v` a JSON array)? */
 const labelIsList = (node: Expr): Expr => eq({ kind: 'call', fn: 'json_type', args: [node, compilerText('$.v')] }, compilerText('array'));
+/** `labelIsList` as an INTEGER (1/0), for a `mapLabelOf` read. */
+const labelListed = (node: Expr): Expr => ({ kind: 'case', whens: [[labelIsList(node), compilerInt(1)]], else: compilerInt(0) });
+
+/**
+ * REFUSE THE MAP DRIVERS whose map holds a pair `pairPred` accepts — one `LIMIT 1` statement over the
+ * carrier's map pairs, raised when it returns a row (`raiseWhen: 'rows'`). The ONE shape of every per-driver
+ * refusal of a map-valued `mergeV`/`mergeE`: a `T.id` (not yet supported), a collection edge label, a null
+ * token value. `withKey` appends the offending pair's KEY (`$.v` — `label`, `OUT`, …) through
+ * `valueColumn`, the reference's `check: <key>` sentence. Linear: one scan of the drivers' pairs, stopped
+ * at the first hit.
+ */
+function refuseDrivers(carrier: Rel, pairPred: (pair: Expr) => Expr, message: string, guard: Guarder, fresh: Minter, withKey = false): void {
+  const pairs = make.explode({
+    id: fresh('px'), input: carrier, expr: col(carrier.id, MAP_COL), channels: [], as: PAIR,
+    type: typeOf(...carrier.type.cols, meta(PAIR.value, 'any', true), meta(PAIR.ord, 'int')),
+  });
+  const hits = make.filter({ id: fresh('f'), input: pairs, channels: [], type: pairs.type, pred: pairPred(col(pairs.id, PAIR.value)) });
+  const shown: Expr = withKey ? jsonAt(pairSide(col(hits.id, PAIR.value), 'keys'), '$.v') : compilerInt(1);
+  const type = typeOf(meta('n', withKey ? 'text' : 'int', true));
+  guard(make.limit({
+    id: fresh('li'), channels: [], type, count: compilerInt(1),
+    input: make.project({ id: fresh('p'), input: hits, channels: [], type, exprs: [['n', shown]] }),
+  }), { message, raiseWhen: 'rows', ...(withKey ? { valueColumn: 'n' } : {}) });
+}
+
+/** A null `T`/`Direction` value in a merge map — the constant path's refusal (`validateMergeKey`,
+ *  `src/compiler/ir/write-args.ts`; the reference's `MergeElementStep.validate`,
+ *  `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeElementStep.java`).
+ *  Without it a null `T.label` reads as "names no label" and a null endpoint as "names no vertex": a merge
+ *  onto an UNRELATED element, or the wrong sentence. */
+function refuseNullTokens(op: 'mergeV' | 'mergeE', carrier: Rel, guard: Guarder, fresh: Minter): void {
+  refuseDrivers(carrier, (pair) => and(
+    { kind: 'in-list', expr: jsonAt(pairSide(pair, 'keys'), '$.t'), values: [compilerText('T'), compilerText('D')] },
+    nodeIsNull(pairSide(pair, 'values'))), `${op}() does not allow null Map values - check: `, guard, fresh, true);
+}
 /** A label MEMBER node's name. */
 const labelName = (node: Expr): Expr => ({ kind: 'cast', arg: jsonAt(node, '$.v'), to: 'text' });
 /** A label value's FIRST name (NULL for an empty collection) — what a search SEEKS by and what says a map
@@ -5221,7 +5260,6 @@ export function mergeVFromMap(
     type: typeOf(...(hasOrd ? [meta(ORD, 'int')] : []), meta(MAP_COL, 'json')),
     exprs: [...(hasOrd ? [[ORD, col(incoming.id, ORD)] as const] : []), [MAP_COL, col(incoming.id, MAP_COL)]],
   }), true);
-  const driverMap = col(carrier.id, MAP_COL);
   const ext = (e: Expr, path: string): Expr => ({ kind: 'call', fn: 'json_extract', args: [e, compilerText(path)] });
   const jsonText = (e: Expr): Expr => ({ kind: 'call', fn: 'json', args: [e] });
   // The four sides of a pair (`[keyNode, valNode]`, each a `{t,v}` node): the key's type/value and the
@@ -5230,20 +5268,15 @@ export function mergeVFromMap(
   const keyV = (p: Rel): Expr => ext(pairSide(col(p.id, PAIR.value), 'keys'), '$.v');
   const valV = (p: Rel): Expr => ext(pairSide(col(p.id, PAIR.value), 'values'), '$.v');
   const valT = (p: Rel): Expr => ext(pairSide(col(p.id, PAIR.value), 'values'), '$.t');
-  const isToken = (p: Rel, name: 'label' | 'id'): Expr => and(eq(keyT(p), compilerText('T')), eq(keyV(p), compilerText(name)));
   // The map's FIRST label name per row (NULL when the map names none) — what the search seeks by; every
   // name is checked by the residual (`allMatch`) and written by the create (`mapLabelNames`).
   const mapLabelScalar = (mapCol: Expr): Expr => mapLabelOf(mapCol, labelFirst, 'text', fresh);
   // FAIL CLOSED on a `T.id` in the map — search-by-id / create-with-id is its own machinery (a per-driver
   // id and its collision guards); until then a map carrying it REFUSES rather than silently ignoring the
   // id criterion (a wrong answer). The guard fires per driver whose map holds a T.id.
-  const idProbe = pairsOf(driverMap, fresh);
-  guard(make.limit({
-    id: fresh('li'), channels: [], type: typeOf(meta('n', 'int')), count: compilerInt(1),
-    input: make.project({ id: fresh('p'), channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', compilerInt(1)]],
-      input: make.filter({ id: fresh('f'), input: carrier, channels: [], type: carrier.type,
-        pred: { kind: 'exists', negated: false, plan: make.filter({ id: fresh('f'), input: idProbe, channels: [], type: idProbe.type, pred: isToken(idProbe, 'id') }) } }) }),
-  }), { message: 'mergeV with a T.id in a map-valued driver is not yet supported', raiseWhen: 'rows' });
+  refuseDrivers(carrier, (pair) => isTokenKey(pair, 'T', 'id'), 'mergeV with a T.id in a map-valued driver is not yet supported', guard, fresh);
+  // A null `T.label` (or any null token value) refuses, so `lbl IS NULL` below means only "names no label".
+  refuseNullTokens('mergeV', carrier, guard, fresh);
 
   // THE MATCH — every vertex the driver's whole map is satisfied by. `allMatch` is NOT EXISTS a map entry
   // the candidate does NOT have (`has(k, v)` for every entry) — the dynamic-key form of `mergeVComputed`'s
@@ -5300,7 +5333,7 @@ export function mergeVFromMap(
   if (!createOwners) return null;
   const onCreateLabels = (onCreate?.label as string[] | null) ?? [];
   onCreateLabelGuard(unmatched, mapLabelScalar(col(unmatched.id, MAP_COL)), onCreateLabels, guard, fresh,
-    onCreateLabels.length ? mapLabelOf(col(unmatched.id, MAP_COL), (node) => ({ kind: 'case', whens: [[labelIsList(node), compilerInt(1)]], else: compilerInt(0) }), 'int', fresh) : undefined);
+    onCreateLabels.length ? mapLabelOf(col(unmatched.id, MAP_COL), labelListed, 'int', fresh) : undefined);
   // ONE TRAVERSER AT A TIME, before any write (`guardMergeInterleaving`). The search's key set is DATA,
   // bounded by the stream's MAY set (`mapSearchedKeys`), and a driver's `[name:x]` finds another's
   // `[name:x, age:1]` creation — `mapCouldMatch`. A map naming no label creates under `onCreate`'s label,
@@ -5480,8 +5513,7 @@ export function mergeEFromMap(
   const keyV = (p: Rel): Expr => ext(pairSide(col(p.id, PAIR.value), 'keys'), '$.v');
   const valV = (p: Rel): Expr => ext(pairSide(col(p.id, PAIR.value), 'values'), '$.v');
   const valT = (p: Rel): Expr => ext(pairSide(col(p.id, PAIR.value), 'values'), '$.t');
-  const isToken = (p: Rel, name: 'label' | 'id'): Expr => and(eq(keyT(p), compilerText('T')), eq(keyV(p), compilerText(name)));
-  const isDir = (p: Rel, side: 'OUT' | 'IN'): Expr => and(eq(keyT(p), compilerText('D')), eq(keyV(p), compilerText(side)));
+  const isDir = (p: Rel, side: 'OUT' | 'IN'): Expr => isTokenKey(col(p.id, PAIR.value), 'D', side);
 
   // The carrier — the driver's map (and its `ord`), reprojected WITHOUT the channels, so every search
   // filter/join below is channel-free; `incoming` keeps the channels for the final `crossed`.
@@ -5494,13 +5526,10 @@ export function mergeEFromMap(
 
   // FAIL CLOSED on a `T.id` in the map — search/create by edge id is its own machinery; until then a map
   // carrying it REFUSES rather than silently ignoring the id criterion (a wrong answer).
-  const idProbe = pairsOf(map0, fresh);
-  guard(make.limit({
-    id: fresh('li'), channels: [], type: typeOf(meta('n', 'int')), count: compilerInt(1),
-    input: make.project({ id: fresh('p'), channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', compilerInt(1)]],
-      input: make.filter({ id: fresh('f'), input: carrier0, channels: [], type: carrier0.type,
-        pred: { kind: 'exists', negated: false, plan: make.filter({ id: fresh('f'), input: idProbe, channels: [], type: idProbe.type, pred: isToken(idProbe, 'id') }) } }) }),
-  }), { message: 'mergeE with a T.id in a map-valued driver is not yet supported', raiseWhen: 'rows' });
+  refuseDrivers(carrier0, (pair) => isTokenKey(pair, 'T', 'id'), 'mergeE with a T.id in a map-valued driver is not yet supported', guard, fresh);
+  // A null `T.label` or endpoint refuses, so a NULL `lbl` below means only "names no label" and a NULL
+  // `src`/`tgt` only "names no vertex".
+  refuseNullTokens('mergeE', carrier0, guard, fresh);
 
   // The map's `T.label` name per row (NULL when the map names none, `mapLabelOf`) — narrows the search and
   // labels the created edge.
@@ -5509,12 +5538,8 @@ export function mergeEFromMap(
   // `MergeEdgeStep` reads it as one String (`(String) search.get(T.label)`,
   // `vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/step/map/MergeEdgeStep.java:169`),
   // so a collection label is refused per driver rather than written as a name.
-  guard(make.limit({
-    id: fresh('li'), channels: [], type: typeOf(meta('n', 'int')), count: compilerInt(1),
-    input: make.project({ id: fresh('p'), channels: [], type: typeOf(meta('n', 'int')), exprs: [['n', compilerInt(1)]],
-      input: make.filter({ id: fresh('f'), input: carrier0, channels: [], type: carrier0.type,
-        pred: eq(mapLabelOf(map0, (node) => ({ kind: 'case', whens: [[labelIsList(node), compilerInt(1)]], else: compilerInt(0) }), 'int', fresh), compilerInt(1)) }) }),
-  }), { message: 'mergeE() expects T.label to be a String - an edge has exactly one label, found: a list', raiseWhen: 'rows' });
+  refuseDrivers(carrier0, (pair) => and(isLabelKey(pair), labelIsList(pairSide(pair, 'values'))),
+    'mergeE() expects T.label to be a String - an edge has exactly one label, found: a list', guard, fresh);
   // Does the map carry this Direction key at all — the `containsKey(direction)` the create raise reads.
   const hasDir = (mapCol: Expr, side: 'OUT' | 'IN'): Expr => {
     const p = pairsOf(mapCol, fresh);

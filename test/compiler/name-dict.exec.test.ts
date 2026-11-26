@@ -127,4 +127,50 @@ describe('nameId — one name as its id, per merge driver', () => {
     expect(values(run(store, q))).toEqual([6]);
     expect(values(run(store, "g.E().hasLabel('self').count()"))).toEqual([6]);
   });
+
+  // A non-string label is its SQLite TEXT, a deliberate divergence (`docs/limitations.md` §3): the reference
+  // raises. On an edge it is one name too, so a re-merge finds the edge it created.
+  test('a mergeE map label that is not a string is one name, found again by the re-merge', () => {
+    const store = seededStore();
+    const q = 'g.inject([(T.label):5,(Direction.OUT):1,(Direction.IN):2]).mergeE().id()';
+    const first = values(run(store, q));
+    expect(values(run(store, q))).toEqual(first);
+    expect(values(run(store, "g.E().hasLabel('5').count()"))).toEqual([1]);
+  });
+
+  // A null `T`/`Direction` value refuses with the constant path's sentence (`validateMergeKey`), so a
+  // null label never reads as "names no label" and merges onto an unrelated element.
+  test('a null T.label or endpoint in a merge map refuses, as the constant path does, and writes nothing', () => {
+    const store = seededStore();
+    expect(() => run(store, 'g.inject([(T.label):null,(Direction.OUT):1,(Direction.IN):2]).mergeE()'))
+      .toThrow('mergeE() does not allow null Map values - check: label');
+    expect(() => run(store, "g.inject([(T.label):null,name:'zz']).mergeV()"))
+      .toThrow('mergeV() does not allow null Map values - check: label');
+    expect(() => run(store, "g.inject([(T.label):'person',name:'marko'],[(T.label):null,name:'q']).mergeV()"))
+      .toThrow('mergeV() does not allow null Map values - check: label');
+    expect(() => run(store, "g.inject([(Direction.OUT):null,(T.label):'knows',(Direction.IN):2]).mergeE()"))
+      .toThrow('mergeE() does not allow null Map values - check: OUT');
+    expect(() => run(store, "g.inject([(T.label):'knows',(Direction.OUT):1,(Direction.IN):null]).mergeE()"))
+      .toThrow('mergeE() does not allow null Map values - check: IN');
+    expect(() => run(store, "g.inject(1).constant([(T.label):null,name:'z']).mergeV()"))
+      .toThrow('mergeV() does not allow null Map values - check: label');
+    expect(values(run(store, 'g.E().count()'))).toEqual([6]);
+    expect(values(run(store, 'g.V().count()'))).toEqual([6]);
+    expect(values(run(store, "g.inject([(T.label):'person',name:'marko'],[(T.label):'person',name:'new']).mergeV().count()"))).toEqual([2]);
+    expect(values(run(store, 'g.V().count()'))).toEqual([7]);
+  });
+
+  // Under ZERO_OR_MORE a map with no T.label creates a vertex with NO label, which no label matches — not
+  // even 'vertex' (TinkerGraph's `Vertex.DEFAULT_LABEL`; `docs/limitations.md` §3).
+  test('a labelless map creates a labelless vertex, which a vertex-labelled map does not find', () => {
+    const store = seededStore();
+    expect(bagOf(values(run(store, "g.inject([name:'x'],[(T.label):'vertex',name:'x']).mergeV().label()")))).toEqual(bagOf([null, 'vertex']));
+    expect(values(run(store, "g.V().has('name','x').count()"))).toEqual([2]);
+    expect(values(run(store, "g.V().hasLabel('vertex').count()"))).toEqual([1]);
+    // The other order: the later labelless map WOULD find the earlier creation, which is the interleaving
+    // decline, not a wrong count.
+    const fresh = seededStore();
+    expect(() => run(fresh, "g.inject([(T.label):'vertex',name:'x'],[name:'x']).mergeV()")).toThrow('one traverser at a time');
+    expect(values(run(fresh, "g.V().has('name','x').count()"))).toEqual([0]);
+  });
 });
