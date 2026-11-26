@@ -469,8 +469,17 @@ then byte-stable reuse.
    ✅ **Landed 2026-11-26 (`7474be16`).** `spliceIdentityHosts` folds the body's top-level connectives
    with `canonicalizeConnectivesLevel` before the splice (`src/compiler/ir/strategies.ts`). Remains: nothing.
 3. **Comparability guard for a nested-operand ordering** (follow-up above).
+   ✅ **Landed 2026-11-26 (`e35f833a`, with item 4).** `sameBucket` (`src/compiler/rel/predicate.ts`) is a
+   separate conjunct beside the compare, so the owner seek stays. Remains: a nested EQUALITY is still
+   unguarded (`nested-eq-type-guard`) and a STREAM subject's ordering is still direct
+   (`nested-stream-ordering-guard`), both in `docs/outstanding-work.md`.
 4. **Value-join regression and one comparable authority** (the two MAJOR item-3 follow-ups above, one
    item).
+   ✅ **Landed 2026-11-26 (`e35f833a`).** A stored operand reads its row's own `value`
+   (`TypedOperand.comparable`, `source.ts` `storedFirstValue`). A stream operand converts by tag through
+   `comparableOf`, bound once in a VALUES row. `comparableNumber` is deleted. Remains: the age join is
+   1.3x of the pre-item-3 timing, not 1.2x; the rest is the cost of the bind-once subquery that converts
+   a label operand. Two stored durations still compare their nanos TEXT (`duration-stored-comparable`).
 5. **Quadratic matching `mergeE`** (follow-up above).
    ✅ **Landed 2026-11-26 (`1d7beeaf`).** The match joins the criteria read's own edge row, not
    `edges.id IN (label population)` (`src/compiler/rel/write.ts`, `src/compiler/rel/source.ts`). Scaling
