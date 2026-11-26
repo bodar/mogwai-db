@@ -1,8 +1,8 @@
 import { always, and, col, compilerInt, compilerNull, compilerReal, compilerText, disjoin, param, type Expr } from '../../rel/expr.ts';
-import { comparableOf, jsonEachSet, meta, storedForm, typeOf, type Minter } from './build.ts';
+import { comparableOf, jsonEachSet, meta, storedForm, typeOf, wholeNumber, type Minter } from './build.ts';
 import * as make from '../../rel/factory.ts';
 import { inferredVtype } from './tag.ts';
-import type { RelId, SqlType } from '../../rel/types.ts';
+import type { SqlType } from '../../rel/types.ts';
 import type { Rel } from '../../rel/rel.ts';
 import { gtypeName, arg, collectionMembers, isNested, type Arg } from '../../gremlin/frontend.ts';
 import { assignable, assignableFrom, BigDecimal, Duration, flatType, gtypeOf, isBinaryCarrier, normalizeTypeName, STORAGE_CLASS, type CanonicalType, type TypeNode } from '../../gremlin/types.ts';
@@ -136,7 +136,7 @@ const staticKey = (subject: Expr, canonical: string, text: boolean | undefined, 
   return to === 'int' ? intKey(subject, edge) : to ? { kind: 'cast', arg: subject, to } : null;
 };
 
-/** Storage classes `compareKey` casts to, as `plan.ts` measured them. A fixed compile-time
+/** The tags `storedCompareOn` keys as a whole number (`wholeNumber`) and as a REAL. A fixed compile-time
  *  vocabulary — never user input — so there is no injection surface in the names themselves. */
 const CAST_TO_INT = ['byte', 'short', 'int', 'long', 'bigint', 'datetime', 'duration'];
 export const CAST_TO_REAL: readonly string[] = ['float', 'double', 'bigdecimal'];
@@ -646,6 +646,10 @@ const sameSpaceEquality = (subject: Expr, bound: Expr, value: unknown, type: Sub
 };
 
 /**
+ * THE COMPARE KEY of a value by its tag: a whole-number tag (`CAST_TO_INT` — the integers, datetime, duration)
+ * keys through `wholeNumber`, so a carrier past int64 keys as its REAL rather than clamping onto ±2^63; a
+ * floating or decimal tag through `CAST AS REAL`; anything else is itself.
+ *
  * A COMPILE-TIME vtype picks the arm HERE, not in SQLite.
  *
  * The general form asks the engine `'bigint' IN ('byte','short','int','long',…)` — a comparison
@@ -662,14 +666,14 @@ const sameSpaceEquality = (subject: Expr, bound: Expr, value: unknown, type: Sub
 export const storedCompareOn = (vtype: Expr) => (subject: Expr): Expr => {
   const staticVtype = vtype.kind === 'lit' && vtype.source === 'compiler-text' ? vtype.value : undefined;
   if (staticVtype !== undefined) {
-    if (CAST_TO_INT.includes(staticVtype)) return { kind: 'cast', arg: subject, to: 'int' };
+    if (CAST_TO_INT.includes(staticVtype)) return wholeNumber(subject);
     if (CAST_TO_REAL.includes(staticVtype)) return { kind: 'cast', arg: subject, to: 'real' };
     return subject;
   }
   return {
     kind: 'case',
     whens: [
-      [{ kind: 'in-list', expr: vtype, values: CAST_TO_INT.map(compilerText) }, { kind: 'cast', arg: subject, to: 'int' }],
+      [{ kind: 'in-list', expr: vtype, values: CAST_TO_INT.map(compilerText) }, wholeNumber(subject)],
       [{ kind: 'in-list', expr: vtype, values: CAST_TO_REAL.map(compilerText) }, { kind: 'cast', arg: subject, to: 'real' }],
     ],
     else: subject,
@@ -690,12 +694,6 @@ export const storedCompareOnce = (vtype: Expr, subject: Expr, fresh: Minter): Ex
     exprs: [['k', storedCompareOn(col(one.id, 't'))(col(one.id, 'v'))]],
   }) };
 };
-
-/** The common case: the `vtype` is a COLUMN of a relation in scope. Derived from the general form
- *  rather than a second copy of the type lists — `modulator.ts` builds the key inside a scalar
- *  subquery where the vtype is an arbitrary expression, and two spellings of the same cast policy is
- *  how one of them silently stops matching the other. */
-export const storedCompare = (rel: RelId, vtype = 'vtype') => storedCompareOn(col(rel, vtype));
 
 /**
  * COMPARABILITY over two PER-ROW stored scalars — the faithful lowering of an ordering theta
@@ -723,15 +721,14 @@ export const comparableTheta = (
   const inList = (t: Expr, names: readonly string[]): Expr => ({ kind: 'in-list', expr: t, values: names.map(compilerText) });
   const bothIn = (names: readonly string[]): Expr => and(inList(typeA, names), inList(typeB, names));
   const bothEq = (name: string): Expr => and(binary('=', typeA, compilerText(name)), binary('=', typeB, compilerText(name)));
-  const asInt = (v: Expr): Expr => ({ kind: 'cast', arg: v, to: 'int' });
   return {
     kind: 'case',
     whens: [
       // Number: ONE bucket across int/real — cast each side by its own storage class, then compare.
       [bothIn([...NUMERIC_CAST_TO_INT, ...CAST_TO_REAL]), binary(op, storedCompareOn(typeA)(valA), storedCompareOn(typeB)(valB))],
-      // Date (epoch) and Duration (total nanos) each ride as an integer → chronological order.
-      [bothEq('datetime'), binary(op, asInt(valA), asInt(valB))],
-      [bothEq('duration'), binary(op, asInt(valA), asInt(valB))],
+      // Date (epoch) and Duration (total nanos) each ride as a whole number → chronological order.
+      [bothEq('datetime'), binary(op, wholeNumber(valA), wholeNumber(valB))],
+      [bothEq('duration'), binary(op, wholeNumber(valA), wholeNumber(valB))],
       // String/char (lexical), Boolean (0/1) and UUID (lexical, per `orderability.ts`) compare the value.
       [bothIn(['string', 'char']), binary(op, valA, valB)],
       [bothEq('boolean'), binary(op, valA, valB)],

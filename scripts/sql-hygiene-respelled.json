@@ -23,7 +23,6 @@
   "g.V().hasLabel(\"person\").choose(values(\"name\")). option(P.eq(\"marko\"), values(\"age\")). option(Pick.none, values(\"name\"))",
   "g.V().hasLabel(\"person\").format(\"%{_} %{_} %{_}\").by(constant(\"hello\")).by(values(\"name\"))",
   "g.V().hasLabel(\"software\").as(\"a\").values(\"name\").concat(\" uses \").concat(__.select(\"a\").values(\"lang\"))",
-  "g.V().local(__.properties(\"location\").order().by(T.value, Order.asc).range(0, 2)).value()",
   "g.V().local(aggregate(\"a\").by(__.outE(\"created\").count())). out().out(). local(aggregate(\"a\").by(__.inE(\"created\").values(\"weight\").sum())). cap(\"a\")",
   "g.V().match(__.as(\"a\").has(\"song\", \"name\", \"HERE COMES SUNSHINE\"), __.as(\"a\").map(__.inE(\"followedBy\").values(\"weight\").mean()).as(\"b\"), __.as(\"a\").inE(\"followedBy\").as(\"c\"), __.as(\"c\").filter(__.values(\"weight\").where(P.gte(\"b\"))).outV().as(\"d\")). select(\"d\").by(\"name\")",
   "g.inject(1).as(\"age\").V().format(\"%{name} is %{age} years old\")",

@@ -7,11 +7,11 @@ import { arg, type Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../elem.ts';
 import { constLit } from './const.ts';
 import { edgeLabel, elementNode, elementObject, elementPayload, externalId as elementExternalId, vertexLabels } from './element.ts';
-import { CONSTANT, storedCompareOn } from './predicate.ts';
+import { CONSTANT } from './predicate.ts';
 import { valueIsKind } from './receiver.ts';
 import type { ValueEvidence } from './tag.ts';
 import { propertyRelation } from './property.ts';
-import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, renumber, storedPayload, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
+import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, renumber, storedOrderKey, storedPayload, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 
 // ---------- GraphSource: one traversal vocabulary over two physical graph shapes ----------
 //
@@ -728,9 +728,10 @@ export const BaseGraph: GraphSource = {
       id: fresh('f'), input: scan, channels: [], type: scan.type,
       pred: and(eq(col(scan.id, owner), id), eq(col(scan.id, 'key'), compilerText(key))),
     });
-    // An ORDERING read is a sort key, so it reads the comparable `value` (a BigDecimal sorts by its number,
-    // not as TEXT after every number); any other read is the payload the stream hands onward.
-    const value = ordering ? storedCompareOn(col(mine.id, 'vtype'))(col(mine.id, 'value')) : storedPayload(col(mine.id, 'value'), col(mine.id, 'exact'));
+    // An ORDERING read is a sort key, so it reads the comparable `value` (`storedOrderKey` — a BigDecimal or a
+    // long past int64 sorts by its number, not as TEXT after every number); any other read is the payload the
+    // stream hands onward.
+    const value = ordering ? storedOrderKey(col(mine.id, 'value'), col(mine.id, 'vtype')) : storedPayload(col(mine.id, 'value'), col(mine.id, 'exact'));
     return firstOf(mine, value, col(mine.id, 'id'), fresh);
   },
 

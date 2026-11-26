@@ -281,6 +281,27 @@ export const PROPERTIES = {
 const EXACT_TAIL_VTYPES: readonly string[] = ['bigdecimal', 'long', 'bigint'];
 
 /**
+ * A WHOLE-NUMBER carrier as SQLite's number — ONE primitive for every carrier of a long/bigint, a datetime's
+ * epoch or a duration's nanos, whether it rides as INTEGER, as decimal TEXT or as the REAL a wide one stores.
+ * `CAST(x AS NUMERIC)` is INTEGER inside int64 and REAL past it (the same `sqlite3AtoF` a stored wide long
+ * went through), reads `x` once, and never clamps — `CAST AS INTEGER` saturates a value past int64 onto ±2^63,
+ * so every wide value tied there and sorted in insertion order. Past 2^53 the order is the double order — the
+ * documented "a `bigint` outside the long range compares at double precision" (`docs/limitations.md` §3). A BigDecimal does NOT go
+ * through this: a scale-0 decimal past 2^53 must meet its stored REAL, so it stays `CAST AS REAL`.
+ */
+export const wholeNumber = (carrier: Expr): Expr => ({ kind: 'cast', arg: carrier, to: 'numeric' });
+
+/**
+ * A STORED property row's SORT KEY, over the row's own `value`/`vtype` columns. `value` is the comparable
+ * form (`storedForm`) for every tag but `duration`, whose nanos ride as decimal TEXT and so key through
+ * `wholeNumber` (until a duration stores its comparable number — `docs/outstanding-work.md`).
+ */
+export function storedOrderKey(value: Expr, vtype: Expr): Expr {
+  if (vtype.kind === 'lit' && vtype.source === 'compiler-text') return vtype.value === 'duration' ? wholeNumber(value) : value;
+  return { kind: 'case', whens: [[{ kind: 'binary', op: '=', left: vtype, right: compilerText('duration') }, wholeNumber(value)]], else: value };
+}
+
+/**
  * THE PROPERTY ROW'S TWO VALUE COLUMNS, from a value in its PAYLOAD form (what a stream carries and the
  * output frames) and its tag. `value` is the COMPARABLE form, `exact` the digits only the output reads.
  *
@@ -310,10 +331,8 @@ export function storedForm(payload: Expr, vtype: Expr): { readonly value: Expr; 
   const wideInt: Expr = { kind: 'binary', op: 'and', left: storage('integer'), right: { kind: 'binary', op: 'or',
     left: { kind: 'binary', op: '>', left: payload, right: compilerInt(SAFE_INT) }, right: { kind: 'binary', op: '<', left: payload, right: compilerInt(-SAFE_INT) } } };
   const real: Expr = { kind: 'cast', arg: payload, to: 'real' };
-  const int: Expr = { kind: 'cast', arg: payload, to: 'int' };
-  // A long/bigint TEXT is an INTEGER where its digits fit int64 (the INTEGER spells them back), else its REAL.
-  const fits: Expr = { kind: 'binary', op: '=', left: { kind: 'cast', arg: int, to: 'text' }, right: payload };
-  const wholes = staticVtype === 'bigdecimal' ? [] : [[among(['long', 'bigint']), { kind: 'case', whens: [[fits, int]], else: real } as Expr] as const];
+  // A long/bigint TEXT is an INTEGER where its digits fit int64, else its REAL (`wholeNumber`).
+  const wholes = staticVtype === 'bigdecimal' ? [] : [[among(['long', 'bigint']), wholeNumber(payload)] as const];
   const decimals = staticVtype !== undefined && staticVtype !== 'bigdecimal' ? [] : [[among(['bigdecimal']), real] as const];
   return {
     value: { kind: 'case', whens: [...decimals, ...wholes], else: payload },
@@ -328,14 +347,14 @@ export function storedForm(payload: Expr, vtype: Expr): { readonly value: Expr; 
  * row (a correlated `has(k, select('e'))` seeks `(key, value = ?)` on it; a scalar subquery there would lose
  * the seek). Each tag converts EXACTLY as `storedForm` stores it, or one number meets two different values:
  * a BigDecimal by `CAST(… AS REAL)` — a bare `+ 0` makes a scale-0 decimal past 2^53 an exact INTEGER, which
- * never equals the stored, rounded REAL; a long/bigint by `+ 0` — its INTEGER inside int64, its REAL past it,
- * the same `sqlite3AtoF` a CAST uses. A number is itself. Only an exact-tail tag converts: a String spelling a
+ * never equals the stored, rounded REAL; a long/bigint by `wholeNumber` — its INTEGER inside int64, its REAL past
+ * it, exactly as `storedForm` stores it. A number is itself. Only an exact-tail tag converts: a String spelling a
  * number stays TEXT and never equals one.
  */
 export function comparableOf(payload: Expr, vtype: Expr): Expr {
   const staticVtype = vtype.kind === 'lit' && vtype.source === 'compiler-text' ? String(vtype.value) : undefined;
   const decimal: Expr = { kind: 'cast', arg: payload, to: 'real' };
-  const whole: Expr = { kind: 'binary', op: '+', left: payload, right: compilerInt(0) };
+  const whole: Expr = wholeNumber(payload);
   if (staticVtype !== undefined) return staticVtype === 'bigdecimal' ? decimal : EXACT_TAIL_VTYPES.includes(staticVtype) ? whole : payload;
   const tagIn = (names: readonly string[]): Expr => ({ kind: 'in-list', expr: vtype, values: names.map(compilerText) });
   return { kind: 'case', whens: [[tagIn(['bigdecimal']), decimal], [tagIn(['long', 'bigint']), whole]], else: payload };

@@ -124,11 +124,13 @@ const SCHEMA = [
   // type tag, so list/set/map ELEMENTS + typed/non-string KEYS + arbitrary nesting round-trip
   // with each leaf's exact gremlin type (gremlin-types.ts valueNodeOf; framed via
   // execute.ts frameTypedNode). `meta` is a JSONB {metaKey: scalar} blob, nullable.
-  // `value` is always the COMPARABLE form: a number SQLite compares and indexes natively. A number
+  // `value` is the COMPARABLE form: a number SQLite compares and indexes natively. A number
   // whose exact digits a JS number cannot carry (a BigDecimal, a long/bigint past ±2^53) keeps those
   // digits in `exact` (TEXT, else NULL), which only the output reads (`storedForm`/`storedPayload`,
   // src/compiler/rel/build.ts). So every compare, seek and sort reads `value` with no decimal arm, and
-  // `(key, value)` serves a BigDecimal equality like any other.
+  // `(key, value)` serves a BigDecimal equality like any other. The one exception is a `duration`: its
+  // nanos still ride as decimal TEXT, so a sort keys it through `storedOrderKey` (build.ts) until it
+  // stores its comparable number (docs/outstanding-work.md).
   `CREATE TABLE IF NOT EXISTS vertex_properties(
      id INTEGER PRIMARY KEY, node INTEGER NOT NULL REFERENCES nodes(id),
      key TEXT NOT NULL, value, vtype TEXT, meta BLOB, exact TEXT)`,

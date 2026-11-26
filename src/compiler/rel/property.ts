@@ -2,9 +2,9 @@ import { col, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, RelId } from '../../rel/types.ts';
-import { and, byEncounter, carriedCols, eq, jsonExtract, jsonOf, keyMembership, meta, PROPERTIES, storedValueOn, typeOf, type Minter } from './build.ts';
+import { and, byEncounter, carriedCols, eq, jsonExtract, jsonOf, keyMembership, meta, PROPERTIES, storedOrderKey, storedValueOn, typeOf, type Minter } from './build.ts';
 import { PER_ROW, STATIC } from '../../sql/kernel/render.ts';
-import { storedCompareOn, valueSet } from './predicate.ts';
+import { valueSet } from './predicate.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
 import type { RelFraming } from './framing.ts';
 import type { Elem } from '../elem.ts';
@@ -229,9 +229,9 @@ export function propertyOrderTerms(props: Rel, ownerElem: Elem): readonly Expr[]
   const own = (name: string): Expr => col(props.id, PROP(name));
   // A VertexProperty sorts by its id, which for us IS the stored rowid — the same thing `id()` frames.
   if (ownerElem === 'vertex') return [own('id')];
-  // An edge Property sorts by KEY then VALUE, and the value goes through the one compare authority so a
-  // number carried as decimal TEXT sorts numerically (the reason `order().by('age')` spends it too).
-  return [own('key'), storedCompareOn(own('vtype'))(storedValueOn(own('value'), own('vtype')))];
+  // An edge Property sorts by KEY then VALUE, and the value is the stored row's sort key (`storedOrderKey`):
+  // the comparable `value`, so a wide number sorts by its number and not as its exact digits.
+  return [own('key'), storedOrderKey(own('value'), own('vtype'))];
 }
 
 /** A property traverser's IDENTITY columns — what a bare `dedup()` groups by. */
@@ -427,8 +427,9 @@ export function propertyNode(rowid: Expr, ownerElem: Elem, fresh: Minter): Expr 
 
 /** WHICH single column of the stored property row a child body asks for. Named rather than passed as a
  *  raw string so a caller cannot spell a column this module does not carry. `meta` is VERTEX-ONLY (an
- *  edge `Property` has no meta-properties; `propCols`). */
-export type PropertyRead = 'key' | 'value' | 'vtype' | 'owner' | 'meta';
+ *  edge `Property` has no meta-properties; `propCols`). `order` is the value's SORT KEY (`storedOrderKey`),
+ *  not a payload: what an ordering reads where `value` is what a stream hands onward. */
+export type PropertyRead = 'key' | 'value' | 'order' | 'vtype' | 'owner' | 'meta';
 
 /**
  * ONE stored column of the property at `rowid`, as a correlated expression.
@@ -441,6 +442,7 @@ export function propertyReadOf(rowid: Expr, ownerElem: Elem, read: PropertyRead,
   if (read === 'meta' && ownerElem !== 'vertex') return compilerNull();
   const value = read === 'owner' ? col(rel.id, owner)
     : read === 'value' ? storedValueOn(col(rel.id, 'value'), col(rel.id, 'vtype'), col(rel.id, 'exact'))
+    : read === 'order' ? storedOrderKey(col(rel.id, 'value'), col(rel.id, 'vtype'))
       : col(rel.id, read);
   const only = make.project({
     id: fresh('prp'), input: rel, channels: [], type: typeOf(meta('v', 'any', true)),

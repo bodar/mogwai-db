@@ -18,7 +18,10 @@ export type Expr =
   | { readonly kind: 'unary'; readonly op: 'not' | 'neg' | 'unindexed'; readonly arg: Expr }
   | { readonly kind: 'binary'; readonly op: BinaryOp; readonly left: Expr; readonly right: Expr }
   | { readonly kind: 'case'; readonly whens: readonly (readonly [Expr, Expr])[]; readonly else?: Expr }
-  | { readonly kind: 'cast'; readonly arg: Expr; readonly to: SqlType }
+  /** `numeric` is SQLite's `CAST(x AS NUMERIC)`: a whole number as INTEGER inside int64 and REAL past it,
+   *  never clamped (`CAST AS INTEGER` saturates onto ±2^63). It is the one spelling of "a whole-number carrier
+   *  as SQLite's number" (`wholeNumber`, `src/compiler/rel/build.ts`). */
+  | { readonly kind: 'cast'; readonly arg: Expr; readonly to: SqlType | 'numeric' }
   | { readonly kind: 'call'; readonly fn: string; readonly args: readonly Expr[]; readonly distinct?: boolean }
   /**
    * `filter` is SQL's `FILTER (WHERE …)` — the rows of the group this aggregate does NOT take, with the

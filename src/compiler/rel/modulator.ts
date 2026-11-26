@@ -321,14 +321,10 @@ function projectionOf(
   if (host.kind === 'property') {
     // `T.key` / `T.value` — a property's OWN two tokens, read off the stored row through the one
     // authority for that row's columns (`propertyReadOf`, `property.ts`), so a key read here and a
-    // `key()` STEP cannot disagree. The value takes the ordering wrapper from its own `vtype` for the
-    // reason every stored value does: an exact number carried as decimal TEXT would otherwise sort
-    // lexically and after every numeric row.
+    // `key()` STEP cannot disagree. An ordering reads the value's stored SORT KEY (`order`), not its
+    // payload: a number's exact digits ride as TEXT and would otherwise sort lexically after every number.
     if (key.kind === 'token' && PROPERTY_TOKENS.has(key.token)) {
-      const read = propertyReadOf(host.id, host.ownerElem, key.token === 'key' ? 'key' : 'value', fresh);
-      return always(ordering && key.token === 'value'
-        ? storedCompareOn(propertyReadOf(host.id, host.ownerElem, 'vtype', fresh))(read)
-        : read);
+      return always(propertyReadOf(host.id, host.ownerElem, key.token === 'key' ? 'key' : ordering ? 'order' : 'value', fresh));
     }
     // `by('k')` over a VertexProperty — an Element — reads its META-property `k` (`ElementValueTraversal`
     // over the VertexProperty), present where it is non-null, ordered through its per-row tag as a stored

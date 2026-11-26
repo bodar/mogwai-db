@@ -1455,6 +1455,13 @@ Building blocks that unblock many other items. Do these before the items that de
 - **Fix:** Owner decision (2026-11-05): a typed value is one carrier, with a total per-row type tag. NaN uses the same carrier. Build the plan as written (P1 is done; T1–T8 remain). It absorbs `r4-fu4`, `rf3-project-null-label`, `S9.9`, `rf3-static-null-is`, the null-bound branch label and the NaN wall.
 - **Where:** `docs/2026-11-05-typed-value-carrier-plan.md`
 
+#### Store a duration comparable in `value` (`duration-stored-comparable`)
+- **Area:** values, storage
+- **Reach:** rare
+- **Problem:** A `duration` property stores its nanos as decimal TEXT in `value`. It is the one exception to the `storage.ts` rule that `value` is the comparable form. So a stored sort key cannot read `value` alone. It goes through `storedOrderKey`, a per-row `CASE` on `vtype = 'duration'`.
+- **Fix:** Move `duration` into the comparable/exact tail of `storedForm`: store its number in `value` and its digits in `exact`. Then `storedOrderKey` is `value` with no `CASE`, and the `storage.ts` rule has no exception. The duration readers in `execute.ts`, the GraphSON and CSV formats and `predicate.ts` must read `exact` first.
+- **Where:** `src/compiler/rel/build.ts` `storedForm`, `storedOrderKey`; `src/storage.ts` (the `vertex_properties` comment)
+
 #### Closed per-row node vocabulary (`per-row-node-vocabulary-closed`)
 - **Area:** values
 - **Reach:** plausible
