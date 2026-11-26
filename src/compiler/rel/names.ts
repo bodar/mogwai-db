@@ -1,0 +1,109 @@
+/**
+ * THE NAME DICTIONARIES — the one authority for how the RelIR reads and writes an interned NAME.
+ *
+ * A label is stored as a rowid into the `labels` table, a set of names under a `UNIQUE (name)` index.
+ * Every step that names a label goes through that indirection: a read filters `labels` by name and joins
+ * the ids (`nameIds`), a creation upserts its names and gets the ids back (`internNames`). Each name
+ * resolves INSIDE the statement, through the index — the compile never reads the store, so a plan is a
+ * function of the query text alone, and a name that was never interned is an empty set, not an error.
+ *
+ * This is a `BaseGraph` storage detail. It stays out of the `Source` interface (`source.ts`): a bound
+ * or landed graph carries its labels as JSON name arrays, not as ids.
+ */
+import { col, compilerText, disjoin, param, type Expr } from '../../rel/expr.ts';
+import * as make from '../../rel/factory.ts';
+import type { Rel } from '../../rel/rel.ts';
+import { insert } from '../../rel/stmt-factory.ts';
+import type { Stmt } from '../../rel/stmt.ts';
+import { EXCLUDED } from '../../rel/types.ts';
+import type { Arg } from '../../gremlin/frontend.ts';
+import { jsonEachSet, meta, typeOf, type Minter } from './build.ts';
+
+/** A name dictionary: a table of `(id, name)` rows under a unique name. Labels are the only one today. */
+export type NameDict = 'labels';
+
+/** The relation-id and alias hints a scan is minted with. They only spell the SQL aliases. */
+type ScanHints = readonly [id: string, alias: string];
+
+/** A scan of a name dictionary, as its `(id, name)` rows. */
+export const dictScan = (dict: NameDict, fresh: Minter, [id, alias]: ScanHints = ['lbl', 'rl']): Extract<Rel, { readonly kind: 'scan' }> =>
+  make.scan({ id: fresh(id), table: dict, alias: fresh(alias), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
+
+/**
+ * The ids of a set of NAMES in `dict` — the filter each label-restricting step (`hasLabel`, `out('knows')`,
+ * `has(label, k, v)`, `dropLabel('x')`) joins against.
+ *
+ * The names are either label ARGUMENTS or a compile-time list. An inline argument (a parsed literal
+ * `'knows'`) and a compile-time name INLINE as a `compilerText` — zero binds. A label PARAMETER BINDS: a
+ * scalar `$l` as one `?` on the name, a bound list `$ls` as ONE `jsonb(?)` exploded by `json_each`. So a
+ * parameter's data never enters the statement text, the same rule the id and `within` set paths keep.
+ * Callers pre-validate arguments with `labelArgsAllStrings`, so every value here is text.
+ */
+export function nameIds(dict: NameDict, names: readonly Arg[] | readonly string[], fresh: Minter, hints?: ScanHints): Rel {
+  const scan = dictScan(dict, fresh, hints);
+  const nameCol = col(scan.id, 'name');
+  const inline: string[] = [];
+  const clauses: Expr[] = [];
+  for (const a of names) {
+    if (typeof a === 'string') {
+      inline.push(a);
+    } else if (a.name == null) {
+      const members = a.members ? a.members.map((m) => m.value) : Array.isArray(a.value) ? a.value : [a.value];
+      for (const v of members) inline.push(v as string);
+    } else if (Array.isArray(a.value)) {
+      clauses.push({ kind: 'in-query', expr: nameCol, plan: jsonEachSet(a.name, a.value, fresh), negated: false });
+    } else {
+      clauses.push({ kind: 'binary', op: '=', left: nameCol, right: param(a.value, a.name, 'text') });
+    }
+  }
+  if (inline.length) clauses.unshift({ kind: 'in-list', expr: nameCol, values: inline.map(compilerText) });
+  const pred = disjoin(clauses);
+  const matching = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: pred! });
+  return make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(matching.id, 'id')]] });
+}
+
+/**
+ * A creation's names as it WRITES them: the compile-time names (a constant creation, cross-joined onto
+ * every new row), or the `(o, name)` relation that gives each traverser its own — a label ASSIGNMENT,
+ * joined onto the new rows by position.
+ */
+export type CreationNames = readonly Expr[] | Rel;
+export const isConstantNames = (names: CreationNames): names is readonly Expr[] => Array.isArray(names);
+
+/**
+ * THE NAME → ID INDIRECTION, as one statement — `GraphStore.labelId`'s idiom in the algebra.
+ *
+ * The dictionary is a SET, so `ON CONFLICT (name) DO UPDATE SET name = excluded.name RETURNING id` is
+ * what returns the id whether the row was new or already there; `DO NOTHING` returns no row on the
+ * existing case, which is why it is not that. It interns the WHOLE list in one statement, so the bind
+ * count is a function of the query TEXT and not of anything the data decides.
+ *
+ * `null` for an EMPTY list, and that is a real state rather than a guard: under
+ * `LabelCardinality.ZERO_OR_MORE` a bare `addV()` creates a vertex carrying none, and there is nothing
+ * to intern — `Values` refuses the empty relation anyway (§3.3).
+ *
+ * Written once because every creation needs it (`addV`, `addE`, `addLabel`, `mergeE`'s create arm), and
+ * each hand-rolled copy of an upsert whose `DO UPDATE` looks redundant is one more chance to write the
+ * `DO NOTHING` that silently returns nothing.
+ */
+export function internNames(dict: NameDict, names: CreationNames, bind: (stmt: Stmt) => Rel, fresh: Minter): Rel | null {
+  if (isConstantNames(names) && !names.length) return null;
+  const target = dictScan(dict, fresh, ['t', 'wt']);
+  const onConflict = { target: ['name'], set: [['name', col(EXCLUDED, 'name')] as const] };
+  if (isConstantNames(names)) {
+    return bind(insert({
+      target, cols: ['name'],
+      source: make.values({ id: fresh('lv'), channels: [], type: typeOf(meta('name', 'text')), rows: names.map((name) => [name]) }),
+      channels: [], type: typeOf(meta('id', 'int')), onConflict, returning: [['id', col(target.id, 'id')]],
+    }));
+  }
+  // An ASSIGNMENT interns its DISTINCT names, and returns each with its id — the relation the
+  // per-traverser pairing joins on (`labelledByPosition`). `INSERT … SELECT … ON CONFLICT` needs the
+  // emitter's `WHERE true`, which it supplies for every such source.
+  const name = make.project({ id: fresh('p'), input: names, channels: [], type: typeOf(meta('name', 'text')), exprs: [['name', col(names.id, 'name')]] });
+  return bind(insert({
+    target, cols: ['name'], source: make.distinct({ id: fresh('d'), input: name, channels: [], type: name.type }),
+    channels: [], type: target.type, onConflict,
+    returning: [['id', col(target.id, 'id')], ['name', col(target.id, 'name')]],
+  }));
+}

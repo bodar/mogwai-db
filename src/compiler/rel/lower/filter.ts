@@ -334,7 +334,7 @@ function hasLabelClause(labelArgs: readonly Arg[], subject: ElementSubject, sour
   const asked = labelSetArgs(labelArgs);
   if (!asked) return null;
   if (asked.given && !asked.labels.length) return CONSTANT.false;
-  // An inline label inlines, a `$label` / `$labels` binds — all inside `labelIds`. An EMPTY argument list
+  // An inline label inlines, a `$label` / `$labels` binds — all inside `nameIds`. An EMPTY argument list
   // reaches here only from a marker the Pass tier should have rewritten, so it declines.
   if (!asked.labels.length) return null;
   // The physical name→id resolution and side-table test are the graph SOURCE's; only the arg

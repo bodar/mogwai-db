@@ -423,7 +423,7 @@ export function movement(step: IRStep, from: Frontier, elem: Elem, graph: GraphS
   if (FROM_EDGE.has(step.name) !== (elem === 'edge')) return null;
 
   // A movement's arguments are edge LABELS. An inline label inlines; a `$label` / `$labels` parameter
-  // binds through `labelIds`, so its data never enters the statement text. A non-string label declines.
+  // binds through `nameIds`, so its data never enters the statement text. A non-string label declines.
   // `labelSetArgs` also settles the NULL forms: `out(null,'knows')` is `out('knows')` because a null
   // label matches no edge, while `out(null)` NAMED a label and therefore matches none — which is a
   // different traversal from `out()`, whose empty set means every label.

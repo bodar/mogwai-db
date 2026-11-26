@@ -1,5 +1,5 @@
 import type { Channel, ChannelRole, Channels } from '../../channels.ts';
-import { col, compilerInt, compilerNull, compilerText, disjoin, lit, param, type Expr } from '../../rel/expr.ts';
+import { col, compilerInt, compilerNull, compilerText, lit, param, type Expr } from '../../rel/expr.ts';
 import { jsonChunks, jsonTextChunks, type JsonChunk } from '../../json-chunks.ts';
 import { CF_MAX_VALUE_BYTES, fitsUtf8 } from '../../do-limits.ts';
 import { SAFE_INT } from './reducer.ts';
@@ -621,41 +621,12 @@ export const labelSetArgs = (
 };
 
 /** Is every `Arg` a LABEL — an inline string, a literal list of strings, a string parameter, or a bound
- *  list of strings? Callers validate before building `labelIds`, which then trusts the values are text
+ *  list of strings? Callers validate before building `nameIds`, which then trusts the values are text
  *  (labels are strings by spec; a non-string label is a decline the caller owns). */
 export const labelArgsAllStrings = (args: readonly Arg[]): boolean =>
   args.every((a) => (a.name == null
     ? (a.members ? a.members.map((m) => m.value) : Array.isArray(a.value) ? a.value : [a.value]).every((v) => typeof v === 'string')
     : Array.isArray(a.value) ? a.value.every((v) => typeof v === 'string') : typeof a.value === 'string'));
-
-/**
- * The `labels` rowids matching a set of label ARGUMENTS — the name filter over the `labels` table each
- * label-restricting step (`hasLabel`, `out('knows')`, `has(label, k, v)`) joins against. An inline
- * label (a parsed literal `'knows'`) INLINES as a `compilerText` name — zero binds; a label PARAMETER
- * BINDS — a scalar `$l` as one `?` on the name, a bound list `$ls` as ONE `jsonb(?)` exploded by
- * `json_each` — so a parameter's data never enters the statement text, the same rule the id and
- * `within` set paths keep. Callers pre-validate with `labelArgsAllStrings`, so every value here is text.
- */
-export function labelIds(args: readonly Arg[], fresh: Minter): Rel {
-  const scan = make.scan({ id: fresh('lbl'), table: 'labels', alias: fresh('rl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
-  const nameCol = col(scan.id, 'name');
-  const inline: string[] = [];
-  const clauses: Expr[] = [];
-  for (const a of args) {
-    if (a.name == null) {
-      const members = a.members ? a.members.map((m) => m.value) : Array.isArray(a.value) ? a.value : [a.value];
-      for (const v of members) inline.push(v as string);
-    } else if (Array.isArray(a.value)) {
-      clauses.push({ kind: 'in-query', expr: nameCol, plan: jsonEachSet(a.name, a.value, fresh), negated: false });
-    } else {
-      clauses.push({ kind: 'binary', op: '=', left: nameCol, right: param(a.value, a.name, 'text') });
-    }
-  }
-  if (inline.length) clauses.unshift({ kind: 'in-list', expr: nameCol, values: inline.map(compilerText) });
-  const pred = disjoin(clauses);
-  const matching = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: pred! });
-  return make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(matching.id, 'id')]] });
-}
 
 const COLLECTION_VTYPES = ['list', 'map', 'set'] as const;
 

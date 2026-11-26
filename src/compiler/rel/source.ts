@@ -11,7 +11,8 @@ import { CONSTANT } from './predicate.ts';
 import { valueIsKind } from './receiver.ts';
 import type { ValueEvidence } from './tag.ts';
 import { propertyRelation } from './property.ts';
-import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, labelIds, meta, NODE_COLS, PROPERTIES, renumber, storedOrderKey, storedPayload, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
+import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, meta, NODE_COLS, PROPERTIES, renumber, storedOrderKey, storedPayload, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
+import { nameIds } from './names.ts';
 
 // ---------- GraphSource: one traversal vocabulary over two physical graph shapes ----------
 //
@@ -486,7 +487,7 @@ export const BaseGraph: GraphSource = {
   }),
 
   edgeLabelMatch: (labelCol, labels, fresh) =>
-    ({ kind: 'in-query', expr: labelCol, plan: labelIds(labels, fresh), negated: false }),
+    ({ kind: 'in-query', expr: labelCol, plan: nameIds('labels', labels, fresh), negated: false }),
 
   propertyValues: (input, kind, keys, fresh) => {
     const { table, owner } = PROPERTIES[kind];
@@ -559,7 +560,7 @@ export const BaseGraph: GraphSource = {
   },
 
   hasLabelPredicate: (kind, id, labelCol, labels, fresh, row) => {
-    const ids = labelIds(labels, fresh);
+    const ids = nameIds('labels', labels, fresh);
     // The edge's own label column, where the physical row is in scope (the source scan): a direct read
     // the covering index serves.
     if (kind === 'edge' && labelCol) return { kind: 'in-query', expr: labelCol, plan: ids, negated: false };

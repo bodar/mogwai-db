@@ -40,6 +40,7 @@ import { BRANCH_KINDS, FILTER_HOSTS, nondeterministic } from '../ir/step.ts';
 import type { ChildWrite } from '../unsupported.ts';
 import { eachChildChain, valueNodes, type BodyReader } from '../ir/walk.ts';
 import { pastBudget } from '../../sql/kernel/budget.ts';
+import { dictScan, internNames, isConstantNames, nameIds, type CreationNames } from './names.ts';
 
 /** The presence of a computed match value ADMITTED by its `'unknown'` check — the two merge carriers
  *  below refuse an unknown presence before they reach here, so this is that admission read back. */
@@ -2402,7 +2403,7 @@ export function elementProperty(target: Rel, elem: Elem, writes: readonly Proper
 
 /**
  * `addLabel(...)` over an EXISTING vertex stream — a sideEffect that ADDS labels idempotently and
- * passes the SAME vertices through. It is `internLabels`' creation pairing applied to rows that
+ * passes the SAME vertices through. It is `internNames`' creation pairing applied to rows that
  * already exist rather than freshly-inserted ones, plus `elementProperty`'s snapshot-then-pass-through.
  *
  * A name is a constant, or a body resolved PER TRAVERSER over the snapshot it mutates (`ownerSite`) by
@@ -2495,7 +2496,7 @@ function bindLabels(
   const constant = 'owners' in labels ? labels : null;
   const assigned = constant ? null : labels as { readonly targets: Rel; readonly names: Rel };
   // A constant `names` is non-empty, so never the null arm.
-  const labelRow = internLabels(constant ? constant.names.map(text) : assigned!.names, bind, fresh)!;
+  const labelRow = internNames('labels', constant ? constant.names.map(text) : assigned!.names, bind, fresh)!;
   const target = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
   let pairs: Rel;
   if (constant) {
@@ -2620,22 +2621,12 @@ function deleteVertexLabels(owners: Rel, names: readonly string[] | null, fresh:
     target, channels: [], type: typeOf(),
     where: and(
       { kind: 'in-query', expr: col(target.id, owner), plan: owners, negated: false },
-      { kind: 'in-query', expr: col(target.id, 'label'), plan: namedLabelIds(names, fresh), negated: false },
+      { kind: 'in-query', expr: col(target.id, 'label'), plan: nameIds('labels', names, fresh, ['t', 'wt']), negated: false },
     )!,
     returning: [],
   });
 }
 
-/** The ids of a compile-time set of label NAMES — `labels` is the name→id interning table, and a name
- *  that was never interned simply contributes no row, which is why `dropLabel("xyz")` is a no-op. */
-function namedLabelIds(names: readonly string[], fresh: Minter): Rel {
-  const scan = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('wt'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
-  const matching = make.filter({
-    id: fresh('f'), input: scan, channels: [], type: scan.type,
-    pred: { kind: 'in-list', expr: col(scan.id, 'name'), values: names.map((name) => text(name)) },
-  });
-  return make.project({ id: fresh('p'), input: matching, channels: [], type: ID_TYPE, exprs: [['id', col(matching.id, 'id')]] });
-}
 
 
 /**
@@ -2800,47 +2791,8 @@ function runtimeKeyedWrite(spec: PropSpec, keyBody: readonly IRStep[], elem: Ele
 
 // ---------- addV() ----------
 
-const LABELS_COLS: readonly ColMeta[] = [meta('id', 'int'), meta('name', 'text')];
 const NODES_COLS: readonly ColMeta[] = [meta('id', 'int'), meta('uid', 'text', true)];
 const VERTEX_LABEL_COLS: readonly ColMeta[] = [meta('node', 'int'), meta('label', 'int')];
-
-/**
- * THE LABEL NAME → ID INDIRECTION, as one statement — `GraphStore.labelId`'s idiom in the algebra.
- *
- * The `labels` table is a SET, so `ON CONFLICT (name) DO UPDATE SET name = excluded.name RETURNING
- * id` is what returns the id whether the row was new or already there; `DO NOTHING` returns no row
- * on the existing case, which is why it is not that. It interns the WHOLE list in one statement, so
- * the bind count is a function of the query TEXT and not of anything the data decides.
- *
- * `null` for an EMPTY list, and that is a real state rather than a guard: under
- * `LabelCardinality.ZERO_OR_MORE` a bare `addV()` creates a vertex carrying none, and there is
- * nothing to intern — `Values` refuses the empty relation anyway (§3.3).
- *
- * Written once because all three creations need it (`addV`, `addE`, `mergeE`'s create arm) and a
- * third hand-rolled copy of an upsert whose `DO UPDATE` looks redundant is a third chance to write
- * the `DO NOTHING` that silently returns nothing.
- */
-function internLabels(labels: CreationLabels, bind: Binder, fresh: Minter): Rel | null {
-  if (isConstantLabels(labels) && !labels.length) return null;
-  const target = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('wt'), channels: [], type: typeOf(...LABELS_COLS) });
-  const onConflict = { target: ['name'], set: [['name', col(EXCLUDED, 'name')] as const] };
-  if (isConstantLabels(labels)) {
-    return bind(insert({
-      target, cols: ['name'],
-      source: make.values({ id: fresh('lv'), channels: [], type: typeOf(meta('name', 'text')), rows: labels.map((label) => [label]) }),
-      channels: [], type: typeOf(meta('id', 'int')), onConflict, returning: [['id', col(target.id, 'id')]],
-    }));
-  }
-  // A label ASSIGNMENT interns its DISTINCT names, and returns each with its id — the relation the
-  // per-traverser pairing joins on (`labelledByPosition`). `INSERT … SELECT … ON CONFLICT` needs the
-  // emitter's `WHERE true`, which it supplies for every such source.
-  const name = make.project({ id: fresh('p'), input: labels, channels: [], type: typeOf(meta('name', 'text')), exprs: [['name', col(labels.id, 'name')]] });
-  return bind(insert({
-    target, cols: ['name'], source: make.distinct({ id: fresh('d'), input: name, channels: [], type: name.type }),
-    channels: [], type: typeOf(...LABELS_COLS), onConflict,
-    returning: [['id', col(target.id, 'id')], ['name', col(target.id, 'name')]],
-  }));
-}
 
 /**
  * `addV(label)` — ONE new vertex per incoming traverser, as statements.
@@ -2865,7 +2817,7 @@ function internLabels(labels: CreationLabels, bind: Binder, fresh: Minter): Rel 
  *   rather than a special case.
  */
 export function addVertex(
-  input: Rel, labels: CreationLabels, uid: string | number | null, writes: readonly PropertyWrite[],
+  input: Rel, labels: CreationNames, uid: string | number | null, writes: readonly PropertyWrite[],
   ordered: boolean, bind: Binder, fresh: Minter, child: ChildSeam, aliases: AliasMap, guard: Guarder,
   folded: readonly FoldedWrite[] = [],
 ): Rel | null {
@@ -2874,7 +2826,7 @@ export function addVertex(
   // with no `T.label` does the same. Nothing to intern and nothing to pair, so both statements are
   // absent rather than emitted over an empty `Values` — which is a relation `Values` refuses to
   // express anyway.
-  const labelRow = internLabels(labels, bind, fresh);
+  const labelRow = internNames('labels', labels, bind, fresh);
 
   const nodesTarget = make.scan({ id: fresh('t'), table: 'nodes', alias: fresh('wt'), channels: [], type: typeOf(...NODES_COLS) });
   // ORDERED BY THE INPUT'S OWN POSITION, explicitly. Rowids are assigned in the source's output
@@ -2906,7 +2858,7 @@ export function addVertex(
     // A CROSS JOIN, so N labels are N pairs per created node — the same statement whether the list
     // holds one name or four, which is what makes a multi-label creation no new shape. A per-traverser
     // assignment pairs each new row with ITS traverser's names, by the position `positioned` recovers.
-    const labelled = isConstantLabels(labels) ? null : labelledByPosition(positioned(created, fresh), ORD, labels, labelRow, fresh);
+    const labelled = isConstantNames(labels) ? null : labelledByPosition(positioned(created, fresh), ORD, labels, labelRow, fresh);
     const pairs = labelled
       ? make.project({ id: fresh('p'), input: labelled, channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')), exprs: [['node', col(labelled.id, 'id')], ['label', col(labelled.id, 'lbl')]] })
       : make.join({
@@ -3271,13 +3223,6 @@ type LabelArgs =
   | { readonly kind: 'const'; readonly names: readonly Expr[] }
   | { readonly kind: 'runtime'; readonly members: readonly (string | readonly IRStep[])[] };
 
-/**
- * A creation's labels as it WRITES them: the compile-time names (a constant creation, cross-joined onto
- * every new row), or the `(o, name)` relation that gives each traverser its own — a label ASSIGNMENT,
- * joined onto the new rows by position (`labelledByPosition`).
- */
-type CreationLabels = readonly Expr[] | Rel;
-const isConstantLabels = (labels: CreationLabels): labels is readonly Expr[] => Array.isArray(labels);
 
 /**
  * A creation's RUNTIME labels resolved per traverser, as the `(o, name)` relation it writes — `null` to
@@ -3296,7 +3241,7 @@ const isConstantLabels = (labels: CreationLabels): labels is readonly Expr[] => 
 function resolveCreationLabels(
   labels: LabelArgs, incoming: Rel, incomingElem: Elem | null, aliases: AliasMap,
   child: ChildSeam, bind: Binder, guard: Guarder, fresh: Minter,
-): CreationLabels | null {
+): CreationNames | null {
   if (labels.kind === 'const') return labels.names;
   const bodies = labels.members.filter((member): member is readonly IRStep[] => typeof member !== 'string');
   const site = parameterSite(incoming, incomingElem, aliases, bodies, fresh);
@@ -4146,7 +4091,7 @@ function endpointSeek(driving: Rel, sides: readonly ('src' | 'tgt')[], label: bo
     exprs: [['se_id', col(scan.id, 'id')], ['se_src', col(scan.id, 'src')], ['se_label', col(scan.id, 'label')], ['se_tgt', col(scan.id, 'tgt')]],
   });
   const labelId = (): Expr => {
-    const names = make.scan({ id: fresh('sl'), table: 'labels', alias: fresh('rsl'), channels: [], type: typeOf(...LABELS_COLS) });
+    const names = dictScan('labels', fresh, ['sl', 'rsl']);
     const named = make.filter({ id: fresh('f'), input: names, channels: [], type: names.type, pred: eq(col(names.id, 'name'), col(driving.id, 'lbl')) });
     return { kind: 'scalar', plan: make.project({ id: fresh('p'), input: named, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(named.id, 'id')]] }) };
   };
@@ -4158,11 +4103,11 @@ function endpointSeek(driving: Rel, sides: readonly ('src' | 'tgt')[], label: bo
 /** The LABEL seek of a vertex search that names a label (`label`, a name per driver): the vertices
  *  carrying it, through `labels(name)` and `vl_label`. */
 function labelSeek(driving: Rel, label: (driver: RelId) => Expr, fresh: Minter): Rel {
-  const names = make.scan({ id: fresh('sl'), table: 'labels', alias: fresh('rsl'), channels: [], type: typeOf(...LABELS_COLS) });
+  const names = dictScan('labels', fresh, ['sl', 'rsl']);
   const owners = make.scan({ id: fresh('sv'), table: 'vertex_labels', alias: fresh('rsv'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
   const labelled = make.join({
     id: fresh('j'), left: names, right: owners, join: 'inner', ordered: true, channels: [], on: eq(col(owners.id, 'label'), col(names.id, 'id')),
-    type: typeOf(...LABELS_COLS, ...VERTEX_LABEL_COLS),
+    type: typeOf(...names.type.cols, ...VERTEX_LABEL_COLS),
   });
   const index = make.project({
     id: fresh('p'), input: labelled, channels: [], type: typeOf(meta('sl_name', 'text'), meta('sl_node', 'int')),
@@ -4588,7 +4533,7 @@ export function elementAddE(
   // resolved against the INCOMING traverser — and its refusals, like the label's, before the insert.
   const folded = foldedParameters(writes, 'edge', incoming, elem, aliases, child, bind, guard, fresh);
   if (!folded) return null;
-  const labelRow = internLabels(names, bind, fresh)!;
+  const labelRow = internNames('labels', names, bind, fresh)!;
 
   // ORDERED BY THE INPUT'S OWN POSITION, for `addVertex`'s reason: rowids are assigned in the source's
   // output order, so this is what makes the k-th created edge the k-th input row — which is what the
@@ -4597,7 +4542,7 @@ export function elementAddE(
     ? make.sort({ id: fresh('so'), input: incoming, channels: incoming.channels, type: incoming.type, terms: [{ expr: col(incoming.id, ORD), dir: 'asc' }] })
     : incoming;
   // One label for every edge, or each traverser's own (`labelledByPosition`).
-  const paired = isConstantLabels(names)
+  const paired = isConstantNames(names)
     ? make.join({
       id: fresh('j'), left: inOrder, right: labelRow, join: 'cross', channels: [],
       type: typeOf(...inOrder.type.cols, meta('lbl', 'int')),
@@ -5064,7 +5009,7 @@ function mergeVComputed(
   const created = bind(insert({ target: nodesTarget, cols: ['uid'], source: rowPer, channels: [], type: ID_TYPE, returning: [['id', col(nodesTarget.id, 'id')]] }));
   const createLabels = creationLabels(labels, child);
   if (!createLabels || createLabels.kind !== 'const') return null;
-  const labelRow = internLabels(createLabels.names, bind, fresh);
+  const labelRow = internNames('labels', createLabels.names, bind, fresh);
   if (labelRow) {
     const labelTargetRows = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
     const pairs = make.join({ id: fresh('j'), left: created, right: labelRow, join: 'cross', channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
@@ -5208,7 +5153,7 @@ export function mergeVFromMap(
     const propProbe = make.project({ id: fresh('p'), input: vpMatch, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
     // A `T.label` key satisfied by the candidate carrying that label (hasLabel over vertex_labels).
     const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rl'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
-    const lb = make.scan({ id: fresh('lb'), table: 'labels', alias: fresh('rb'), channels: [], type: typeOf(...LABELS_COLS) });
+    const lb = dictScan('labels', fresh, ['lb', 'rb']);
     const vlJoin = make.join({ id: fresh('j'), left: vl, right: lb, join: 'inner', on: eq(col(vl.id, 'label'), col(lb.id, 'id')), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int'), meta('id', 'int'), meta('name', 'text')) });
     const vlMatch = make.filter({ id: fresh('f'), input: vlJoin, channels: [], type: vlJoin.type, pred: and(eq(col(vlJoin.id, 'node'), candId), eq(col(vlJoin.id, 'name'), valV(pairs))) });
     const labelProbe = make.project({ id: fresh('p'), input: vlMatch, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
@@ -5275,7 +5220,7 @@ export function mergeVFromMap(
     exprs: [['id', col(createdMaps.id, 'id')], ['name', mapLabelScalar(col(createdMaps.id, MAP_COL))]] }), true);
   // The `onCreate` CONSTANT label, onto a created vertex whose map names none — where the map does name
   // one, the guard above proved it is onCreate's, and the map's own label write below lands it once.
-  const labelRow = internLabels(createLabels.names, bind, fresh);
+  const labelRow = internNames('labels', createLabels.names, bind, fresh);
   if (labelRow) {
     const labelTargetRows = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
     const unnamed = make.filter({ id: fresh('f'), input: namedCreated, channels: [], type: namedCreated.type,
@@ -5286,7 +5231,7 @@ export function mergeVFromMap(
   // WRITE THE MAP'S PROPERTIES onto each created vertex (`mapEntryProperties`).
   bind(mapEntryProperties('vertex', createdMaps, fresh));
   // THE CREATED VERTEX'S LABEL, from the map's `T.label` (per created map). Intern the distinct label
-  // names — an upsert, `internLabels`' idiom, but data-sized over the created maps rather than a
+  // names — an upsert, `internNames`' idiom, but data-sized over the created maps rather than a
   // compile-time list — then link each created vertex to its label id by name. A map with no `T.label`
   // yields NULL and contributes no row (the labelless default, as g.addV()). The `onCreate` CONSTANT
   // label (above) is the fallback when the map names none.
@@ -5294,10 +5239,10 @@ export function mergeVFromMap(
     pred: { kind: 'binary', op: 'is not', left: col(namedCreated.id, 'name'), right: compilerNull('text') } }), true);
   const distinctNames = make.distinct({ id: fresh('d'), channels: [], type: typeOf(meta('name', 'text')),
     input: make.project({ id: fresh('p'), input: labelled, channels: [], type: typeOf(meta('name', 'text')), exprs: [['name', col(labelled.id, 'name')]] }) });
-  const labelsTable = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('wt'), channels: [], type: typeOf(...LABELS_COLS) });
+  const labelsTable = dictScan('labels', fresh, ['t', 'wt']);
   bind(insert({ target: labelsTable, cols: ['name'], source: distinctNames, channels: [], type: typeOf(),
     onConflict: { target: ['name'], set: [['name', col(EXCLUDED, 'name')]] }, returning: [] }));
-  const lbLookup = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('rb'), channels: [], type: typeOf(...LABELS_COLS) });
+  const lbLookup = dictScan('labels', fresh, ['t', 'rb']);
   const vlJoined = make.join({ id: fresh('j'), left: labelled, right: lbLookup, join: 'inner', on: eq(col(labelled.id, 'name'), col(lbLookup.id, 'name')), channels: [],
     type: typeOf(meta('id', 'int'), meta('name', 'text'), meta('lid', 'int'), meta('lname', 'text')) });
   const vlTarget = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
@@ -5537,7 +5482,7 @@ export function mergeEFromMap(
     const propsOk: Expr = { kind: 'exists', negated: true, plan: unsat };
     // The label: no `T.label` in the map matches any label, else the candidate's label must be that name.
     const lblCol = col(driver, 'lbl');
-    const lb = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('rb'), channels: [], type: typeOf(...LABELS_COLS) });
+    const lb = dictScan('labels', fresh, ['t', 'rb']);
     const lblFilter = make.filter({ id: fresh('f'), input: lb, channels: [], type: lb.type, pred: eq(col(lb.id, 'name'), lblCol) });
     const lblIds = make.project({ id: fresh('p'), input: lblFilter, channels: [], type: ID_TYPE, exprs: [['id', col(lblFilter.id, 'id')]] });
     const labelOk: Expr = or({ kind: 'binary', op: 'is', left: lblCol, right: compilerNull('text') },
@@ -5622,10 +5567,10 @@ export function mergeEFromMap(
   const labelling = bind(wantedLbl, true);
   const distinctNames = make.distinct({ id: fresh('d'), channels: [], type: typeOf(meta('name', 'text')),
     input: make.project({ id: fresh('p'), input: labelling, channels: [], type: typeOf(meta('name', 'text')), exprs: [['name', col(labelling.id, 'name')]] }) });
-  const labelsTable = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('wt'), channels: [], type: typeOf(...LABELS_COLS) });
+  const labelsTable = dictScan('labels', fresh, ['t', 'wt']);
   bind(insert({ target: labelsTable, cols: ['name'], source: distinctNames, channels: [], type: typeOf(),
     onConflict: { target: ['name'], set: [['name', col(EXCLUDED, 'name')]] }, returning: [] }));
-  const lbLookup = make.scan({ id: fresh('t'), table: 'labels', alias: fresh('rb'), channels: [], type: typeOf(...LABELS_COLS) });
+  const lbLookup = dictScan('labels', fresh, ['t', 'rb']);
   const withLid = make.join({ id: fresh('j'), left: labelling, right: lbLookup, join: 'inner', on: eq(col(labelling.id, 'name'), col(lbLookup.id, 'name')), channels: [],
     type: typeOf(meta('word', 'int'), meta('src', 'int'), meta('tgt', 'int'), meta(MAP_COL, 'json', true), meta('name', 'text'), meta('lid', 'int'), meta('lname', 'text')) });
 
@@ -6008,7 +5953,7 @@ function mergeEComputed(
   }
 
   // THE CREATE — an edge per wanted tuple, in `word` order so the assigned rowids recover their tuple.
-  const labelRow = internLabels(labels.map(text), bind, fresh)!;
+  const labelRow = internNames('labels', labels.map(text), bind, fresh)!;
   const inOrder = make.sort({ id: fresh('so'), input: wanted, channels: wanted.channels, type: wanted.type, terms: [{ expr: col(wanted.id, 'word'), dir: 'asc' }] });
   const paired = make.join({
     id: fresh('j'), left: inOrder, right: labelRow, join: 'cross', channels: [],
@@ -6324,7 +6269,7 @@ export function elementMergeE(
     });
     guard(make.project({ id: fresh('p'), input: second, channels: [], type: ID_TYPE, exprs: [['id', compilerInt(1)]] }), idTaken.guard);
   }
-  const labelRow = internLabels(labels.map(text), bind, fresh)!;
+  const labelRow = internNames('labels', labels.map(text), bind, fresh)!;
   const paired = make.join({
     id: fresh('j'), left: wanted, right: labelRow, join: 'cross', channels: [],
     type: typeOf(meta('src', 'int'), meta('tgt', 'int'), meta('lbl', 'int')),
