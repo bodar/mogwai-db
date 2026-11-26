@@ -453,36 +453,5 @@ export class GraphStore {
       [name],
     )[0].id;
   }
-
-  /** Bind labels to a vertex. `INSERT OR IGNORE` because (node,label) is the primary key,
-   *  so re-adding a label the vertex already carries is a no-op — which is exactly
-   *  `addLabel()`'s SET semantics, enforced by the schema rather than by the step. */
-  addVertexLabels(node: number, names: readonly string[]): void {
-    for (const name of names)
-      this.query('INSERT OR IGNORE INTO vertex_labels(node, label) VALUES(?, ?)', [node, this.labelId(name)]);
-  }
-
-  /** Remove labels from a vertex — `names` for `dropLabel(…)`, or NULL for `dropLabels()`,
-   *  which removes them all. A name the vertex does not carry is a no-op, matching
-   *  `dropLabel(nonExistent)`; the CARDINALITY floor is the caller's check, not this one's,
-   *  because only the caller knows which step to name in the error. */
-  dropVertexLabels(node: number, names: readonly string[] | null): void {
-    if (names === null) { this.query('DELETE FROM vertex_labels WHERE node=?', [node]); return; }
-    for (const name of names)
-      this.query('DELETE FROM vertex_labels WHERE node=? AND label=(SELECT id FROM labels WHERE name=?)', [node, name]);
-  }
-
-  /** A vertex's labels, in the same deterministic order the SQL reader picks from
-   *  (`ORDER BY label`), so the write path's framing agrees with the read path's. */
-  vertexLabels(node: number): string[] {
-    return this.query<{ name: string }>(
-      'SELECT l.name AS name FROM vertex_labels vl JOIN labels l ON l.id=vl.label WHERE vl.node=? ORDER BY vl.label',
-      [node],
-    ).map((r) => r.name);
-  }
-
-  labelName(id: number): string {
-    return this.query<{ name: string }>('SELECT name FROM labels WHERE id=?', [id])[0].name;
-  }
 }
 

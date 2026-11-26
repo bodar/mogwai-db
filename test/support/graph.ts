@@ -11,11 +11,12 @@ import { storedForm } from '../../src/compiler/rel/build.ts';
 
 /** Insert a vertex at a KNOWN rowid with its labels, by raw SQL — the fixture shape used by the
  *  handful of tests that need exact ids (a self-loop, a 40-deep chain, the 5k perf graph). A
- *  vertex's labels live in `vertex_labels`, so this is two statements; going through
- *  `addVertexLabels` keeps the set semantics (and the interning) in one place. */
+ *  vertex's labels live in `vertex_labels`; `INSERT OR IGNORE` keeps their set semantics, because
+ *  `(node, label)` is the primary key, and `store.labelId` interns each name. */
 export function rawVertex(store: GraphStore, id: number, ...labelNames: string[]): void {
   store.query('INSERT INTO nodes(id) VALUES(?)', [id]);
-  store.addVertexLabels(id, labelNames);
+  for (const name of labelNames)
+    store.query('INSERT OR IGNORE INTO vertex_labels(node, label) VALUES(?, ?)', [id, store.labelId(name)]);
 }
 
 /** Insert vertex properties by raw SQL — each `[node, key, payload, vtype]`, its payload (a number's
