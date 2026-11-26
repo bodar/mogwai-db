@@ -337,6 +337,9 @@ byte-stable reuse.
     `conjoin(xs) ?? always`. That drops a leading `1=1 AND`: a SQL TEXT change with no answer change,
     so the sql-plan and sql-hygiene baselines move and the commit must say so. Keep it a separate
     commit from item 10.
+    ✅ **Landed 2026-11-26 (`8cff5c66`).** All 19 spellings of `1 = 1` are now the one `always`
+    (`src/rel/expr.ts`). Seeded folds use `conjoin(xs) ?? always`. SQL text only, no answer change.
+    The sql-hygiene baseline moved. The sql-plan baseline did not. Remains: nothing.
 
 ## Needs a human
 
