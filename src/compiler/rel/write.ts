@@ -2621,7 +2621,7 @@ function deleteVertexLabels(owners: Rel, names: readonly string[] | null, fresh:
     target, channels: [], type: typeOf(),
     where: and(
       { kind: 'in-query', expr: col(target.id, owner), plan: owners, negated: false },
-      { kind: 'in-query', expr: col(target.id, 'label'), plan: nameIds('labels', names, fresh, ['t', 'wt']), negated: false },
+      { kind: 'in-query', expr: col(target.id, 'label'), plan: nameIds('labels', names, fresh), negated: false },
     )!,
     returning: [],
   });
@@ -4137,7 +4137,7 @@ function endpointSeek(driving: Rel, sides: readonly ('src' | 'tgt')[], label: bo
   });
   // Non-empty: every caller names at least one side.
   const on = conjoin([...sides.map((side) => eq(col(edges.id, `se_${side}`), col(driving.id, side))),
-    ...(label ? [eq(col(edges.id, 'se_label'), nameId('labels', col(driving.id, 'lbl'), fresh, ['sl', 'rsl']))] : [])])!;
+    ...(label ? [eq(col(edges.id, 'se_label'), nameId('labels', col(driving.id, 'lbl'), fresh))] : [])])!;
   return seekOwners(driving, edges, on, 'se_id', fresh);
 }
 
@@ -4149,7 +4149,7 @@ function labelSeek(driving: Rel, label: (driver: RelId) => Expr, fresh: Minter):
     id: fresh('p'), input: owners, channels: [], type: typeOf(meta('sl_label', 'int'), meta('sl_node', 'int')),
     exprs: [['sl_label', col(owners.id, 'label')], ['sl_node', col(owners.id, 'node')]],
   });
-  return seekOwners(driving, index, eq(col(index.id, 'sl_label'), nameId('labels', label(driving.id), fresh, ['sl', 'rsl'])), 'sl_node', fresh);
+  return seekOwners(driving, index, eq(col(index.id, 'sl_label'), nameId('labels', label(driving.id), fresh)), 'sl_node', fresh);
 }
 
 /**
@@ -5259,7 +5259,7 @@ export function mergeVFromMap(
     const names = mapLabelNames(col(driver, MAP_COL), fresh);
     const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rl'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
     const vlMatch = make.filter({ id: fresh('f'), input: vl, channels: [], type: vl.type,
-      pred: and(eq(col(vl.id, 'node'), candId), eq(col(vl.id, 'label'), nameId('labels', col(names.id, 'name'), fresh, ['lb', 'rb']))) });
+      pred: and(eq(col(vl.id, 'node'), candId), eq(col(vl.id, 'label'), nameId('labels', col(names.id, 'name'), fresh))) });
     const labelProbe = make.project({ id: fresh('p'), input: vlMatch, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
     // A pair the candidate FAILS: a string property it lacks; a label name it does not carry. (A T.id
     // pair cannot reach here — the guard above refused any map holding one.) `allMatch` = neither.
@@ -5587,8 +5587,9 @@ export function mergeEFromMap(
     const propsOk: Expr = { kind: 'exists', negated: true, plan: unsat };
     // The label: no `T.label` in the map matches any label, else the candidate's label must be that name.
     const lblCol = col(driver, 'lbl');
+    // `nameId` is NULL for a never-interned label, so it is safe ONLY in this positive `=` (see `nameId`).
     const labelOk: Expr = or({ kind: 'binary', op: 'is', left: lblCol, right: compilerNull('text') },
-      eq(col(cand, 'clabel'), nameId('labels', lblCol, fresh, ['t', 'rb'])));
+      eq(col(cand, 'clabel'), nameId('labels', lblCol, fresh)));
     // The endpoints: a side the map did not name does not narrow; one it named must equal the candidate's.
     const outOk: Expr = or(eq(col(driver, 'hasOut'), compilerInt(0)), eq(col(cand, 'csrc'), col(driver, 'src')));
     const inOk: Expr = or(eq(col(driver, 'hasIn'), compilerInt(0)), eq(col(cand, 'ctgt'), col(driver, 'tgt')));

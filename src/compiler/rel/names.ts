@@ -23,12 +23,12 @@ import { and, eq, jsonEachSet, meta, typeOf, type Minter } from './build.ts';
 /** A name dictionary: a table of `(id, name)` rows under a unique name. Labels are the only one today. */
 export type NameDict = 'labels';
 
-/** The relation-id and alias hints a scan is minted with. They only spell the SQL aliases. */
-type ScanHints = readonly [id: string, alias: string];
-
-/** A scan of a name dictionary, as its `(id, name)` rows. */
-export const dictScan = (dict: NameDict, fresh: Minter, [id, alias]: ScanHints = ['lbl', 'rl']): Extract<Rel, { readonly kind: 'scan' }> =>
-  make.scan({ id: fresh(id), table: dict, alias: fresh(alias), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
+/**
+ * A scan of a name dictionary, as its `(id, name)` rows. PRIVATE on purpose: every read and write of a
+ * dictionary goes through the functions below, so no caller outside this file reads `labels` directly.
+ */
+const dictScan = (dict: NameDict, fresh: Minter): Extract<Rel, { readonly kind: 'scan' }> =>
+  make.scan({ id: fresh('lbl'), table: dict, alias: fresh('rl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
 
 /**
  * The ids of a set of NAMES in `dict` — the filter each label-restricting step (`hasLabel`, `out('knows')`,
@@ -40,8 +40,8 @@ export const dictScan = (dict: NameDict, fresh: Minter, [id, alias]: ScanHints =
  * parameter's data never enters the statement text, the same rule the id and `within` set paths keep.
  * Callers pre-validate arguments with `labelArgsAllStrings`, so every value here is text.
  */
-export function nameIds(dict: NameDict, names: readonly Arg[] | readonly string[], fresh: Minter, hints?: ScanHints): Rel {
-  const scan = dictScan(dict, fresh, hints);
+export function nameIds(dict: NameDict, names: readonly Arg[] | readonly string[], fresh: Minter): Rel {
+  const scan = dictScan(dict, fresh);
   const nameCol = col(scan.id, 'name');
   const inline: string[] = [];
   const clauses: Expr[] = [];
@@ -101,12 +101,16 @@ export function withNames(
 }
 
 /**
- * The id of ONE name in `dict`, as a scalar: `(SELECT id FROM labels WHERE name = <name>)` — one UNIQUE
- * seek, correlated when `name` reads a column (a merge driver's map label), and NULL for a name never
- * interned, so an `=` against it holds for no row.
+ * The id of ONE name in `dict`, as a scalar: `(SELECT id FROM <dict> WHERE name = <name>)`. One UNIQUE
+ * seek, correlated when `name` reads a column (a merge driver's map label).
+ *
+ * The result is NULL for a name that was never interned. Use it ONLY in a positive `=` in an ON or WHERE
+ * clause: there `x = NULL` is NULL, so the row drops, which is the correct "no such label" answer. Do NOT
+ * use it under NOT or in a `<>`: `NOT (x = nameId(…))` is also NULL (SQLite three-valued logic), so that
+ * row drops too, where the caller wants it kept.
  */
-export function nameId(dict: NameDict, name: Expr, fresh: Minter, hints?: ScanHints): Expr {
-  const scan = dictScan(dict, fresh, hints);
+export function nameId(dict: NameDict, name: Expr, fresh: Minter): Expr {
+  const scan = dictScan(dict, fresh);
   const named = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: eq(col(scan.id, 'name'), name) });
   return { kind: 'scalar', plan: make.project({ id: fresh('p'), input: named, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(named.id, 'id')]] }) };
 }
@@ -137,7 +141,7 @@ export const isConstantNames = (names: CreationNames): names is readonly Expr[] 
  */
 export function internNames(dict: NameDict, names: CreationNames, bind: (stmt: Stmt) => Rel, fresh: Minter): Rel | null {
   if (isConstantNames(names) && !names.length) return null;
-  const target = dictScan(dict, fresh, ['t', 'wt']);
+  const target = dictScan(dict, fresh);
   const onConflict = { target: ['name'], set: [['name', col(EXCLUDED, 'name')] as const] };
   if (isConstantNames(names)) {
     return bind(insert({

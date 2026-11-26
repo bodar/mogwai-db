@@ -98,6 +98,15 @@ describe('nameId — one name as its id, per merge driver', () => {
     expect(store.query("SELECT count(*) AS n FROM labels WHERE name IN ('kk', 'knows')", [])).toEqual([{ n: 2 }]);
   });
 
+  // `nameId` is NULL for a never-interned name, so it is safe only in a positive `=`: the search's
+  // `clabel = nameId('nope')` is NULL for every candidate, so none matches and the arm creates.
+  test('a mergeE with an unknown label between linked endpoints matches nothing and creates one edge', () => {
+    const store = seededStore();
+    expect(values(run(store, "g.inject([(T.label):'nope',(Direction.OUT):1,(Direction.IN):2]).mergeE().count()"))).toEqual([1]);
+    expect(values(run(store, 'g.E().count()'))).toEqual([7]);
+    expect(values(run(store, "g.V(1).outE('nope').inV().id()"))).toEqual([2]);
+  });
+
   test('a per-vertex mergeE self-loop resolves its constant label once per driver', () => {
     const store = seededStore();
     const q = "g.V().as('d').mergeE([(T.label):'self',(Direction.from):Merge.outV,(Direction.to):Merge.inV]).option(Merge.outV,__.select('d')).option(Merge.inV,__.select('d')).count()";

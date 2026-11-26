@@ -1,6 +1,6 @@
 // A wire PARAMETER as a `V()`/`E()` id or a `hasLabel()`/`out()` label must BIND, never inline —
 // exactly the "parameters are the only binds" thesis the `within($list)` set already keeps
-// (docs/archive/2026-08-05-parameters-are-the-only-binds.md). Before this, `elementScan`/`labelIds` read
+// (docs/archive/2026-08-05-parameters-are-the-only-binds.md). Before this, `elementScan`/`nameIds` read
 // their arguments through `flattenListArgs(argValues(step))`, which strips the `Arg` object and with
 // it the parameter NAME, so a bound id/label was inlined as a compound constant — a scalar as a
 // literal and a bound COLLECTION as an inline `IN (…)` of its data. That baked a parameter's data into
