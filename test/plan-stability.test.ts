@@ -21,7 +21,10 @@ import { accessPaths } from './support/sql-core.ts';
 const N = 2_000; // 2000 person + 2000 software = 4000 vertices, 10000 edges
 
 function* vertices(): Iterable<BulkVertex> {
-  for (let i = 1; i <= N; i++) yield { id: i, labels: ['person'], properties: [{ key: 'name', value: `p${i}` }] };
+  for (let i = 1; i <= N; i++) yield { id: i, labels: ['person'], properties: [
+    { key: 'name', value: `p${i}` }, { key: 'age', value: i % 100 },
+    { key: 'born', value: Date.UTC(2000, 0, 1) + i * 86_400_000, vtype: 'datetime' },
+  ] };
   for (let i = 1; i <= N; i++) yield { id: N + i, labels: ['software'], properties: [{ key: 'name', value: `s${i}` }, { key: 'lang', value: 'java' }] };
   // A few USER-SUPPLIED string ids (the `uid` column) — what `V('u0')`/`E('e0')` seek on.
   for (let i = 0; i < 10; i++) yield { id: `u${i}`, labels: ['tagged'] };
@@ -185,3 +188,43 @@ describe('a literal within() set seeks every member', () => {
   }
 });
 
+
+// AN ORDERING ON A STORED PROPERTY SEEKS A RANGE of `(key, value)` (`storedRange`, src/compiler/rel/predicate.ts):
+// SQLite's storage-class order puts every Number before every String, so a numeric bound is `value > b AND
+// value < ''` and a String bound `value > b AND value < x''`, with the type residual checked on the range's rows.
+// The CASE it replaced read the WHOLE key (`(key=?)`) — fails if that comes back. And the reverse trap: a
+// CORRELATED check (after a hop) must keep its `(node, key)` owner lookup. Without stats SQLite rates a two-sided
+// range above it and re-reads the range per outer row (measured ×85 from 1k to 8k), so the range is hidden from
+// every check but the uncorrelated seek.
+describe('an ordered predicate on a stored key seeks a (key, value) range', () => {
+  const RANGE_SEEK: Readonly<Record<string, readonly [string, string]>> = {
+    'numeric gt': ["g.V().has('age', gt(29)).count()", '(key=? AND value>? AND value<?)'],
+    'numeric between': ["g.V().has('age', between(29, 33)).count()", '(key=? AND value>? AND value<?)'],
+    'numeric lt': ["g.V().has('age', lt(29)).count()", '(key=? AND value<?)'],
+    'datetime between': ["g.V().has('born', between(datetime('2001-01-01T00:00:00Z'), datetime('2002-01-01T00:00:00Z'))).count()", '(key=? AND value>? AND value<?)'],
+    'string gt': ["g.V().has('name', gt('p5')).count()", '(key=? AND value>? AND value<?)'],
+  };
+  for (const [name, [gremlin, seek]] of Object.entries(RANGE_SEEK)) {
+    test(`${name}: vp_key_value is searched on a value range, cold and warm`, () => {
+      const { sql, binds } = read(gremlin);
+      for (const store of [noStats, withStats]) {
+        const details = (store.query(`EXPLAIN QUERY PLAN ${sql}`, [...binds]) as { detail: string }[]).map((r) => r.detail);
+        expect(details.filter((d) => d.includes('vp_key_value'))).toEqual([expect.stringContaining(seek)]);
+      }
+    });
+  }
+  const CORRELATED: Readonly<Record<string, string>> = {
+    'after a hop': "g.V().out('knows').has('age', between(10, 90)).count()",
+    'in a where body': "g.V().where(out('knows').has('born', gt(datetime('2001-01-01T00:00:00Z')))).count()",
+  };
+  for (const [name, gremlin] of Object.entries(CORRELATED)) {
+    test(`${name}: the range check stays on the (node, key) owner lookup, cold and warm`, () => {
+      const { sql, binds } = read(gremlin);
+      for (const store of [noStats, withStats]) {
+        const details = (store.query(`EXPLAIN QUERY PLAN ${sql}`, [...binds]) as { detail: string }[]).map((r) => r.detail);
+        expect(details.filter((d) => d.includes('vp_key_value'))).toEqual([]);
+        expect(details.some((d) => d.includes('vp_node_key (node=? AND key=?)'))).toBe(true);
+      }
+    });
+  }
+});

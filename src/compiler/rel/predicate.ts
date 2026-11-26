@@ -293,6 +293,56 @@ const plainNumber = (value: unknown, type: TypeNode | null): boolean =>
  *  then can raw TEXT equality confuse a String with a Number. */
 const numberSpelling = (value: string): boolean => /^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/.test(value);
 
+/**
+ * AN ORDERING ON A STORED ROW IS AN INDEX RANGE. A stored row's `value` is untyped, so SQLite orders it by
+ * storage class first — NULL < INTEGER/REAL < TEXT < BLOB (https://sqlite.org/datatype3.html §4.1) — and a
+ * stored number is always its comparable INTEGER/REAL (`storedForm`). So the rows a Number bound can match
+ * lie in ONE contiguous slice of `(key, value)`: `value > b AND value < ''`; a String/UUID/Binary bound's
+ * (all TEXT carriers) in `value >= '' AND value < x''`. Each is a plain conjunct, so the property seek
+ * (`semijoin.ts`) drives `vp_key_value` / `ep_key_value` with it. The CASE this replaces gave the same answer
+ * with no seek.
+ *
+ * The slice is NECESSARY, not sufficient: other type spaces share the storage class (a Boolean's 0/1 and a
+ * Date's epoch millis among the numbers; a UUID or a `T` token among the Strings). The `residual` vtype
+ * test keeps them out, exactly as the CASE's `ELSE false` did — Gremlin's COMPARABILITY never crosses a
+ * type space (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/util/GremlinValueComparator.java`).
+ * It is evaluated only on the rows the range selected. A Date bound is an epoch-millis range under the
+ * `datetime` residual. A Duration (stored as total-nanos TEXT) and every stream subject keep the CASE.
+ *
+ * `range` is `compare` plus the storage-class edge on its open side; `compare` alone serves a two-sided
+ * `between`/`inside`, whose other bound closes the slice.
+ */
+interface StoredRange { readonly compare: Expr; readonly range: Expr; readonly residual: Expr }
+function storedRange(
+  op: Extract<Expr, { kind: 'binary' }>['op'], subject: Expr, bound: Expr, value: unknown, type: SubjectType,
+  boundType: TypeNode | null,
+): StoredRange | null {
+  const declared = flatType(boundType);
+  const textSpace = textCarriedType(boundType) ?? 'string';
+  // The bound's type space over a stored row; none (keep the CASE) for a stream, a Duration or a non-scalar bound.
+  const space = type.kind !== 'perRow' || !type.stored || declared === 'duration' ? null
+    : declared === 'datetime' ? (typeof value === 'number' ? { cls: 'number', residual: binary('=', type.vtype, compilerText('datetime')) } : null)
+    : typeof value === 'number' || typeof value === 'bigint' || value instanceof BigDecimal
+      ? { cls: 'number', residual: { kind: 'in-list', expr: type.vtype, values: NUMERIC_VTYPES.map(compilerText) } as Expr }
+    : typeof value === 'string' ? { cls: 'text', residual: binary('=', type.vtype, compilerText(textSpace)) }
+    : null;
+  // The range reads `value` UNINDEXED (SQLite's unary `+`). With no `sqlite_stat1` (the platform has none —
+  // `docs/archive/2026-08-01-relir-build-plan.md` §1 P4) SQLite guesses each range bound keeps a quarter of the
+  // rows, so a correlated `EXISTS(… node = outer.id AND key = k AND range)` picks `(key, value)` over
+  // `(node, key)` and re-reads the whole range per outer row. Measured at 50% selectivity, 1k → 8k:
+  // `V().out().has('age', gt(x)).count()` 41 ms → 3.5 s (×85) that way, 0.9 → 6.6 ms (×8) unindexed. So every
+  // correlated check keeps its owner lookup, and the uncorrelated seek, the one place the range should drive,
+  // reads it bare (`semijoin.ts` `indexable`).
+  const stored: Expr = { kind: 'unary', op: 'unindexed', arg: subject };
+  const compare = binary(op, stored, bound);
+  const upward = op === '>' || op === '>=';
+  // The storage-class edge on the compare's open side. A Number's lower edge is NULL, which no compare passes.
+  const edge: Expr | null = space?.cls === 'number'
+    ? (upward ? binary('<', stored, compilerText('')) : null)
+    : upward ? binary('<', stored, { kind: 'cast', arg: compilerText(''), to: 'blob' }) : binary('>=', stored, compilerText(''));
+  return space && { compare, range: edge ? (upward ? and(compare, edge) : and(edge, compare)) : compare, residual: space.residual };
+}
+
 /** Comparability is confined to one Gremlin type space. Each CASE combines the guard and comparison
  * so its type vocabulary is emitted once; a stored vtype outranks SQLite's storage class because an
  * exact numeric value may deliberately be stored as decimal TEXT. */
@@ -340,10 +390,9 @@ const ordered = (
     // int as if it were comparable.
     return compilerFalse;
   }
-  // A STORED row's number is its comparable form and so is the bound (`storedBound`): one raw compare under
-  // the Number guard, which keeps every other type space (a String, a Boolean's 0/1) out.
-  if (numericBound && !temporal && isStoredRow(type) && type.kind === 'perRow')
-    return { kind: 'case', whens: [[{ kind: 'in-list', expr: type.vtype, values: NUMERIC_VTYPES.map(compilerText) }, binary(op, subject, bound)]], else: compilerFalse };
+  // A STORED row is an index range plus its type-space residual (`storedRange`).
+  const range = storedRange(op, subject, bound, value, type, boundType);
+  if (range) return and(range.range, range.residual);
   const wide = numericBound && !temporal ? wideBound(value) : null;
   if (type.kind === 'static') {
     const canonical = normalizeTypeName(type.type);
@@ -1292,13 +1341,17 @@ export function predicateExpr(
     if (bounds.length !== 2) return null;
     const [low, high] = [operand(bounds[0].value, bounds[0].type, bounds[0].name, type), operand(bounds[1].value, bounds[1].type, bounds[1].name, type)];
     if (!low || !high) return null;
+    // Over a stored row, two bounds in ONE type space share their residual: between/inside is one closed
+    // slice, outside the union of two open ones (`storedRange`).
+    const [loOp, hiOp] = op === 'outside' ? ['<', '>'] as const : [op === 'inside' ? '>' : '>=', '<'] as const;
+    const loRange = storedRange(loOp, subject, low, bounds[0].value, type, bounds[0].type);
+    const hiRange = storedRange(hiOp, subject, high, bounds[1].value, type, bounds[1].type);
+    if (loRange && hiRange && JSON.stringify(loRange.residual) === JSON.stringify(hiRange.residual))
+      return and(op === 'outside' ? binary('or', loRange.range, hiRange.range) : and(loRange.compare, hiRange.compare), loRange.residual);
     // outside is a DISJUNCTION either side of the range; between/inside are a conjunction inside it. The
     // low bound is exclusive for inside/outside (`>`/`<`) and inclusive for between (`>=`).
-    const [loCmp, hiCmp] = op === 'outside'
-      ? [ordered('<', subject, low, bounds[0].value, type, bounds[0].type),
-         ordered('>', subject, high, bounds[1].value, type, bounds[1].type)]
-      : [ordered(op === 'inside' ? '>' : '>=', subject, low, bounds[0].value, type, bounds[0].type),
-         ordered('<', subject, high, bounds[1].value, type, bounds[1].type)];
+    const loCmp = ordered(loOp, subject, low, bounds[0].value, type, bounds[0].type);
+    const hiCmp = ordered(hiOp, subject, high, bounds[1].value, type, bounds[1].type);
     return loCmp && hiCmp ? binary(op === 'outside' ? 'or' : 'and', loCmp, hiCmp) : null;
   }
 

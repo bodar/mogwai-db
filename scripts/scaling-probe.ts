@@ -330,6 +330,11 @@ const SHAPES: readonly Shape[] = [
   { name: 'splice: union(local(out.out),local(in))', query: "g.V().union(local(out().out()), local(in())).count()" },
   { name: 'no splice: local(bothE.limit(1)).otherV', query: 'g.V().local(bothE().limit(1)).otherV().count()' },
   { name: 'no splice: local(out.tree)', query: 'g.V().local(out().tree()).count()' },
+  // An ordering on a stored key seeks a `(key, value)` range (`storedRange`, src/compiler/rel/predicate.ts): the
+  // root grows with the matched rows; a correlated check keeps its `(node, key)` owner lookup.
+  { name: 'range: has(age,gt) ~2%', query: "g.V().has('age', gt(66)).count()" },
+  { name: 'range: has(age,between) ~50%', query: "g.V().has('age', between(30, 55)).count()" },
+  { name: 'range: out.has(age,between)', query: "g.V().out().has('age', between(30, 55)).count()" },
 ];
 
 /** Deterministic xorshift, so every child and every run sees one graph. */

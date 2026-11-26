@@ -246,11 +246,12 @@ describe('filter / predicate SQL (is/where/not/TextP/has)', () => {
   // with no vtype CASE anywhere still fails both alternatives. The operand may be a `?` or an inlined
   // numeric literal — either is "the ordering comparison, vtype-aware". A STORED row's number is already
   // its comparable form (`storedForm`), so there the compare is the raw `value >= n` under the Number
-  // guard — `THEN (x.value >= n)`, the third spelling.
+  // guard — `THEN (x.value >= n)`, the third spelling. Under `has()` it is an index RANGE plus the vtype
+  // residual (`storedRange`): `+(x.value) >= n … vtype IN (…)`, the fourth.
   const compared = (op: string) => {
     const o = op.replace(/[><=]/g, (c) => '\\' + c);
     const n = '(?:\\?|-?\\d+(?:\\.\\d+)?)';
-    return new RegExp(`(END\\)? ${o} ${n}|CAST\\([^)]+ AS (INT|REAL)\\) ${o} ${n}|THEN \\(\\w+\\.value ${o} ${n}\\))`);
+    return new RegExp(`(END\\)? ${o} ${n}|CAST\\([^)]+ AS (INT|REAL)\\) ${o} ${n}|THEN \\(\\w+\\.value ${o} ${n}\\)|\\+\\(\\w+\\.value\\) ${o} ${n}\\).*\\.vtype IN)`);
   };
   {
     test(`P.inside is exclusive-low (distinct from between)`, () => {

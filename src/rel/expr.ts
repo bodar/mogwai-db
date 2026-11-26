@@ -12,7 +12,10 @@ export type Expr =
   | { readonly kind: 'lit'; readonly value: number; readonly type: 'int'; readonly source: 'compiler-int' }
   | { readonly kind: 'lit'; readonly value: number; readonly type: 'real'; readonly source: 'compiler-real' }
   | { readonly kind: 'lit'; readonly value: null; readonly type: SqlType; readonly source: 'compiler-null' }
-  | { readonly kind: 'unary'; readonly op: 'not' | 'neg'; readonly arg: Expr }
+  /** `unindexed` is SQLite's unary `+`: the value unchanged (storage class kept, affinity dropped), but no longer
+   *  a bare column, so the planner cannot pick an index on it. A predicate reads its column through one where
+   *  only an uncorrelated seek should drive that index, and the seek reads it bare (`semijoin.ts` `indexable`). */
+  | { readonly kind: 'unary'; readonly op: 'not' | 'neg' | 'unindexed'; readonly arg: Expr }
   | { readonly kind: 'binary'; readonly op: BinaryOp; readonly left: Expr; readonly right: Expr }
   | { readonly kind: 'case'; readonly whens: readonly (readonly [Expr, Expr])[]; readonly else?: Expr }
   | { readonly kind: 'cast'; readonly arg: Expr; readonly to: SqlType }

@@ -414,7 +414,7 @@ function keyedJoin(
     id: mint.id('kf'), input: scan, channels: [], type: scan.type,
     // Non-empty: the one caller passes non-empty `constants`.
     pred: conjoin([
-      ...(localPred ? [substRelId(localPred, props.id, scan.id)] : []),
+      ...(localPred ? [indexable(substRelId(localPred, props.id, scan.id), scan.id)] : []),
       ...constants.map((c): Expr => ({ kind: 'in-query', expr: col(scan.id, properties.owner), plan: c.kind === 'distinct' ? c.input : c, negated: false })),
     ])!,
   });
@@ -707,7 +707,7 @@ export const indexSeek: OwnerSeek = (term, target, mint) => {
     const scan = make.scan({ id: mint.id('sk'), table: props.table, alias: mint.alias('rsk'), channels: [], type: props.type });
     const filtered = make.filter({
       id: mint.id('sf'), input: scan, channels: [], type: scan.type,
-      pred: substRelId(pred, props.id, scan.id),
+      pred: indexable(substRelId(pred, props.id, scan.id), scan.id),
     });
     arms.push(make.project({
       id: mint.id('sp'), input: filtered, channels: [], type: SEEK_OWNERS,
@@ -718,6 +718,15 @@ export const indexSeek: OwnerSeek = (term, target, mint) => {
   const owners = arms.length === 1 ? arms[0]! : make.union({ id: mint.id('su'), inputs: arms, all: true, channels: [], type: SEEK_OWNERS });
   return make.distinct({ id: mint.id('sd'), input: owners, channels: [], type: SEEK_OWNERS });
 };
+
+/**
+ * A seek's predicate with its own columns INDEXABLE again: an `unindexed` read of one of them becomes the bare
+ * column. A predicate hides a range it holds from the planner (`storedRange`, `compiler/rel/predicate.ts`) so a
+ * correlated check keeps its owner lookup; the uncorrelated seek built here is the one place that range should
+ * drive `(key, value)`. The value is the same either way — only the planner's choice of index differs.
+ */
+const indexable = (pred: Expr, rel: RelId): Expr => rewriteExpr(pred, (e) =>
+  e.kind === 'unary' && e.op === 'unindexed' && e.arg.kind === 'col' && e.arg.rel === rel ? e.arg : e);
 
 // ---------- trigramSeek: the property_fts trigram index (`ftsSubstringPredicate`) ----------
 
