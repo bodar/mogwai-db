@@ -883,7 +883,12 @@ function spliceIdentityHosts(steps: Step[], params: ParamEnv, readsPath: boolean
     // RECURSE INTO THE SPLICED BODY, because a body that is itself an identity host
     // (`local(__.local(__.aggregate("a")))`) splices to another one — and this pass has already
     // walked past the position it lands in. A single pass would unwrap exactly one layer.
-    else if (body) out.push(...spliceIdentityHosts(body, params, readsPath).map(perTraverser));
+    // FOLD THE BODY'S OWN INFIX CONNECTIVES FIRST: `local(__.has('age').or().has('lang')).count()` is
+    // `local(or(has('age'), has('lang'))).count()` — ConnectiveStrategy applies per TRAVERSAL, so a body's
+    // `.or()` never reaches past the body's end. Spliced raw, the root's fold would see one chain and swallow
+    // the host's `count()` into the right operand. Top level only: the level fold recurses into its own
+    // operands, and returns the body by reference when it holds no connective (parse trees stay intact).
+    else if (body) out.push(...spliceIdentityHosts(canonicalizeConnectivesLevel(body), params, readsPath).map(perTraverser));
     else out.push(s);
   }
   return out;

@@ -83,3 +83,38 @@ describe('local() inside a bounded repeat() answers', () => {
     expect(run(store, "g.V().until(__.has('name','ripple')).repeat(__.local(__.out())).path()")).toHaveLength(3);
   });
 });
+
+// A spliced body's infix `.and()`/`.or()` folds INSIDE the body (`spliceIdentityHosts`). ConnectiveStrategy runs
+// per traversal (vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/strategy/decoration/ConnectiveStrategy.java),
+// so a body's `.or()` never reaches past the body's end. Spliced raw, the root fold took the host's trailing
+// `count()` into the right operand: every row passed and the count vanished.
+describe('a local() body’s infix connective stays inside the body', () => {
+  const n = (k: number) => answer(`g.inject(${k}L)`);
+  const body = "__.has('age',gt(30)).or().has('name','lop')";
+  test('the modern witnesses', () => {
+    expect(answer("g.V().hasLabel('person').local(__.has('age').or().has('lang')).count()")).toEqual(n(4));
+    expect(answer("g.V().local(__.has('age').and().has('name')).count()")).toEqual(n(4));
+  });
+  test('the trailing steps stay outside the fold', () => {
+    expect(answer(`g.V().local(${body}).count()`)).toEqual(n(3));
+    expect(bagOf(run(store, `g.V().local(${body}).values('name')`).map((r) => bare(r).v))).toEqual(bagOf(['josh', 'peter', 'lop']));
+    // Precedence holds inside the body: or(age>30, and(name=lop, has(lang))).
+    expect(answer(`g.V().local(${body}.and().has('lang')).count()`)).toEqual(n(3));
+  });
+  test('at depth: a nested local, a union arm, an optional arm, a repeat body, a map and a where body', () => {
+    expect(answer(`g.V().local(__.local(${body})).count()`)).toEqual(n(3));
+    expect(answer(`g.V().union(__.local(${body}), __.constant(1)).count()`)).toEqual(n(9));
+    expect(answer(`g.V().optional(__.local(${body})).count()`)).toEqual(n(6));
+    expect(answer(`g.V().repeat(__.local(${body}).out()).times(1).count()`)).toEqual(n(3));
+    expect(answer(`g.V().map(__.local(${body})).count()`)).toEqual(n(3));
+    expect(answer(`g.V().where(__.local(${body})).count()`)).toEqual(n(3));
+  });
+  test('an operand that holds a where() body', () => {
+    // or(out().where(in().count().is(gt(1))), has('name','ripple')): marko/josh/peter reach lop, plus ripple.
+    expect(answer("g.V().local(__.out().where(__.in().count().is(gt(1))).or().has('name','ripple')).count()")).toEqual(n(4));
+  });
+  test('a body-leading as() moves into the first operand, so its label does not escape the or()', () => {
+    // A body-leading `as('x')` is a VARIABLE StartStep (StartStep.java:105-107), which `legalCurrentStep` admits.
+    expect(run(store, "g.V().local(__.as('x').has('age').or().has('lang')).select('x')")).toEqual([]);
+  });
+});
