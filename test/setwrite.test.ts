@@ -65,8 +65,9 @@ describe('insertSet', () => {
 
   // A DERIVED column (a property row's `value`/`exact` from its payload and tag, `storedForm`) reads the landed
   // cells off one MATERIALIZED projection, so each cell is extracted ONCE: `storedForm` reads the payload about
-  // ten times, and every read re-spelled `json_extract(…, '$[3]')` before.
-  test('a derived column reads each landed cell once', () => {
+  // ten times, and every read re-spelled `json_extract(…, '$[3]')` before. A cell NO derivation reads — the
+  // `exact` placeholder at index 5 — is not extracted at all; the row shape and its indexes do not change.
+  test('a derived column reads each landed cell once, and an unread placeholder never', () => {
     const store = fresh();
     insertSet(store, 'nodes', [{ name: 'id', type: 'int' }], [[1]]);
     const seen: string[] = [];
@@ -82,7 +83,8 @@ describe('insertSet', () => {
       [3, 1, 'n', 7, 'int', null],
     ]);
     const [sql] = seen;
-    for (const at of [0, 1, 2, 3, 4, 5]) expect(sql!.split(`'$[${at}]'`).length - 1).toBe(1);
+    for (const at of [0, 1, 2, 3, 4]) expect(sql!.split(`'$[${at}]'`).length - 1).toBe(1);
+    expect(sql).not.toContain(`'$[5]'`);
     expect(store.query('SELECT key, value, typeof(value) AS tv, exact FROM vertex_properties ORDER BY id')).toEqual([
       { key: 'big', value: 1e20, tv: 'real', exact: '100000000000000000000' },
       { key: 'dec', value: 1.25, tv: 'real', exact: '1.25' },

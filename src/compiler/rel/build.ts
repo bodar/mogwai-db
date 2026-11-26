@@ -699,8 +699,8 @@ export const storedValueOn = (value: Expr, vtype: Expr, exact?: Expr): Expr => {
 };
 
 /** The common case: the value and its type are the `value`/`exact`/`vtype` COLUMNS of a property scan,
- *  read as its payload (`storedPayload`). Derived from the general form rather than spelled twice — the
- *  same relationship `storedCompare`/`storedCompareOn` already have, and for the same reason. */
+ *  read as its payload (`storedPayload`). Derived from the general form `storedValueOn` rather than
+ *  spelled twice, so the column read and the expression read cannot drift apart. */
 export const storedValue = (rel: RelId): Expr => storedValueOn(col(rel, 'value'), col(rel, 'vtype'), col(rel, 'exact'));
 
 /** VTYPE tags that denote a binary64 — SQLite's JSON WRITER serializes these at 15 significant digits

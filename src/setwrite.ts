@@ -85,25 +85,36 @@ export function insertSet(
   // The rows land as ONE json_each relation, its members the row-tuples; the project reads each
   // tuple's cells by position into the target's columns.
   const exploded = jsonEachSet('rows', rows as readonly unknown[], fresh);
-  const cells = make.project({
-    id: fresh('sp'), input: exploded, channels: [], type: typeOf(...cols),
-    exprs: columns.map((c, at) => [c.name, cellAt(col(exploded.id, 'sv'), at, c)] as const),
+  const cellsId = fresh('sp');
+  const project = (needed: readonly SetColumn[]): Rel => make.project({
+    id: cellsId, input: exploded, channels: [], type: typeOf(...needed.map((c) => meta(c.name, c.type, true))),
+    exprs: needed.map((c) => [c.name, cellAt(col(exploded.id, 'sv'), columns.indexOf(c), c)] as const),
   });
-  // A DERIVED column reads the landed cells by name off ONE `AS MATERIALIZED` CTE of the projection above,
-  // so each cell is extracted once however often the derivation reads it (`storedForm` reads the payload
-  // about ten times). A bare outer projection is not enough: the assembler re-spells a short computed
-  // column at each read (`COMPUTED_TEXT`, rel/emit.ts), and SQLite flattens a plain CTE the same way. No
-  // derived column → the cells are the source, with no CTE.
+  // A DERIVED column reads the landed cells by name off ONE `AS MATERIALIZED` CTE, so each cell is
+  // extracted once however often the derivation reads it (`storedForm` reads the payload about ten times).
+  // A bare outer projection is not enough: the assembler re-spells a short computed column at each read
+  // (`COMPUTED_TEXT`, rel/emit.ts), and SQLite flattens a plain CTE the same way. No derived column → the
+  // cells are the source, with no CTE.
+  //
+  // The CTE holds only the cells something READS: every non-derived column (the insert copies it) and each
+  // name a derivation asks `cellOf` for. A derived column's own placeholder that no derivation reads is not
+  // extracted. The names are RECORDED during the one call that builds the derivations, so the read set
+  // cannot drift from what the derivations read. `cellAt` keeps each column's original index, so the JSON
+  // row shape does not change.
   const derived = columns.some((c) => c.derive);
-  const cellsName = 'cells';
-  const landed: Rel = derived ? make.ref({ id: fresh('c'), name: cellsName, channels: [], type: cells.type }) : cells;
+  const landedId = derived ? fresh('c') : cellsId;
+  const read = new Set<string>();
   const cellOf = (name: string): Expr => {
     if (!columns.some((c) => c.name === name)) throw new Error(`insertSet(${table}): no column ${name}`);
-    return col(landed.id, name);
+    read.add(name);
+    return col(landedId, name);
   };
+  const exprs = columns.map((c) => [c.name, c.derive ? c.derive(cellOf) : cellOf(c.name)] as const);
+  const cells = project(derived ? columns.filter((c) => !c.derive || read.has(c.name)) : columns);
+  const cellsName = 'cells';
   const source = !derived ? cells : make.project({
-    id: fresh('sp'), input: landed, channels: [], type: typeOf(...cols),
-    exprs: columns.map((c) => [c.name, c.derive ? c.derive(cellOf) : cellOf(c.name)] as const),
+    id: fresh('sp'), input: make.ref({ id: landedId, name: cellsName, channels: [], type: cells.type }),
+    channels: [], type: typeOf(...cols), exprs,
   });
   const target = make.scan({ id: fresh('t'), table: table as never, alias: fresh('wt'), channels: [], type: typeOf(...cols) });
   const stmt = insert({

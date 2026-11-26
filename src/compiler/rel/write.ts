@@ -6450,7 +6450,7 @@ function endpointRowid(uid: string | number, guard: Guarder, fresh: Minter): Exp
  *
  * **IT KEEPS THE EDGE ROW, not only its id** — `(id, src, tgt)` of the read's OWN `edges` scan — so
  * `pairedWith` joins the incoming pairs to this read itself on `(src, tgt)`. That is SQLite's natural
- * plan: an `e_pair (src=? AND tgt=?)` seek per pair, and the label, id and property tests as residuals on
+ * plan: an endpoint-index seek per pair, and the label, id and property tests as residuals on
  * the row the seek found. Handing back the id alone made the join re-scan `edges` and test
  * `id IN (every edge the criteria admit)` — the whole label population once per statement, and per
  * PAIR once the planner expanded it into `rowid=?` probes: quadratic in the traversers, and O(graph)
