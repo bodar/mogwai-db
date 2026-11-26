@@ -297,6 +297,9 @@ Plan items, in order:
   (`decorate.ts`, `boundgraph.ts`) and about 18 inline `make.project(… [['one', compilerInt(1)]])` +
   `{kind:'exists'}` sites (`source.ts` ×6, `write.ts` ×5, `map.ts` ×2, `list.ts`, `lower.ts`,
   `lower/filter.ts`). About 35–40 lines less; same SQL apart from aliases.
+  **LANDED as `d1dc2695` (`CI passed`, no baseline moves).** Mechanism: `existsOf(matched, fresh,
+  negated)` in `build.ts` is the one `EXISTS (SELECT 1 …)` probe; the two private copies are gone.
+  **Remains:** nothing for N7.
 
 **Needs-human questions from this round:** none.
 
