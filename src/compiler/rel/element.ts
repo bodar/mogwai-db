@@ -4,9 +4,10 @@ import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, RelId, SqlType } from '../../rel/types.ts';
 import type { Elem } from '../elem.ts';
 import {
-    and, byEncounter, coalesce, EDGE_COLS, EMPTY_ARRAY, EMPTY_OBJECT, eq, jsonOf, meta, NODE_COLS, typeOf, typedNode, typedNodeDetached,
+    byEncounter, coalesce, EDGE_COLS, EMPTY_ARRAY, EMPTY_OBJECT, eq, jsonOf, meta, NODE_COLS, typeOf, typedNode, typedNodeDetached,
     type Minter,
 } from './build.ts';
+import { nameOf, withNames } from './names.ts';
 
 /**
  * THE ELEMENT PAYLOAD — an id-relation projected to the tuple a vertex or an edge is ON THE WIRE.
@@ -50,18 +51,14 @@ import {
  * `build.ts`'s, because every payload arm needs both.
  */
 
-/** `labels`, as the algebra sees it. Declared per use rather than shared, because two scans of one
- *  table in one plan are two RELATIONS and a shared `RelId` is the one thing `Col` cannot disambiguate. */
-const labelTable = (fresh: Minter): Rel =>
-  make.scan({ id: fresh('wlb'), table: 'labels', alias: fresh('rwl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
-
 /**
  * ONE column of a row a rowid names, as a correlated `{kind:'scalar'}` read — `scan(table) → filter(id =
  * rowid) → project(['v', <expr>])`. The edge/vertex correlated reads below (`edgeEndpoint`,
  * `nodeExternalId`, `edgeColumn`, and `externalId`'s edge arm) were four copies of exactly this shape,
  * differing only in the table scanned and the value projected; `value(scan)` builds the projection off
  * the filtered row so the fresh minter that owns the scan owns the read. Each caller still mints its OWN
- * scan (two scans of one table are two relations — see `labelTable`). */
+ * scan (two scans of one table in one plan are two relations, and a shared `RelId` is the one thing `Col`
+ * cannot disambiguate). */
 function correlatedColumn(
   scan: Rel, rowid: Expr, valueType: SqlType, value: (row: RelId) => Expr, fresh: Minter,
 ): Expr {
@@ -85,33 +82,16 @@ function correlatedColumn(
  */
 export function vertexLabels(node: Expr, fresh: Minter): Expr {
   const vl = make.scan({ id: fresh('wvl'), table: 'vertex_labels', alias: fresh('rwv'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
-  const names = labelTable(fresh);
-  const joined = make.join({
-    id: fresh('wlj'), left: vl, right: names, join: 'inner', channels: [],
-    type: typeOf(meta('node', 'int'), meta('lid', 'int'), meta('id', 'int'), meta('name', 'text')),
-    on: and(eq(col(names.id, 'id'), col(vl.id, 'label')), eq(col(vl.id, 'node'), node)),
-  });
+  const joined = withNames('labels', vl, 'label', fresh, { on: () => eq(col(vl.id, 'node'), node) });
   const collected = make.aggregate({
     id: fresh('wlc'), input: joined, channels: [], type: typeOf(meta('labels', 'json', true)),
     groupBy: [],
     aggs: [['labels', {
       kind: 'agg', fn: 'json_group_array', args: [col(joined.id, 'name')],
-      orderBy: [{ expr: col(joined.id, 'lid'), dir: 'asc' }],
+      orderBy: [{ expr: col(joined.id, 'label'), dir: 'asc' }],
     }]],
   });
   return coalesce({ kind: 'scalar', plan: collected }, EMPTY_ARRAY);
-}
-
-/** An EDGE's label — the bare name, because TinkerPop fixes edge label cardinality at exactly one and the
- *  id is inline on `edges` rather than in a side table. `labelNameSub`'s twin. */
-export function edgeLabel(labelId: Expr, fresh: Minter): Expr {
-  const names = labelTable(fresh);
-  const matching = make.filter({ id: fresh('wlf'), input: names, channels: [], type: names.type, pred: eq(col(names.id, 'id'), labelId) });
-  const only = make.project({
-    id: fresh('wln'), input: matching, channels: [], type: typeOf(meta('name', 'text', true)),
-    exprs: [['name', col(matching.id, 'name')]],
-  });
-  return { kind: 'scalar', plan: only };
 }
 
 /**
@@ -272,7 +252,7 @@ function correlatedElement(rowid: Expr, elem: Elem, fresh: Minter, wrap: (payloa
       ['id', coalesce(own('uid'), own('id'))],
       // A VERTEX's label payload is a JSON ARRAY and an EDGE's is a bare name, so only the first needs
       // the subtype pinned — quoting an array as a string is the failure this prevents.
-      ['label', elem === 'edge' ? edgeLabel(own('label'), fresh) : jsonOf(vertexLabels(own('id'), fresh))],
+      ['label', elem === 'edge' ? nameOf('labels', own('label'), fresh) : jsonOf(vertexLabels(own('id'), fresh))],
       ...(elem === 'edge'
         ? [['src', nodeExternalId(own('src'), fresh)] as const, ['tgt', nodeExternalId(own('tgt'), fresh)] as const]
         : []),
@@ -331,7 +311,7 @@ export function elementPayload(input: Rel, elem: Elem, opts: { readonly bulk: bo
   const payload: readonly (readonly [ColMeta, Expr])[] = [
     [meta('id', 'any'), coalesce(col(ordered.id, ROW('uid')), rowid)],
     elem === 'edge'
-      ? [meta('label', 'text', true), edgeLabel(col(ordered.id, ROW('label')), fresh)]
+      ? [meta('label', 'text', true), nameOf('labels', col(ordered.id, ROW('label')), fresh)]
       : [meta('label', 'json'), vertexLabels(rowid, fresh)],
     ...(elem === 'edge'
       ? [
@@ -368,7 +348,7 @@ export function correlatedElementColumns(
     const row = (name: string): Expr => edgeColumn(rowid, name, fresh);
     return [
       [meta('id', 'any', true), externalId(rowid, 'edge', fresh)],
-      [meta('label', 'text', true), edgeLabel(row('label'), fresh)],
+      [meta('label', 'text', true), nameOf('labels', row('label'), fresh)],
       [meta('src', 'any', true), nodeExternalId(row('src'), fresh)],
       [meta('tgt', 'any', true), nodeExternalId(row('tgt'), fresh)],
       [meta('props', 'json', true), edgeProps(rowid, fresh)],

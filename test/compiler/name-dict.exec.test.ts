@@ -46,3 +46,29 @@ describe('internNames — a creation upserts its names once', () => {
     expect(store.query("SELECT count(*) AS n FROM labels WHERE name = 'person'", [])).toEqual([{ n: 1 }]);
   });
 });
+
+describe('nameOf / withNames — an id decodes to its name', () => {
+  test("a vertex reads its labels in INTERNING order, so label() is the payload's labels[0]", () => {
+    const store = seededStore();
+    // The seed interned `person` before this write interns `zeta`, though the vertex gets `zeta` first.
+    run(store, "g.addV('zeta').property('name', 'z').addLabel('person')");
+    const z = "g.V().has('name', 'z')";
+    expect(values(run(store, `${z}.label()`))).toEqual(['person']);
+    // A bare `labels()` stream reaching the wire is unordered (L8); its fold and the payload are ordered.
+    expect(values(run(store, `${z}.labels()`)).sort()).toEqual(['person', 'zeta']);
+    expect(bare(run(store, z))[0].label).toBe('["person","zeta"]');
+    expect(bare(run(store, `${z}.local(__.labels().fold())`))[0].list).toBe('["person","zeta"]');
+  });
+
+  test('has(T.label, P) tests P on the decoded name, at the root and after a hop', () => {
+    const store = seededStore();
+    expect(values(run(store, "g.V().has(T.label, TextP.startingWith('p')).count()"))).toEqual([4]);
+    expect(values(run(store, "g.E().has(T.label, TextP.endingWith('ows')).label()"))).toEqual(['knows', 'knows']);
+    expect(values(run(store, "g.V().out().has(T.label, TextP.containing('oft')).count()"))).toEqual([4]);
+  });
+
+  test('an edge label decodes to its name', () => {
+    const store = seededStore();
+    expect(values(run(store, 'g.E().label()')).sort()).toEqual(['created', 'created', 'created', 'created', 'knows', 'knows']);
+  });
+});

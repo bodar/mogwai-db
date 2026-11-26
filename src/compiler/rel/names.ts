@@ -3,7 +3,8 @@
  *
  * A label is stored as a rowid into the `labels` table, a set of names under a `UNIQUE (name)` index.
  * Every step that names a label goes through that indirection: a read filters `labels` by name and joins
- * the ids (`nameIds`), a creation upserts its names and gets the ids back (`internNames`). Each name
+ * the ids (`nameIds`), a creation upserts its names and gets the ids back (`internNames`), and an output
+ * decodes an id back to its name (`nameOf` for one id, `withNames` for a relation of ids). Each name
  * resolves INSIDE the statement, through the index — the compile never reads the store, so a plan is a
  * function of the query text alone, and a name that was never interned is an empty set, not an error.
  *
@@ -17,7 +18,7 @@ import { insert } from '../../rel/stmt-factory.ts';
 import type { Stmt } from '../../rel/stmt.ts';
 import { EXCLUDED } from '../../rel/types.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
-import { jsonEachSet, meta, typeOf, type Minter } from './build.ts';
+import { and, eq, jsonEachSet, meta, typeOf, type Minter } from './build.ts';
 
 /** A name dictionary: a table of `(id, name)` rows under a unique name. Labels are the only one today. */
 export type NameDict = 'labels';
@@ -60,6 +61,43 @@ export function nameIds(dict: NameDict, names: readonly Arg[] | readonly string[
   const pred = disjoin(clauses);
   const matching = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: pred! });
   return make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('id', 'int')), exprs: [['id', col(matching.id, 'id')]] });
+}
+
+/**
+ * ONE id's name — the decode as a scalar, `(SELECT name FROM <dict> WHERE id = <id>)`. One INTEGER PRIMARY
+ * KEY seek, correlated when `id` is an outer row's column (an edge's `label`). NULL for an id no row holds.
+ */
+export function nameOf(dict: NameDict, id: Expr, fresh: Minter): Expr {
+  const names = dictScan(dict, fresh);
+  const matching = make.filter({ id: fresh('f'), input: names, channels: [], type: names.type, pred: eq(col(names.id, 'id'), id) });
+  const only = make.project({
+    id: fresh('p'), input: matching, channels: [], type: typeOf(meta('name', 'text', true)),
+    exprs: [['name', col(matching.id, 'name')]],
+  });
+  return { kind: 'scalar', plan: only };
+}
+
+/**
+ * A relation's ids DECODED — `input` inner-joined to `dict` on its `idCol`, carrying `input`'s columns, then
+ * `lid` (the dictionary id; a Join's declared names are positional and must be unique, so never a second
+ * `id`) and `name`. Each row is one INTEGER PRIMARY KEY seek.
+ *
+ * `on` adds conjuncts to the join condition, built from the decoded `name`: a correlation on the owner
+ * row (`vertex_labels.node = <id>`), or a test on the name itself (`has(T.label, P)`, where `P` is an
+ * arbitrary predicate over the name, so it stays a join). A row order on the result is the caller's: the
+ * interning order is `lid` (equal to `idCol`), and that is what makes `labels[0]` the first-interned label.
+ */
+export function withNames(
+  dict: NameDict, input: Rel, idCol: string, fresh: Minter,
+  { on, ordered }: { readonly on?: (name: Expr) => Expr; readonly ordered?: boolean } = {},
+): Rel {
+  const names = dictScan(dict, fresh);
+  const decoded = eq(col(input.id, idCol), col(names.id, 'id'));
+  return make.join({
+    id: fresh('j'), left: input, right: names, join: 'inner', ...(ordered ? { ordered } : {}), channels: input.channels,
+    type: typeOf(...input.type.cols, meta('lid', 'int'), meta('name', 'text')),
+    on: on ? and(decoded, on(col(names.id, 'name'))) : decoded,
+  });
 }
 
 /**

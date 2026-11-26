@@ -6,13 +6,13 @@ import type { Binding } from '../../rel/plan.ts';
 import { arg, type Arg } from '../../gremlin/frontend.ts';
 import type { Elem } from '../elem.ts';
 import { constLit } from './const.ts';
-import { edgeLabel, elementNode, elementObject, elementPayload, externalId as elementExternalId, vertexLabels } from './element.ts';
+import { elementNode, elementObject, elementPayload, externalId as elementExternalId, vertexLabels } from './element.ts';
 import { CONSTANT } from './predicate.ts';
 import { valueIsKind } from './receiver.ts';
 import type { ValueEvidence } from './tag.ts';
 import { propertyRelation } from './property.ts';
 import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, meta, NODE_COLS, PROPERTIES, renumber, storedOrderKey, storedPayload, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
-import { nameIds } from './names.ts';
+import { nameIds, nameOf, withNames } from './names.ts';
 
 // ---------- GraphSource: one traversal vocabulary over two physical graph shapes ----------
 //
@@ -653,26 +653,18 @@ export const BaseGraph: GraphSource = {
       const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
       return { kind: 'exists', plan: probe, negated: false };
     }
-    const labels = make.scan({ id: fresh('lb'), table: 'labels', alias: fresh('rl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
-    const matches = valuePred(col(labels.id, 'name'));
-    if (!matches) return null;
-    if (kind === 'edge') {
+    // `has(T.label, P)`: `P` is an arbitrary predicate over the decoded NAME, so it is a join condition on
+    // the owner's decoded label rows rather than a name → id lookup. `withNames` calls `on` once, before it
+    // returns, so `matches` says whether `P` lowered at all.
+    let matches: Expr | null = null;
+    const owner = kind === 'edge'
       // An edge's label is a COLUMN, so the join is against the correlated edge row.
-      const edges = make.scan({ id: fresh('eg'), table: 'edges', alias: fresh('re'), channels: [], type: typeOf(meta('id', 'int'), meta('label', 'int')) });
-      const joined = make.join({
-        id: fresh('j'), left: edges, right: labels, join: 'inner', channels: [],
-        type: typeOf(meta('id', 'int'), meta('label', 'int'), meta('lid', 'int'), meta('name', 'text')),
-        on: and(and(eq(col(edges.id, 'label'), col(labels.id, 'id')), eq(col(edges.id, 'id'), id)), matches),
-      });
-      const probe = make.project({ id: fresh('p'), input: joined, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
-      return { kind: 'exists', plan: probe, negated: false };
-    }
-    const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
-    const joined = make.join({
-      id: fresh('j'), left: vl, right: labels, join: 'inner', channels: [],
-      type: typeOf(meta('node', 'int'), meta('label', 'int'), meta('lid', 'int'), meta('name', 'text')),
-      on: and(and(eq(col(vl.id, 'label'), col(labels.id, 'id')), eq(col(vl.id, 'node'), id)), matches),
+      ? make.scan({ id: fresh('eg'), table: 'edges', alias: fresh('re'), channels: [], type: typeOf(meta('id', 'int'), meta('label', 'int')) })
+      : make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
+    const joined = withNames('labels', owner, 'label', fresh, {
+      on: (name) => and(eq(col(owner.id, kind === 'edge' ? 'id' : 'node'), id), (matches = valuePred(name)) ?? undefined),
     });
+    if (!matches) return null;
     const probe = make.project({ id: fresh('p'), input: joined, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
     return { kind: 'exists', plan: probe, negated: false };
   },
@@ -682,27 +674,18 @@ export const BaseGraph: GraphSource = {
   externalId: (kind, id, fresh) => elementExternalId(id, kind, fresh),
 
   labelScalar: (kind, id, fresh) => {
-    const labels = make.scan({ id: fresh('lb'), table: 'labels', alias: fresh('rl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
+    // The first label in INTERNING order — the dictionary id, which is what makes it the payload's `labels[0]`.
     if (kind === 'edge') {
       const edges = make.scan({ id: fresh('eg'), table: 'edges', alias: fresh('re'), channels: [], type: typeOf(...EDGE_COLS) });
-      const joined = make.join({
-        id: fresh('j'), left: edges, right: labels, join: 'inner', channels: [],
-        type: typeOf(...EDGE_COLS, meta('lid', 'int'), meta('name', 'text')),
-        on: and(eq(col(edges.id, 'label'), col(labels.id, 'id')), eq(col(edges.id, 'id'), id)),
-      });
+      const joined = withNames('labels', edges, 'label', fresh, { on: () => eq(col(edges.id, 'id'), id) });
       return firstOf(joined, col(joined.id, 'name'), col(joined.id, 'lid'), fresh);
     }
     const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
-    const joined = make.join({
-      id: fresh('j'), left: vl, right: labels, join: 'inner', channels: [],
-      type: typeOf(meta('node', 'int'), meta('label', 'int'), meta('lid', 'int'), meta('name', 'text')),
-      on: and(eq(col(vl.id, 'label'), col(labels.id, 'id')), eq(col(vl.id, 'node'), id)),
-    });
+    const joined = withNames('labels', vl, 'label', fresh, { on: () => eq(col(vl.id, 'node'), id) });
     return firstOf(joined, col(joined.id, 'name'), col(joined.id, 'label'), fresh);
   },
 
   labelNames: (input, kind, fresh) => {
-    const names = make.scan({ id: fresh('lb'), table: 'labels', alias: fresh('rl'), channels: [], type: typeOf(meta('id', 'int'), meta('name', 'text')) });
     // A vertex holds its labels in the `vertex_labels` side table; an edge inlines the FK on the row.
     const owned = kind === 'edge'
       ? (() => {
@@ -721,12 +704,7 @@ export const BaseGraph: GraphSource = {
           on: eq(col(vl.id, 'node'), col(input.id, 'id')),
         });
       })();
-    // `lid` and not a second `id`: a Join's declared names are POSITIONAL and must be unique.
-    const named = make.join({
-      id: fresh('j'), left: owned, right: names, join: 'inner', ordered: true, channels: owned.channels,
-      type: typeOf(...owned.type.cols, meta('lid', 'int'), meta('name', 'text')),
-      on: eq(col(names.id, 'id'), col(owned.id, 'label')),
-    });
+    const named = withNames('labels', owned, 'label', fresh, { ordered: true });
     // `lord` is the label-dictionary id (`vertex_labels.label` / `edges.label`), the interning order the
     // element payload's `json_group_array(name ORDER BY lid)` and `by(T.label)`'s first-label pick use —
     // so a vertex's labels read identically wherever they are read. The caller mints the emission order.
@@ -770,7 +748,7 @@ export const BaseGraph: GraphSource = {
 
   externalIdOf: (row) => ({ kind: 'call', fn: 'COALESCE', args: [col(row.id, 'uid'), col(row.id, 'id')] }),
 
-  edgeLabelOf: (row, fresh) => edgeLabel(col(row.id, 'label'), fresh),
+  edgeLabelOf: (row, fresh) => nameOf('labels', col(row.id, 'label'), fresh),
 
   elementRow: (kind, id, fresh) => {
     const cols = kind === 'edge' ? EDGE_COLS : NODE_COLS;
