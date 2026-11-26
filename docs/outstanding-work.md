@@ -54,7 +54,7 @@ An item marked "verify" may have landed already. Check it against the code befor
 
 1. [Wrong answers](#1-wrong-answers) — 33 items
 2. [Performance](#2-performance) — 58 items
-3. [Queries we decline](#3-queries-we-decline) — 89 items
+3. [Queries we decline](#3-queries-we-decline) — 91 items
 4. [Shared substrate](#4-shared-substrate) — 19 items
 5. [Product capabilities](#5-product-capabilities) — 7 items
 6. [Internal debt](#6-internal-debt) — 91 items
@@ -765,8 +765,8 @@ Queries that answer correctly but grow faster than linear with data or query siz
 #### `hasLabel` on a joined edge re-reads the edge (`label-probe-edge-col`)
 - **Area:** compiler
 - **Reach:** plausible
-- **Problem:** `hasLabel` on a joined edge does a correlated rowid probe. `outE().as('e').inV().inE().hasLabel('created').where(neq('e'))` is about 1.5× slower than before (linear, output-bound). The old IN form has the same cost.
-- **Fix:** When `ownScan(row, id, 'edges')` resolves, read `col(scan, 'label')`.
+- **Problem:** `hasLabel` on a joined edge does a correlated rowid probe. `outE().as('e').inV().inE().hasLabel('created').where(neq('e'))` is about 1.5× slower than before (linear, output-bound). The old IN form has the same cost. `labelScalar` does the same for `label()`: `g.V().outE().label()` and `g.E().order().by(T.label)` seek `edges` once per row for an edge already in scope (linear: 1.82 ms at 1k, 6.91 ms at 8k).
+- **Fix:** When `ownScan(row, id, 'edges')` resolves, read `col(scan, 'label')`. Use the same rule in `hasLabelPredicate` and `labelScalar`.
 
 ## 3. Queries we decline
 
@@ -1010,6 +1010,13 @@ Sensible queries that fail with `UnsupportedTraversal` today. Each one is a feat
 - **Reach:** plausible
 - **Problem:** `g.V().choose(hasLabel('person'), out().fold(), values('name').fold())` declines.
 - **Fix:** Merge an element-list arm with a scalar-list arm.
+
+#### A `label()` arm beside a string `constant()` arm (`label-arm-string-constant`)
+- **Area:** branch
+- **Reach:** rare
+- **Problem:** `g.V().union(outE().label(), constant('none')).count()`, `g.V().union(constant('x'), label())`, `g.V().coalesce(outE().label(), constant('none'))`, `g.V().choose(hasLabel('person'), label(), constant('x'))` and `g.V().coalesce(outE().has(T.label, eq('likes')).label(), constant('none')).groupCount()` decline. They decline under `local()` and `where()` too. The merge, not the host, is the gap: `union(label(), constant(1))`, `union(label(), values('name'))`, `union(outE().label(), outE().label())` and `coalesce(label(), constant('x'))` answer. The cause is not found yet.
+- **Fix:** Find where the arm merge refuses a label arm beside a string constant arm. Fix it in the merge, so it composes under every host. Do not add a `(host, arm)` case.
+- **Where:** the arm merge in `src/compiler/rel/lower/branch.ts`; `labelScalar`
 
 #### A drawn re-source after a host-reading filter declines under `map()` (`map-draw-host-read`)
 - **Area:** nesting
@@ -1290,8 +1297,16 @@ Sensible queries that fail with `UnsupportedTraversal` today. Each one is a feat
 #### `hasLabel(P)` (`haslabel-predicate`)
 - **Area:** predicates
 - **Reach:** common
-- **Problem:** `g.V().hasLabel(within('person','software'))`, `hasLabel(P.eq('person'))` and `g.E().hasLabel(within('knows','created'))` decline. `hasLabel('person','software')` answers. The grammar is legal TinkerPop 4.
-- **Fix:** Route a `P` through the existing label predicate.
+- **Problem:** `g.V().hasLabel(within('person','software'))`, `hasLabel(P.eq('person'))`, `g.E().hasLabel(within('knows','created'))` and `g.V().hasLabel(TextP.startingWith('p')).count()` decline. `hasLabel('person','software')` answers. The grammar is legal TinkerPop 4. The same predicates answer as `has(T.label, P)`: `g.V().has(T.label, within('person','software')).count()` gives 6 and `has(T.label, TextP.startingWith('p'))` gives 4.
+- **Fix:** A `hasLabel` with one `P` argument is `has(T.label, P)`. Let `hasLabelClause` give a single `P` to `hasTokenClause('label', …)`. This joins an existing route. It adds no new mechanism. Do it as its own item.
+- **Where:** `src/compiler/rel/lower/filter.ts` `hasLabelClause`, `hasTokenClause`
+
+#### `regex` on a label or an id (`token-regex`)
+- **Area:** predicates
+- **Reach:** rare
+- **Problem:** `g.E().has(T.label, regex('^k')).count()`, `g.V().has(T.label, TextP.regex('^p'))` and `g.V().has(T.id, regex('^1'))` decline. `has('name', regex('^m'))` answers through the regex barrier.
+- **Fix:** Let the regex barrier head project the label (or the external id) in place of `values(key)`. The resume is then `has(T.label, within(<survivors>))`, which already answers. Keep the one barrier; add no second regex route.
+- **Where:** `src/compiler/rel/regex.ts`; `hasTokenClause`
 
 ### Queries we decline: sources and movement
 

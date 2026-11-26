@@ -177,7 +177,9 @@ nothing for these items. A-f2, A-f4 and the A-f6 `labelListed` lambda are separa
 **Depth gaps seen in review (pre-existing, not Stage A scope).** These decline on trunk before and after
 Stage A: `label()` as a `choose`/`coalesce` arm (`g.V().coalesce(outE().label(), constant('none'))`),
 `has(T.label, TextP.regex(…))`, `hasLabel(TextP.startingWith(…))`, and `hasLabel(within(…))`/
-`without(…)` (tracked as `haslabel-predicate` in `docs/outstanding-work.md`).
+`without(…)`. Each is a row in `docs/outstanding-work.md` (F-d): `haslabel-predicate` (every
+`hasLabel(P)`), `token-regex` (`regex` on `T.label`/`T.id`) and `label-arm-string-constant` (a `label()`
+arm beside a string `constant()` arm).
 
 ### Next round — reuse proposals (Stage A residue, before B1)
 
@@ -254,10 +256,11 @@ Plan items, in order:
   compiler duplicate. `src/services/catalog/schema.ts` still scans `vertex_labels` by hand; N4 removes it.
 - **F-c. `labelScalar` re-reads `edges` for an edge already in scope** (`g.V().outE().label()`,
   `g.E().order().by(T.label)`): one rowid seek per row. It existed before this round and scales
-  linearly (1.82 ms at 1k, 6.91 ms at 8k, 3.8×). Candidate for `docs/outstanding-work.md`, not a defect.
-- **F-d. Depth gaps (pre-existing, clean declines, no wrong answer).** Add to the list above:
-  `g.V().coalesce(outE().has(T.label, eq('likes')).label(), constant('none')).groupCount()`,
-  `g.E().has(T.label, regex('^k')).count()`, `g.V().hasLabel(TextP.startingWith('p')).count()`.
+  linearly (1.82 ms at 1k, 6.91 ms at 8k, 3.8×). Not a defect. **Recorded** in `docs/outstanding-work.md`
+  under `label-probe-edge-col`, which has the same fix.
+- **F-d. Depth gaps (pre-existing, clean declines, no wrong answer).** **Recorded** in
+  `docs/outstanding-work.md` with the list above: `haslabel-predicate`, `token-regex` and
+  `label-arm-string-constant`.
 
 ### Next round — reuse proposals (before B1)
 
