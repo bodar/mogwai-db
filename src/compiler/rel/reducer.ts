@@ -1,4 +1,4 @@
-import { col, compilerInt, compilerNull, compilerReal, compilerText, type AggFn, type BinaryOp, type Expr } from '../../rel/expr.ts';
+import { always, col, compilerInt, compilerNull, compilerReal, compilerText, type AggFn, type BinaryOp, type Expr } from '../../rel/expr.ts';
 import type { ColMeta, RelId } from '../../rel/types.ts';
 import type { Rel } from '../../rel/rel.ts';
 import * as make from '../../rel/factory.ts';
@@ -125,9 +125,8 @@ function numberTag(tag: ReducerRowTag): Expr | boolean {
 /** A guard arm: the test as a CASE `when`, dropped where the test is decided false at compile time. A
  *  `true` test keeps its arm — the raise still reads the row (`raiseExpr`'s operand). */
 type Arm = readonly [Expr, Expr];
-const CONSTANT_TRUE: Expr = { kind: 'binary', op: '=', left: compilerInt(1), right: compilerInt(1) };
 const armWhen = (test: Expr | boolean | null, then: Expr): Arm[] =>
-  test === null || test === false ? [] : [[test === true ? CONSTANT_TRUE : test, then]];
+  test === null || test === false ? [] : [[test === true ? always : test, then]];
 
 /**
  * The eligibility guard for an ORDERING reducer: the value where its storage class qualifies, NULL

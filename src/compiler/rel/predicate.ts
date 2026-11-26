@@ -1,4 +1,4 @@
-import { and, col, compilerInt, compilerNull, compilerReal, compilerText, disjoin, param, type Expr } from '../../rel/expr.ts';
+import { always, and, col, compilerInt, compilerNull, compilerReal, compilerText, disjoin, param, type Expr } from '../../rel/expr.ts';
 import { comparableOf, jsonEachSet, meta, storedForm, typeOf, type Minter } from './build.ts';
 import * as make from '../../rel/factory.ts';
 import { inferredVtype } from './tag.ts';
@@ -47,7 +47,7 @@ const negated = (inner: Expr): Expr => binary('is not', inner, compilerInt(1));
  *  bare `0`, so the expression still reads as a predicate wherever it is spliced. */
 /** The two constant predicates, spelled once. A lowering that has PROVEN an outcome says so with
  *  these rather than inventing its own always-false expression at each site. */
-export const CONSTANT = { true: binary('=', compilerInt(1), compilerInt(1)), false: binary('=', compilerInt(1), compilerInt(0)) };
+export const CONSTANT = { true: always, false: binary('=', compilerInt(1), compilerInt(0)) };
 
 const COMPARISON: Readonly<Record<string, Extract<Expr, { kind: 'binary' }>['op']>> =
   { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };

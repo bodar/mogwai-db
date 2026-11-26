@@ -1,5 +1,5 @@
 import type { ParamEnv } from '../../gremlin/param-env.ts';
-import { col, compilerInt, compilerNull, compilerText, conjoin, disjoin, isNot, param, type Expr } from '../../rel/expr.ts';
+import { always, col, compilerInt, compilerNull, compilerText, conjoin, disjoin, isNot, param, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import { name as nameBindings } from '../../rel/passes/name.ts';
 import type { Binding, Guard } from '../../rel/plan.ts';
@@ -3448,7 +3448,6 @@ function guardMergeInterleaving(
   }), unsupported(why));
   const second = (): Rel => make.limit({ id: fresh('li'), input: incoming, channels: incoming.channels, type: incoming.type, count: compilerInt(1), offset: compilerInt(1) });
   const lt = (a: Expr, b: Expr): Expr => ({ kind: 'binary', op: '<', left: a, right: b });
-  const always = eq(compilerInt(1), compilerInt(1));
   // A self-join of one relation: two trees over the same retained rows, the right side's names
   // suffixed so the declared type stays positional and unambiguous.
   const selfJoin = (left: Rel, right: Rel, on: Expr): Rel => make.join({
@@ -3639,7 +3638,7 @@ function raiseOnCreateOverride(unmatched: Rel, overrides: Expr, token: string, v
  *  where it names none) is overridden by an onCreate label unless onCreate names exactly that one. */
 function onCreateLabelGuard(unmatched: Rel, mapLabel: Expr, labels: readonly string[], guard: Guarder, fresh: Minter): void {
   if (!labels.length) return;
-  const overridden = labels.length === 1 ? isNot(mapLabel, compilerText(labels[0]!)) : eq(compilerInt(1), compilerInt(1));
+  const overridden = labels.length === 1 ? isNot(mapLabel, compilerText(labels[0]!)) : always;
   raiseOnCreateOverride(unmatched, and(isNot(mapLabel, compilerNull('text')), overridden), 'label', labels, guard, fresh);
 }
 
@@ -3807,7 +3806,7 @@ function searchKeying(fixed: readonly MergeKey[], map: { readonly excluded: read
     pairs: (earlier, later, fresh, bind) => {
       // NOTHING TO KEY BY — every criterion is an `onCreate` key (read as "could"), so every pair is a
       // candidate and `couldMatch` decides alone: the pair test stays exact, it simply has no seek.
-      if (!maskCols.length && !map) return { left: earlier, right: later, on: eq(compilerInt(1), compilerInt(1)) };
+      if (!maskCols.length && !map) return { left: earlier, right: later, on: always };
       const arity = fixed.map((key) => key.key(earlier.id).length);
       // Each tuple's key set and signature, computed once and read by both sides — and by `containing`, so
       // the earlier tuples are decoded once for the statement.
@@ -3907,7 +3906,7 @@ function seekedSearch(
   const few = bind(unnarrowed, true);
   const everyCandidate = make.join({
     id: fresh('j'), left: every, right: few, join: 'inner', ordered: true, channels: [],
-    on: eq(compilerInt(1), compilerInt(1)), type: typeOf(...every.type.cols, ...few.type.cols),
+    on: always, type: typeOf(...every.type.cols, ...few.type.cols),
   });
   // Every arm's (driver, candidate id) first, and the search's test ONCE over their union — so the
   // residual is spelled once per statement, not once per arm.
@@ -3956,11 +3955,11 @@ function seekOwners(driving: Rel, index: Rel, on: Expr, owner: string, fresh: Mi
  * digits (a TEXT), never as the INTEGER its key is — a spooled INTEGER key came back as its nearest double.
  */
 function propertySeeks(
-  elem: Elem, drivers: (narrow: (driver: RelId) => Expr) => Rel,
+  elem: Elem, drivers: (narrow?: (driver: RelId) => Expr) => Rel,
   key: (driver: RelId) => Expr, value: (driver: RelId) => Expr, vtype: (driver: RelId) => Expr, fresh: Minter,
 ): readonly Rel[] {
   const spec = PROPERTY_TABLE[elem];
-  const exact = drivers(() => eq(compilerInt(1), compilerInt(1)));
+  const exact = drivers();
   const exactProps = make.scan({ id: fresh('sk'), table: spec.table, alias: fresh('rsk'), channels: [], type: typeOf(...spec.cols) });
   return [seekOwners(exact, exactProps, and(eq(col(exactProps.id, 'key'), key(exact.id)),
     eq(col(exactProps.id, 'value'), typedValueKey(value(exact.id), vtype(exact.id))[1])), spec.owner, fresh)];
@@ -4027,7 +4026,7 @@ function computedMatch(
     : conjoin(cKeys.map((_, j): Expr => j === i ? productive(rel, i, true)
       : or(productive(rel, j, false), { kind: 'binary', op: j < i ? '>' : '>=', left: col(rel, countCol(j)), right: col(rel, countCol(i)) })))!;
   // The residual: every key's `has(k, v)`, as a correlated EXISTS over the candidate's stored property.
-  const residual = (driver: RelId, candidate: RelId): Expr => cKeys.map((key, i) => {
+  const residual = (driver: RelId, candidate: RelId): Expr => conjoin(cKeys.map((key, i) => {
     const scan = make.scan({ id: fresh('vp'), table: spec.table, alias: fresh('rp'), channels: [], type: typeOf(...spec.cols) });
     const found = make.filter({
       id: fresh('f'), input: scan, channels: [], type: scan.type,
@@ -4036,10 +4035,10 @@ function computedMatch(
     });
     const probe = make.project({ id: fresh('p'), input: found, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
     return or(productive(driver, i, false), { kind: 'exists', plan: probe, negated: false } as Expr);
-  }).reduce((a, b) => and(a, b), eq(compilerInt(1), compilerInt(1)));
-  const arms = cKeys.flatMap((key, i) => propertySeeks(elem, (narrow) => drivers((rel) => and(drives(i)(rel), narrow(rel))),
+  })) ?? always;
+  const arms = cKeys.flatMap((key, i) => propertySeeks(elem, (narrow) => drivers((rel) => and(drives(i)(rel), narrow?.(rel))),
     () => compilerText(key), (driver) => col(driver, cvCol(i)), (driver) => col(driver, ptCol(i)), fresh));
-  const unnarrowed = drivers((rel) => cKeys.map((_, j) => productive(rel, j, false)).reduce((a, b) => and(a, b), eq(compilerInt(1), compilerInt(1))));
+  const unnarrowed = drivers((rel) => conjoin(cKeys.map((_, j) => productive(rel, j, false))) ?? always);
   return seekedSearch(carrier.type.cols, arms, unnarrowed, candidates, 'id', residual, hasOrd, bind, fresh);
 }
 
@@ -4050,7 +4049,7 @@ function computedMatch(
  * `T.label`-only or empty map). `narrow` partitions them further (a host's own seek arms).
  */
 interface MapDrivers {
-  readonly with: (narrow: (driver: RelId) => Expr) => Rel;
+  readonly with: (narrow: (driver: RelId) => Expr | undefined) => Rel;
   readonly without: (narrow?: (driver: RelId) => Expr) => Rel;
   readonly all: (narrow: (driver: RelId) => Expr) => Rel;
 }
@@ -4062,7 +4061,6 @@ function mapDrivers(carrier: Rel, elem: Elem, bind: Binder, fresh: Minter): MapD
     const pairs = pairsOf(col(driver, MAP_COL), fresh);
     return make.filter({ id: fresh('f'), input: pairs, channels: [], type: pairs.type, pred: stringKey(col(pairs.id, PAIR.value)) });
   };
-  const always = eq(compilerInt(1), compilerInt(1));
   // The driving entry per driver, chosen ONCE and retained: its most selective STRING entry
   // (`cappedCount`), ties to the map's own order — `[tenant:'acme', email:x]` seeks by `email`. The pick
   // correlates to the DRIVER — projected beside it and MATERIALIZED before the map is exploded. Picked
@@ -4109,13 +4107,14 @@ function mapDrivers(carrier: Rel, elem: Elem, bind: Binder, fresh: Minter): MapD
   return {
     with: (narrow) => {
       const drivers = driving();
-      return make.filter({ id: fresh('f'), input: drivers, channels: [], type: drivers.type, pred: narrow(drivers.id) });
+      const pred = narrow(drivers.id);
+      return pred ? make.filter({ id: fresh('f'), input: drivers, channels: [], type: drivers.type, pred }) : drivers;
     },
-    without: (narrow = () => always) => {
+    without: (narrow) => {
       const drivers = ref();
       return make.filter({
         id: fresh('f'), input: drivers, channels: [], type: drivers.type,
-        pred: and({ kind: 'exists', plan: stringPairs(drivers.id), negated: true }, narrow(drivers.id)),
+        pred: and({ kind: 'exists', plan: stringPairs(drivers.id), negated: true }, narrow?.(drivers.id)),
       });
     },
     all: (narrow) => {
@@ -4127,8 +4126,8 @@ function mapDrivers(carrier: Rel, elem: Elem, bind: Binder, fresh: Minter): MapD
 
 /** The property seek of a map-valued driver's first STRING entry (`mapDrivers.with`) — `propertySeeks` with
  *  the key, value and vtype read off the pair's `{t,v}` nodes. */
-function mapEntrySeeks(elem: Elem, drivers: MapDrivers, fresh: Minter, narrow: (driver: RelId) => Expr = () => eq(compilerInt(1), compilerInt(1))): readonly Rel[] {
-  return propertySeeks(elem, (seek) => drivers.with((driver) => and(narrow(driver), seek(driver))),
+function mapEntrySeeks(elem: Elem, drivers: MapDrivers, fresh: Minter, narrow?: (driver: RelId) => Expr): readonly Rel[] {
+  return propertySeeks(elem, (seek) => drivers.with((driver) => conjoin([narrow?.(driver), seek?.(driver)].filter((e) => e !== undefined))),
     (driver) => col(driver, SEEK_KEY), (driver) => col(driver, SEEK_VALUE), (driver) => col(driver, SEEK_VTYPE), fresh);
 }
 
@@ -4191,7 +4190,7 @@ function createdPerDriver(unmatched: Rel, created: Rel, tupleCols: readonly ColM
     type: typeOf(meta('cid', 'int'), ...names.map((name) => ({ ...typed(created, name), name: `c_${name}` }))),
     exprs: [['cid', col(created.id, 'id')], ...names.map((name) => [`c_${name}`, col(created.id, name)] as const)],
   });
-  const on = names.map((name): Expr => ({ kind: 'binary', op: 'is', left: col(um.id, name), right: col(ct.id, `c_${name}`) })).reduce((a, b) => and(a, b), eq(compilerInt(1), compilerInt(1)));
+  const on = conjoin(names.map((name): Expr => ({ kind: 'binary', op: 'is', left: col(um.id, name), right: col(ct.id, `c_${name}`) }))) ?? always;
   return make.join({ id: fresh('j'), left: um, right: ct, join: 'inner', on, channels: [], type: typeOf(...um.type.cols, ...ct.type.cols) });
 }
 
@@ -4205,14 +4204,12 @@ function computedCouldMatch(
   cKeys: readonly string[], onCreate: MergeSpec | null,
   ppCol: (i: number) => string, cvCol: (i: number) => string, ptCol: (i: number) => string,
 ): { readonly couldMatch: (earlier: RelId, later: RelId) => Expr; readonly keying: PairKeying } {
-  const always = eq(compilerInt(1), compilerInt(1));
   const created = new Set(Object.keys(onCreate?.props ?? {}));
   const compared = cKeys.flatMap((key, i) => created.has(key) ? [] : [i]);
   return {
-    couldMatch: (earlier, later) => compared.map((i): Expr =>
+    couldMatch: (earlier, later) => conjoin(compared.map((i): Expr =>
       or(eq(col(later, ppCol(i)), compilerInt(0)), and(eq(col(earlier, ppCol(i)), compilerInt(1)),
-        typedValueEq(col(earlier, cvCol(i)), col(earlier, ptCol(i)), col(later, cvCol(i)), col(later, ptCol(i))))))
-      .reduce((a, b) => and(a, b), always),
+        typedValueEq(col(earlier, cvCol(i)), col(earlier, ptCol(i)), col(later, cvCol(i)), col(later, ptCol(i))))))) ?? always,
     keying: searchKeying(compared.map((i) => ({ present: (rel) => col(rel, ppCol(i)), key: (rel) => typedValueKey(col(rel, cvCol(i)), col(rel, ptCol(i))) })), null),
   };
 }
@@ -5030,12 +5027,11 @@ function mergeVComputed(
   const matched = bind(computedMatch('vertex', carrier, () => candidates()!, cKeys, ppCol, cvCol, ptCol, hasOrd, bind, fresh), true);
   // ROWS THAT FOUND NOTHING — carrier rows whose `ord` has no matched row (or, one driver with no `ord`,
   // the carrier when `matched` is empty).
-  const trueLit = eq(compilerInt(1), compilerInt(1));
   const unmatched = make.filter({
     id: fresh('f'), input: carrier, channels: [], type: carrier.type,
     pred: { kind: 'exists', negated: true, plan: make.filter({
       id: fresh('f'), input: matched, channels: [], type: matched.type,
-      pred: hasOrd ? eq(col(matched.id, ORD), col(carrier.id, ORD)) : trueLit }) },
+      pred: hasOrd ? eq(col(matched.id, ORD), col(carrier.id, ORD)) : always }) },
   });
   // `onCreate` may restate a computed key's per-driver value, never change it (`onCreateOverrideGuards`).
   const createOwners = onCreateOverrideGuards(unmatched, createExtra, onCreate, computedDriverEntry(cKeys, ppCol, cvCol, ptCol), guard, fresh);
@@ -5235,12 +5231,11 @@ export function mergeVFromMap(
   ], drivers.without((driver) => ({ kind: 'unary', op: 'not', arg: named(driver) })), candidates, 'id',
   (driver, candidate) => allMatch(driver, col(candidate, 'id')), hasOrd, bind, fresh), true);
   // ROWS THAT FOUND NOTHING → one create per DISTINCT map (two drivers with the same map create one vertex).
-  const trueLit = eq(compilerInt(1), compilerInt(1));
   const unmatched = make.filter({
     id: fresh('f'), input: carrier, channels: [], type: carrier.type,
     pred: { kind: 'exists', negated: true, plan: make.filter({
       id: fresh('f'), input: matched, channels: [], type: matched.type,
-      pred: hasOrd ? eq(col(matched.id, ORD), col(carrier.id, ORD)) : trueLit }) },
+      pred: hasOrd ? eq(col(matched.id, ORD), col(carrier.id, ORD)) : always }) },
   });
   // `onCreate` may restate the driver map's keys, never change them (`onCreateOverrideGuards`) — its
   // properties, and its label against the map's own `T.label`.
@@ -5565,12 +5560,11 @@ export function mergeEFromMap(
   ], drivers.without(neither), candidates, 'cid', allMatch, hasOrd, bind, fresh), true);
   // ROWS THAT FOUND NOTHING — a carrier row whose `ord` has no matched row (or the single-row carrier
   // when `matched` is empty).
-  const trueLit = eq(compilerInt(1), compilerInt(1));
   const unmatched = make.filter({
     id: fresh('f'), input: carrier, channels: [], type: carrier.type,
     pred: { kind: 'exists', negated: true, plan: make.filter({
       id: fresh('f'), input: matched, channels: [], type: matched.type,
-      pred: hasOrd ? eq(col(matched.id, ORD), col(carrier.id, ORD)) : trueLit }) },
+      pred: hasOrd ? eq(col(matched.id, ORD), col(carrier.id, ORD)) : always }) },
   });
   // `onCreate` may restate the driver map's keys, never change them (`onCreateOverrideGuards`) — its
   // properties, and its label against the map's own `T.label` (the carrier's `lbl`).
@@ -5947,12 +5941,11 @@ function mergeEComputed(
   //
   // ROWS THAT FOUND NOTHING — carrier rows whose `ord` has no matched row (or the single-row carrier when
   // `matched` is empty).
-  const trueLit = eq(compilerInt(1), compilerInt(1));
   const unmatched = make.filter({
     id: fresh('f'), input: carrier, channels: [], type: carrier.type,
     pred: { kind: 'exists', negated: true, plan: make.filter({
       id: fresh('f'), input: matched, channels: [], type: matched.type,
-      pred: hasOrd ? eq(col(matched.id, ORD), col(carrier.id, ORD)) : trueLit }) },
+      pred: hasOrd ? eq(col(matched.id, ORD), col(carrier.id, ORD)) : always }) },
   });
   // `onCreate` may restate a computed key's per-driver value, never change it (`onCreateOverrideGuards`).
   const createOwners = onCreateOverrideGuards(unmatched, createExtra, onCreate, computedDriverEntry(cKeys, ppCol, cvCol, ptCol), guard, fresh);

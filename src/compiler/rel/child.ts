@@ -1,5 +1,5 @@
 import type { ParamEnv } from '../../gremlin/param-env.ts';
-import { compilerInt, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
+import { always, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { Elem } from '../elem.ts';
 import type { AliasMap } from '../alias.ts';
@@ -271,9 +271,9 @@ export interface PresentWhen { readonly when: Expr; readonly orValue?: true }
  *  that way would read a NULL the filter made as a productive null. */
 export type HostPresence = Exclude<Presence, PresentWhen>;
 
-/** A constant TRUE, the per-row predicate `presenceOf` answers for `'always'` — ONE shared object, so a
+/** A constant TRUE, the per-row predicate `presenceOf` answers for `'always'` — `always` (`rel/expr.ts`), ONE shared object, so a
  *  consumer can test it by reference and spend no `CASE`/filter on it. SQLite folds it. */
-export const ALWAYS_PRODUCTIVE: Expr = { kind: 'binary', op: '=', left: compilerInt(1), right: compilerInt(1) };
+export const ALWAYS_PRODUCTIVE: Expr = always;
 
 /** The presence as a per-row predicate over the body's VALUE — `ALWAYS_PRODUCTIVE` for `'always'`,
  *  `value IS NOT NULL` for `'value-nullness'`, the stated predicate for `{ when }`, or `null` to DECLINE

@@ -149,6 +149,10 @@ export const conjuncts = (e: Expr): readonly Expr[] => (e.kind === 'binary' && e
 export const or = (left: Expr, right: Expr): Expr => ({ kind: 'binary', op: 'or', left, right });
 /** `or`'s inverse: an `OR` tree flattened to its disjuncts — `conjuncts` read the other way. */
 export const disjuncts = (e: Expr): readonly Expr[] => (e.kind === 'binary' && e.op === 'or' ? [...disjuncts(e.left), ...disjuncts(e.right)] : [e]);
+/** The tautology `1 = 1`, spelled ONCE — what an empty conjunction means (`conjoin(xs) ?? always`) and the
+ *  constant TRUE a lowering states when it has proven an outcome. One shared object, so a consumer may test
+ *  it by reference and elide it. SQLite folds it. */
+export const always: Expr = eq(compilerInt(1), compilerInt(1));
 /** Fold `terms` with AND; `undefined` for no terms (an absent predicate). */
 export const conjoin = (terms: readonly Expr[]): Expr | undefined =>
   terms.reduce<Expr | undefined>((left, right) => (left ? and(left, right) : right), undefined);
