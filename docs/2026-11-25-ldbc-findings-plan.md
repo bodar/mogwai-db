@@ -600,8 +600,14 @@ Major first. Minor items are kept only when they are cheap and concrete.
 
 Order: wrong answer, then the SQL doubling, then cheap fixes, then byte-stable reuse.
 
-1. **`P.not` negates the operator, not the guarded compare** (follow-up above). Literal and nested
-   operands. Add the witness to `test/L4-addendum/nested-operand-comparability.feature`.
+1. ✅ **LANDED (`f6715991`, round-5 item 1). The premise was wrong; the fix went the other way.** The
+   reference `P.not` is `NotP`, whose test is `!original.test`
+   (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/NotP.java:108`).
+   So an incomparable pair is KEPT by `P.not(gt)`. The `has()` witness answers `[a,d,e,f,h]`, which is
+   correct. The wrong answer was in `where()`: it pushed the negation into the operator. Mechanism:
+   `aliasPred` (`src/compiler/rel/lower.ts`) folds each leaf as `{ cmp, guard }`, conjoins the guards
+   outside, and negates a two-valued compare. `NEGATED_CMP` is deleted. Witnesses are in
+   `test/L4-addendum/nested-operand-comparability.feature`. Remains: nothing.
 2. **The label operand carries its node and its tag from the producer** (MAJOR follow-up above). Delete
    `sharedNode`. Acceptance: the SQL for `has('age', gt(select('e')))` returns to about 3 KB, and the
    1k / 8k timings return to the pre-`e35f833a` values.
