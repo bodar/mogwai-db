@@ -339,6 +339,9 @@ Plan items, in order:
   ("A mergeE SEARCH JOINS ITS OWN EDGE READ …"). That comment now reads as the header of the wrong
   describe. (b) The `mapEntrySeeks` doc in `src/compiler/rel/write.ts` says it seeks the "first STRING
   entry"; it seeks the picked entry (`SEEK_ORD`). Fix the wording.
+  **LANDED as `268089db` (`CI passed`, test order and docs only, no baseline moves).** Mechanism: the
+  map-label-seek describe now sits above the mergeE comment block, and the `mapEntrySeeks` docstring in
+  `src/compiler/rel/write.ts` says it seeks the picked entry (`SEEK_ORD`). **Remains:** nothing.
 - **P3. `docs/outstanding-work.md` row fixes (from the F-d review).**
   - `label-arm-string-constant`: change Reach to plausible. Add the witnesses
     `g.V().project('l').by(coalesce(outE().label(), constant('none')))`,
