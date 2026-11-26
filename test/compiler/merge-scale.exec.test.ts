@@ -22,7 +22,7 @@ import { isRowsBind } from '../../src/rel/emit.ts';
 import { GraphStore } from '../../src/storage.ts';
 import { BunSqlite } from '../../src/bun/BunSqlite.ts';
 import { rawProperties, rawVertex } from '../support/graph.ts';
-import { run } from '../support/harness.ts';
+import { run, seededStore } from '../support/harness.ts';
 import { RaisedByQuery } from '../../src/rel/raise.ts';
 import { nestedSnapshotScans, type PlanRow } from '../support/snapshot-scans.ts';
 
@@ -211,6 +211,26 @@ describe('a map-valued merge picks its driving entry once per driver', () => {
     expect(k8).toBeLessThan(16 * Math.max(k1, 50));
     expect(k8).toBeLessThan(5 * BUDGET_MS);
   }, 120_000);
+  // THE LABEL IS ONE MORE RANKED CRITERION. A batch sharing one `name` across N labels, re-upserted: every
+  // driver matches, and by `name` each read all N `paris` vertices (8k: 409 s on trunk, 77× its 1k). Its
+  // `T.label` is strictly more selective, so it seeks `vl_label` (`mapDrivers`' one pick).
+  test('N labels sharing one name re-upsert linearly from 1k to 8k drivers', () => {
+    const again = (n: number): number => {
+      const store = new GraphStore(new BunSqlite(':memory:'));
+      const q = `g.inject(${Array.from({ length: n }, (_, i) => `[(T.label):'l${i}',name:'paris']`).join(',')}).mergeV().count()`;
+      runRecorded(store, q);
+      const { rows, ms, statements } = runRecorded(store, q);
+      expect(rows.map((row) => row.v)).toEqual([n]);
+      expect(run(store, 'g.V().count()').map((row: any) => row.v)).toEqual([n]);
+      expect(run(store, "g.V().hasLabel('l42').values('name')").map((row: any) => row.v)).toEqual(['paris']);
+      expect(innerScans(store, statements)).toEqual([]);
+      return ms;
+    };
+    const k1 = again(1000);
+    const k8 = again(8000);
+    expect(k8).toBeLessThan(16 * Math.max(k1, 20));
+    expect(k8).toBeLessThan(BUDGET_MS);
+  }, 120_000);
   // The two-pool grid — N maps `[a{i%s}:1, b{i/s}:1]`, every key shared by √N maps: N distinct key sets
   // drawn from two pools of √N keys, a regression guard on the guard's key-set containment at 8k.
   test('the two-pool grid at 8k drivers', () => {
@@ -335,6 +355,31 @@ describe('a map-valued merge guard finds a later map an earlier creation contain
 // row it found (`edgeCriteria`/`pairedWith`, `src/compiler/rel/write.ts`). It once re-scanned `edges` and
 // tested `id IN (every edge of the label)`, which SQLite expanded into a `rowid=?` probe per (pair, label
 // member): 5.2 s at 8k traversers (65× the 1k time), and 18 ms for ONE `mergeE` against 100k `knows` edges.
+// WHICHEVER CRITERION A MAP DRIVER SEEKS BY, the residual checks every entry and every label member — the
+// label pick changes the access path, never the answer (modern graph: `name` is unique, `person` is four).
+describe('a map driver seeking by its label answers as by its name', () => {
+  for (const [q, ids, vertices] of [
+    // The label is less selective: the name drives, as before.
+    ["g.inject([(T.label):'person',name:'marko']).mergeV().id()", [1], 6],
+    // A label no vertex carries counts 0 and drives — it seeks nothing, so the driver creates.
+    ["g.inject([(T.label):'nolabelyet',name:'marko']).mergeV().id()", [7], 7],
+    // A collection label is AND-checked whole, whichever member the pick read.
+    ["g.inject([(T.label):['person','b'],name:'marko']).mergeV().id()", [7], 7],
+    ["g.inject([(T.label):'software',name:'lop'],[(T.label):'person',name:'lop']).mergeV().id()", [3, 7], 7],
+    // An edge map's label is not ranked: its partition is unchanged.
+    ["g.inject([(T.label):'knows',(Direction.OUT):1,(Direction.IN):2,weight:0.5]).mergeE().id()", [7], 6],
+  ] as const) test(q, () => {
+    const store = seededStore();
+    expect(run(store, q).map((row: any) => row.v).sort()).toEqual([...ids]);
+    expect(run(store, 'g.V().count()').map((row: any) => row.v)).toEqual([vertices]);
+  });
+  test('a collection label creates with every member', () => {
+    const store = seededStore();
+    expect(run(store, "g.inject([(T.label):['a','b'],name:'x']).mergeV().label()").map((row: any) => row.v)).toEqual(['a']);
+    expect(run(store, "g.V().hasLabel('b').values('name')").map((row: any) => row.v)).toEqual(['x']);
+  });
+});
+
 describe('a mergeE search seeks the endpoint pair and tests the label on the row it found', () => {
   /** `n` persons, person i knows person i%n+1, plus `extra` more `knows` edges between other vertices. */
   const knowing = (n: number, extra = 0): GraphStore => {

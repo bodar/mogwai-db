@@ -3969,17 +3969,27 @@ function propertySeeks(
 const SEEK_KEY = 'sk_key', SEEK_VTYPE = 'sk_vt', SEEK_VALUE = 'sk_x', SEEK_ORD = 'sk_o';
 
 /**
- * HOW MANY stored rows hold `key` at `valueKey` (a `typedValueKey` compare form), CAPPED — the selectivity a
- * merge search picks its driving criterion by, per driver. A `LIMIT` inside the count makes it an O(64)
- * probe of `vp_key_value`/`ep_key_value` however common the value is: it needs only to tell a selective key
- * from an unselective one (`tenant:'acme'` beside `email:x`), never to count. No answer depends on it — the
- * search's arms partition the drivers whichever criterion each takes, and the residual decides.
+ * HOW MANY rows `hits` holds, CAPPED — the selectivity a merge search picks its driving criterion by, per
+ * driver. `hits` is a filtered scan an index answers: the stored properties holding a key at a value
+ * (`propertyHits`, `vp_key_value`/`ep_key_value`) or the vertices carrying a label (`labelHits`,
+ * `vl_label`). A `LIMIT` inside the count makes it an O(64) probe however common the criterion is: it needs
+ * only to tell a selective criterion from an unselective one (`tenant:'acme'` beside `email:x`), never to
+ * count. No answer depends on it — the search's arms partition the drivers whichever criterion each takes,
+ * and the residual decides.
  */
 const SELECTIVITY_CAP = 64;
-function cappedCount(elem: Elem, key: Expr, valueKey: Expr, fresh: Minter): Expr {
+/** The stored properties of `elem` holding `key` at `valueKey` (a `typedValueKey` compare form). */
+function propertyHits(elem: Elem, key: Expr, valueKey: Expr, fresh: Minter): Rel {
   const spec = PROPERTY_TABLE[elem];
   const scan = make.scan({ id: fresh('cc'), table: spec.table, alias: fresh('rcc'), channels: [], type: typeOf(...spec.cols) });
-  const hits = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: and(eq(col(scan.id, 'key'), key), eq(col(scan.id, 'value'), valueKey)) });
+  return make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: and(eq(col(scan.id, 'key'), key), eq(col(scan.id, 'value'), valueKey)) });
+}
+/** The vertices carrying the label NAMED `name` — none for a name never interned (`nameId` reads NULL). */
+function labelHits(name: Expr, fresh: Minter): Rel {
+  const owners = labelOwners('vertex', fresh);
+  return make.filter({ id: fresh('f'), input: owners, channels: [], type: owners.type, pred: eq(col(owners.id, 'label'), nameId('labels', name, fresh)) });
+}
+function cappedCount(hits: Rel, fresh: Minter): Expr {
   const one = make.project({ id: fresh('p'), input: hits, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
   const capped = make.limit({ id: fresh('li'), input: one, channels: [], type: one.type, count: compilerInt(SELECTIVITY_CAP) });
   return { kind: 'scalar', plan: make.aggregate({
@@ -4010,7 +4020,7 @@ function computedMatch(
       type: typeOf(...carrier.type.cols, ...(cKeys.length < 2 ? [] : cKeys.map((_, i) => meta(countCol(i), 'int', true)))),
       exprs: [...carrier.type.cols.map((column) => [column.name, col(ref.id, column.name)] as const),
         ...(cKeys.length < 2 ? [] : cKeys.map((key, i) => [countCol(i), { kind: 'case', whens: [[productive(ref.id, i, true),
-          cappedCount(elem, compilerText(key), valueKey(i), fresh)]], else: compilerNull('int') } as Expr] as const))],
+          cappedCount(propertyHits(elem, compilerText(key), valueKey(i), fresh), fresh)]], else: compilerNull('int') } as Expr] as const))],
     }), true);
   })();
   const name = (counted as Extract<Rel, { kind: 'ref' }>).name;
@@ -4041,11 +4051,15 @@ function computedMatch(
   return seekedSearch(carrier.type.cols, arms, unnarrowed, candidates, 'id', residual, hasOrd, bind, fresh);
 }
 
+/** The `SEEK_ORD` of a driver whose pick is its map's `T.label` — below every pair ord (`json_each` keys
+ *  from 0), so no exploded entry ever meets it. */
+const LABEL_PICK = -1;
 /**
  * A MAP-VALUED merge's drivers (`inject(map).mergeV()`/`.mergeE()`), read off its spooled carrier and split
- * by what they can seek: `with` the drivers whose map holds a STRING key (a property criterion) — exploded
- * to their FIRST such entry in the map's own order, the one the seek reads — and `without` the rest (a
- * `T.label`-only or empty map). `narrow` partitions them further (a host's own seek arms).
+ * by the ONE criterion each picks (`SEEK_ORD`): `with` the drivers whose pick is a STRING entry (a property
+ * criterion) — exploded to that entry, the one the seek reads — and `without` the rest (a vertex map whose
+ * `T.label` is strictly more selective, a `T.label`-only or empty map). `narrow` partitions them further (a
+ * host's own seek arms).
  */
 interface MapDrivers {
   readonly with: (narrow: (driver: RelId) => Expr | undefined) => Rel;
@@ -4056,35 +4070,67 @@ function mapDrivers(carrier: Rel, elem: Elem, bind: Binder, fresh: Minter): MapD
   const name = (carrier as Extract<Rel, { kind: 'ref' }>).name;
   const ref = (): Rel => make.ref({ id: fresh('r'), name, channels: [], type: carrier.type });
   const stringKey = (pair: Expr): Expr => eq({ kind: 'call', fn: 'json_extract', args: [pairSide(pair, 'keys'), compilerText('$.t')] }, compilerText('string'));
-  const stringPairs = (driver: RelId): Rel => {
-    const pairs = pairsOf(col(driver, MAP_COL), fresh);
-    return make.filter({ id: fresh('f'), input: pairs, channels: [], type: pairs.type, pred: stringKey(col(pairs.id, PAIR.value)) });
-  };
-  // The driving entry per driver, chosen ONCE and retained: its most selective STRING entry
-  // (`cappedCount`), ties to the map's own order — `[tenant:'acme', email:x]` seeks by `email`. The pick
-  // correlates to the DRIVER — projected beside it and MATERIALIZED before the map is exploded. Picked
-  // inside the explode it correlated to each exploded ROW, so a K-entry map probed its entries K times
-  // over for its one choice (K², measured 1.9 s for a single 1000-entry map).
-  let chosen: Rel | null = null;
-  const driving = (): Rel => {
-    if (chosen) return make.ref({ id: fresh('r'), name: (chosen as Extract<Rel, { kind: 'ref' }>).name, channels: [], type: chosen.type });
+  // THE ONE PICK per driver, chosen ONCE and retained as `SEEK_ORD`: the criterion the fewest stored rows
+  // satisfy (`cappedCount`) among the map's STRING entries and — for a vertex — its `T.label`'s first name,
+  // the label entering as one more ranked row under the sentinel ord `LABEL_PICK`. Ties go to a string entry
+  // (so the label drives only where it is STRICTLY more selective), then to the map's own order —
+  // `[tenant:'acme', email:x]` seeks by `email`, and `[(T.label):'l42', name:'paris']` among a batch sharing
+  // `paris` seeks `vl_label` (by `name` it read every `paris` per driver: quadratic re-upsert). A NULL pick
+  // means the map names no string entry and no label. The pick correlates to the DRIVER — projected beside
+  // it and MATERIALIZED before the map is exploded. Picked inside the explode it correlated to each exploded
+  // ROW, so a K-entry map probed its entries K times over for its one choice (K², measured 1.9 s for a
+  // single 1000-entry map). An edge's label stays out of the ranking: its search seeks endpoints first
+  // (`endpointSeek`) and its label is never a seek of its own.
+  let ordered: Rel | null = null;
+  const picks = (): Rel => {
+    if (ordered) return make.ref({ id: fresh('r'), name: (ordered as Extract<Rel, { kind: 'ref' }>).name, channels: [], type: ordered.type });
     const drivers = ref();
-    const others = stringPairs(drivers.id);
-    const side = (which: 'keys' | 'values', path: string): Expr =>
-      ({ kind: 'call', fn: 'json_extract', args: [pairSide(col(others.id, PAIR.value), which), compilerText(path)] });
-    const ranked = make.sort({
-      id: fresh('so'), input: others, channels: [], type: others.type,
-      terms: [{ expr: cappedCount(elem, side('keys', '$.v'), typedValueKey(side('values', '$.v'), side('values', '$.t'))[1], fresh), dir: 'asc' },
-        { expr: col(others.id, PAIR.ord), dir: 'asc' }],
+    const pairs = pairsOf(col(drivers.id, MAP_COL), fresh);
+    const pair = col(pairs.id, PAIR.value);
+    const firstName = labelFirst(pairSide(pair, 'values'));
+    const isString = stringKey(pair);
+    // The candidates: every string entry, and (a vertex) the label entry when it names a first name.
+    const criteria = make.filter({
+      id: fresh('f'), input: pairs, channels: [], type: pairs.type,
+      pred: elem === 'vertex' ? or(isString, and(isLabelKey(pair), isNot(firstName, compilerNull('text')))) : isString,
+    });
+    const at = (which: 'keys' | 'values', path: string): Expr =>
+      ({ kind: 'call', fn: 'json_extract', args: [pairSide(col(criteria.id, PAIR.value), which), compilerText(path)] });
+    const propertyCount = cappedCount(propertyHits(elem, at('keys', '$.v'), typedValueKey(at('values', '$.v'), at('values', '$.t'))[1], fresh), fresh);
+    const stringRow = stringKey(col(criteria.id, PAIR.value));
+    const ranked = elem === 'vertex'
+      ? make.project({
+        id: fresh('p'), input: criteria, channels: [], type: typeOf(meta('n', 'int'), meta('il', 'int'), meta('o', 'int')),
+        exprs: [
+          ['n', { kind: 'case', whens: [[stringRow, propertyCount]],
+            else: cappedCount(labelHits(labelFirst(pairSide(col(criteria.id, PAIR.value), 'values')), fresh), fresh) }],
+          ['il', { kind: 'case', whens: [[stringRow, compilerInt(0)]], else: compilerInt(1) }],
+          ['o', { kind: 'case', whens: [[stringRow, col(criteria.id, PAIR.ord)]], else: compilerInt(LABEL_PICK) }],
+        ],
+      })
+      : make.project({
+        id: fresh('p'), input: criteria, channels: [], type: typeOf(meta('n', 'int'), meta('il', 'int'), meta('o', 'int')),
+        exprs: [['n', propertyCount], ['il', compilerInt(0)], ['o', col(criteria.id, PAIR.ord)]],
+      });
+    const sorted = make.sort({
+      id: fresh('so'), input: ranked, channels: [], type: ranked.type,
+      terms: [{ expr: col(ranked.id, 'n'), dir: 'asc' }, { expr: col(ranked.id, 'il'), dir: 'asc' }, { expr: col(ranked.id, 'o'), dir: 'asc' }],
     });
     const pick = make.limit({
       id: fresh('li'), channels: [], type: typeOf(meta('o', 'int')), count: compilerInt(1),
-      input: make.project({ id: fresh('p'), input: ranked, channels: [], type: typeOf(meta('o', 'int')), exprs: [['o', col(ranked.id, PAIR.ord)]] }),
+      input: make.project({ id: fresh('p'), input: sorted, channels: [], type: typeOf(meta('o', 'int')), exprs: [['o', col(sorted.id, 'o')]] }),
     });
-    const ordered = bind(make.project({
+    ordered = bind(make.project({
       id: fresh('p'), input: drivers, channels: [], type: typeOf(...drivers.type.cols, meta(SEEK_ORD, 'int', true)),
       exprs: [...drivers.type.cols.map((column) => [column.name, col(drivers.id, column.name)] as const), [SEEK_ORD, { kind: 'scalar', plan: pick }]],
     }), true);
+    return picks();
+  };
+  // The drivers whose pick is a string entry, exploded to that entry — the property seek's columns.
+  let chosen: Rel | null = null;
+  const driving = (): Rel => {
+    if (chosen) return make.ref({ id: fresh('r'), name: (chosen as Extract<Rel, { kind: 'ref' }>).name, channels: [], type: chosen.type });
+    const ordered = picks();
     const exploded = make.explode({
       id: fresh('ex'), input: ordered, expr: col(ordered.id, MAP_COL), channels: [], as: PAIR,
       type: typeOf(...ordered.type.cols, meta(PAIR.value, 'any', true), meta(PAIR.ord, 'int')),
@@ -4109,11 +4155,13 @@ function mapDrivers(carrier: Rel, elem: Elem, bind: Binder, fresh: Minter): MapD
       const pred = narrow(drivers.id);
       return pred ? make.filter({ id: fresh('f'), input: drivers, channels: [], type: drivers.type, pred }) : drivers;
     },
+    // Off the retained pick: no string entry was picked (none exists, or the label won).
     without: (narrow) => {
-      const drivers = ref();
+      const drivers = picks();
+      const seek = col(drivers.id, SEEK_ORD);
       return make.filter({
         id: fresh('f'), input: drivers, channels: [], type: drivers.type,
-        pred: and({ kind: 'exists', plan: stringPairs(drivers.id), negated: true }, narrow?.(drivers.id)),
+        pred: and(or({ kind: 'binary', op: 'is', left: seek, right: compilerNull('int') }, eq(seek, compilerInt(LABEL_PICK))), narrow?.(drivers.id)),
       });
     },
     all: (narrow) => {
@@ -5312,7 +5360,8 @@ export function mergeVFromMap(
     const candScan = make.scan({ id: fresh('t'), table: 'nodes', alias: fresh('nc'), channels: [], type: typeOf(...NODES_COLS) });
     return make.project({ id: fresh('p'), input: candScan, channels: [], type: ID_TYPE, exprs: [['id', col(candScan.id, 'id')]] });
   };
-  // SEEKED by the map's first property entry, else by its `T.label`; an empty map meets every vertex.
+  // SEEKED by the map's most selective criterion — a property entry, or its `T.label` where that is strictly
+  // more selective or the map names no property (`mapDrivers`); an empty map meets every vertex.
   const drivers = mapDrivers(carrier, 'vertex', bind, fresh);
   const named = (driver: RelId): Expr => ({ kind: 'binary', op: 'is not', left: mapLabelScalar(col(driver, MAP_COL)), right: compilerNull('text') });
   const matched = bind(seekedSearch(carrier.type.cols, [
