@@ -82,6 +82,14 @@ rows (2.5 MB). The key is stored three times per row (table and two indexes): ab
    (replaces `LABELS_COLS` and the eight hand-built `labels` scans in `write.ts`). SQL is byte-identical;
    no baseline moved. `test/compiler/name-dict.exec.test.ts` tests the dictionary. **Remains:** nothing.
    `nameId`, `nameOf`, `withNames` and `isNameLookup` land with their first consumers (A2, A4).
+   **Pre-A2 fix landed (7b71ba45), answer-changing, its own commit.** A Map-valued `mergeV`/`mergeE`
+   reads a list `T.label` as several labels. It no longer refuses a batch whose drivers differ by
+   `T.label`. Mechanism: `mapLabelNames` in `src/compiler/rel/write.ts` explodes the label; the creation
+   path writes through `bindLabels`. **Remains:** one open item, `merge-map-label-seek`. A re-upsert of a
+   batch whose maps share a property value but differ by label is quadratic in the search (321 s at
+   8k). The cost was there before this commit; `docs/outstanding-work.md` logs it. Fix: rank the label
+   beside the string entries in `mapDrivers`, and seek through `labelSeek` when the label is more
+   selective.
 2. **A2. Route the five `write.ts` resolve copies through `nameIds`/`nameId`.** Delete `namedLabelIds`.
    Acceptance: bytes the same or smaller; no `sql-plan` regression; merge, `dropLabel` and scale tests
    green. After A1.
