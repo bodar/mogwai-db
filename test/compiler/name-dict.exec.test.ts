@@ -3,7 +3,7 @@
 // relies on: an unknown name is an empty set, an interned name is reused, and a name resolves inside
 // the statement — an inline label spends no bind, a parameter spends exactly one.
 import { test, expect, describe } from 'bun:test';
-import { bare, read, run, seededStore } from '../support/harness.ts';
+import { bagOf, bare, read, run, seededStore } from '../support/harness.ts';
 
 const values = (rows: readonly unknown[]): unknown[] => bare(rows).map((row: { v: unknown }) => row.v);
 
@@ -65,6 +65,19 @@ describe('nameOf / withNames — an id decodes to its name', () => {
     expect(values(run(store, "g.V().has(T.label, TextP.startingWith('p')).count()"))).toEqual([4]);
     expect(values(run(store, "g.E().has(T.label, TextP.endingWith('ows')).label()"))).toEqual(['knows', 'knows']);
     expect(values(run(store, "g.V().out().has(T.label, TextP.containing('oft')).count()"))).toEqual([4]);
+  });
+
+  // `labelOwners` is ONE (owner, label) relation for both kinds, so every label read composes the same
+  // way under a connector host as at the root, for a vertex and for an edge.
+  test('label reads compose at depth for both element kinds', () => {
+    const store = seededStore();
+    expect(values(run(store, "g.V().where(label().is('person')).count()"))).toEqual([4]);
+    expect(values(run(store, "g.V().local(outE().has(T.label, TextP.startingWith('k')).count()).sum()"))).toEqual([2]);
+    expect(values(run(store, "g.V().where(outE().has(T.label, eq('created'))).count()"))).toEqual([3]);
+    expect(values(run(store, "g.V().not(has(T.label, TextP.containing('f'))).count()"))).toEqual([4]);
+    expect(bagOf(values(run(store, "g.V().hasLabel('person').local(outE().label().fold()).unfold()")))).toEqual(bagOf(['knows', 'knows', 'created', 'created', 'created', 'created']));
+    expect(values(run(store, "g.E().order().by(T.label).label().dedup()"))).toEqual(['created', 'knows']);
+    expect(values(run(store, "g.V().order().by(T.label).values('name')")).slice(4).sort()).toEqual(['lop', 'ripple']);
   });
 
   test('an edge label decodes to its name', () => {

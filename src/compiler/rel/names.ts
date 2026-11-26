@@ -7,6 +7,7 @@
  * decodes an id back to its name (`nameOf` for one id, `withNames` for a relation of ids). Each name
  * resolves INSIDE the statement, through the index — the compile never reads the store, so a plan is a
  * function of the query text alone, and a name that was never interned is an empty set, not an error.
+ * The ids an ELEMENT carries are one `(owner, label)` relation for both kinds (`labelOwners`).
  *
  * This is a `BaseGraph` storage detail. It stays out of the `Source` interface (`source.ts`): a bound
  * or landed graph carries its labels as JSON name arrays, not as ids.
@@ -18,7 +19,8 @@ import { insert } from '../../rel/stmt-factory.ts';
 import type { Stmt } from '../../rel/stmt.ts';
 import { EXCLUDED } from '../../rel/types.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
-import { and, eq, jsonEachSet, meta, typeOf, type Minter } from './build.ts';
+import { eq, jsonEachSet, LABEL_OWNERS, meta, typeOf, type Minter } from './build.ts';
+import type { Elem } from '../elem.ts';
 
 /** A name dictionary: a table of `(id, name)` rows under a unique name. Labels are the only one today. */
 export type NameDict = 'labels';
@@ -82,22 +84,34 @@ export function nameOf(dict: NameDict, id: Expr, fresh: Minter): Expr {
  * `lid` (the dictionary id; a Join's declared names are positional and must be unique, so never a second
  * `id`) and `name`. Each row is one INTEGER PRIMARY KEY seek.
  *
- * `on` adds conjuncts to the join condition, built from the decoded `name`: a correlation on the owner
- * row (`vertex_labels.node = <id>`), or a test on the name itself (`has(T.label, P)`, where `P` is an
- * arbitrary predicate over the name, so it stays a join). A row order on the result is the caller's: the
- * interning order is `lid` (equal to `idCol`), and that is what makes `labels[0]` the first-interned label.
+ * The join condition is the decode and nothing else: a correlation on an owner goes BELOW it
+ * (`labelOwners(kind, fresh, of)`), a test on the name ABOVE it (a Filter over the result). A row order
+ * on the result is the caller's: the interning order is `lid` (equal to `idCol`), and that is what makes
+ * `labels[0]` the first-interned label.
  */
-export function withNames(
-  dict: NameDict, input: Rel, idCol: string, fresh: Minter,
-  { on, ordered }: { readonly on?: (name: Expr) => Expr; readonly ordered?: boolean } = {},
-): Rel {
+export function withNames(dict: NameDict, input: Rel, idCol: string, fresh: Minter, { ordered }: { readonly ordered?: boolean } = {}): Rel {
   const names = dictScan(dict, fresh);
-  const decoded = eq(col(input.id, idCol), col(names.id, 'id'));
   return make.join({
     id: fresh('j'), left: input, right: names, join: 'inner', ...(ordered ? { ordered } : {}), channels: input.channels,
     type: typeOf(...input.type.cols, meta('lid', 'int'), meta('name', 'text')),
-    on: on ? and(decoded, on(col(names.id, 'name'))) : decoded,
+    on: eq(col(input.id, idCol), col(names.id, 'id')),
   });
+}
+
+/**
+ * THE (owner, label) RELATION of an element kind — the one authority for where its label ids live
+ * (`LABEL_OWNERS`): a vertex's `vertex_labels(node, label)` rows, an edge's own `(id, label)`. A Scan
+ * names physical columns, so the owner column keeps its physical name, `LABEL_OWNERS[kind].owner`.
+ * With `of`, only that owner's own rows — a seek on `vertex_labels`' PRIMARY KEY (node, label) or the
+ * edge rowid.
+ */
+export function labelOwners(kind: Elem, fresh: Minter, of?: Expr): Rel {
+  const { table, owner } = LABEL_OWNERS[kind];
+  const scan = make.scan({
+    id: fresh(kind === 'edge' ? 'el' : 'vl'), table, alias: fresh(kind === 'edge' ? 're' : 'rvl'), channels: [],
+    type: typeOf(meta(owner, 'int'), meta('label', 'int')),
+  });
+  return of === undefined ? scan : make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: eq(col(scan.id, owner), of) });
 }
 
 /**

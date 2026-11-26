@@ -277,6 +277,13 @@ export const PROPERTIES = {
   edge: { table: 'edge_properties', owner: 'edge' },
 } as const;
 
+/** The two element kinds' `(owner, label)` rows, and the column each keys its owner by. A vertex holds
+ *  its labels in a side table; an edge's one label is a column on its own row, so its rowid is the owner. */
+export const LABEL_OWNERS = {
+  vertex: { table: 'vertex_labels', owner: 'node' },
+  edge: { table: 'edges', owner: 'id' },
+} as const;
+
 /** The number tags whose value may arrive as decimal TEXT (`storedScalar`'s exact tail). */
 const EXACT_TAIL_VTYPES: readonly string[] = ['bigdecimal', 'long', 'bigint'];
 

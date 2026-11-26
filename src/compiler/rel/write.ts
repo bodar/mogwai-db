@@ -40,7 +40,7 @@ import { BRANCH_KINDS, FILTER_HOSTS, nondeterministic } from '../ir/step.ts';
 import type { ChildWrite } from '../unsupported.ts';
 import { eachChildChain, valueNodes, type BodyReader } from '../ir/walk.ts';
 import { pastBudget } from '../../sql/kernel/budget.ts';
-import { internNames, isConstantNames, nameId, nameIds, type CreationNames } from './names.ts';
+import { internNames, isConstantNames, labelOwners, nameId, nameIds, type CreationNames } from './names.ts';
 
 /** The presence of a computed match value ADMITTED by its `'unknown'` check — the two merge carriers
  *  below refuse an unknown presence before they reach here, so this is that admission read back. */
@@ -121,12 +121,18 @@ const NO_ALIASES: AliasMap = new Map();
 const idsOf = (rel: Rel, fresh: Minter): Rel =>
   make.project({ id: fresh('w'), input: rel, channels: [], type: ID_TYPE, exprs: [['id', col(rel.id, 'id')]] });
 
+/** An `OWNED_BY` table as a write TARGET — a delete's, or the `vertex_labels` rows a label write inserts. */
+const ownedTarget = (spec: keyof typeof OWNED_BY, fresh: Minter): Extract<Rel, { readonly kind: 'scan' }> => {
+  const { table, cols } = OWNED_BY[spec];
+  return make.scan({ id: fresh('t'), table, alias: fresh('wt'), channels: [], type: typeOf(...cols) });
+};
+
 /** `DELETE FROM <table> WHERE <owner> IN <retained ids>` — the cascade's only statement shape, and
  *  `InQuery` over a `Ref` is what makes the retained rows a RELATION the predicate joins against
  *  rather than a placeholder list sized by the data (§6·2). */
 function deleteOwnedBy(spec: keyof typeof OWNED_BY, owners: Rel, fresh: Minter): Stmt {
-  const { table, owner, cols } = OWNED_BY[spec];
-  const target = make.scan({ id: fresh('t'), table, alias: fresh('wt'), channels: [], type: typeOf(...cols) });
+  const target = ownedTarget(spec, fresh);
+  const { owner } = OWNED_BY[spec];
   return remove({
     target, channels: [], type: typeOf(),
     where: { kind: 'in-query', expr: col(target.id, owner), plan: owners, negated: false },
@@ -2497,7 +2503,7 @@ function bindLabels(
   const assigned = constant ? null : labels as { readonly targets: Rel; readonly names: Rel };
   // A constant `names` is non-empty, so never the null arm.
   const labelRow = internNames('labels', constant ? constant.names.map(text) : assigned!.names, bind, fresh)!;
-  const target = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
+  const target = ownedTarget('vertexLabels', fresh);
   let pairs: Rel;
   if (constant) {
     pairs = make.join({
@@ -2615,8 +2621,8 @@ export function elementDropLabel(input: Rel, elem: Elem, step: IRStep, child: Ch
  *  count, so an `InList` inside the `labels` lookup is right here and a JSON bind is not. */
 function deleteVertexLabels(owners: Rel, names: readonly string[] | null, fresh: Minter): Stmt {
   if (!names) return deleteOwnedBy('vertexLabels', owners, fresh);
-  const { table, owner, cols } = OWNED_BY.vertexLabels;
-  const target = make.scan({ id: fresh('t'), table, alias: fresh('wt'), channels: [], type: typeOf(...cols) });
+  const target = ownedTarget('vertexLabels', fresh);
+  const { owner } = OWNED_BY.vertexLabels;
   return remove({
     target, channels: [], type: typeOf(),
     where: and(
@@ -2792,7 +2798,6 @@ function runtimeKeyedWrite(spec: PropSpec, keyBody: readonly IRStep[], elem: Ele
 // ---------- addV() ----------
 
 const NODES_COLS: readonly ColMeta[] = [meta('id', 'int'), meta('uid', 'text', true)];
-const VERTEX_LABEL_COLS: readonly ColMeta[] = [meta('node', 'int'), meta('label', 'int')];
 
 /**
  * `addV(label)` — ONE new vertex per incoming traverser, as statements.
@@ -2854,7 +2859,7 @@ export function addVertex(
   }));
 
   if (labelRow) {
-    const labelTargetRows = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
+    const labelTargetRows = ownedTarget('vertexLabels', fresh);
     // A CROSS JOIN, so N labels are N pairs per created node — the same statement whether the list
     // holds one name or four, which is what makes a multi-label creation no new shape. A per-traverser
     // assignment pairs each new row with ITS traverser's names, by the position `positioned` recovers.
@@ -4144,7 +4149,7 @@ function endpointSeek(driving: Rel, sides: readonly ('src' | 'tgt')[], label: bo
 /** The LABEL seek of a vertex search that names a label (`label`, a name per driver): the vertices
  *  carrying it — the name's id read once per driver (`nameId`), then `vl_label`. */
 function labelSeek(driving: Rel, label: (driver: RelId) => Expr, fresh: Minter): Rel {
-  const owners = make.scan({ id: fresh('sv'), table: 'vertex_labels', alias: fresh('rsv'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
+  const owners = labelOwners('vertex', fresh);
   const index = make.project({
     id: fresh('p'), input: owners, channels: [], type: typeOf(meta('sl_label', 'int'), meta('sl_node', 'int')),
     exprs: [['sl_label', col(owners.id, 'label')], ['sl_node', col(owners.id, 'node')]],
@@ -5121,7 +5126,7 @@ function mergeVComputed(
   if (!createLabels || createLabels.kind !== 'const') return null;
   const labelRow = internNames('labels', createLabels.names, bind, fresh);
   if (labelRow) {
-    const labelTargetRows = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
+    const labelTargetRows = ownedTarget('vertexLabels', fresh);
     const pairs = make.join({ id: fresh('j'), left: created, right: labelRow, join: 'cross', channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
     bind(insert({ target: labelTargetRows, cols: ['node', 'label'], source: pairs, channels: [], type: typeOf(), returning: [] }));
   }
@@ -5257,9 +5262,9 @@ export function mergeVFromMap(
     // A `T.label` NAME satisfied by the candidate carrying it (hasLabel over vertex_labels) — every name
     // of a collection label, `searchVerticesLabelConstraint`'s AND (`mapLabelNames`).
     const names = mapLabelNames(col(driver, MAP_COL), fresh);
-    const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rl'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
+    const vl = labelOwners('vertex', fresh, candId);
     const vlMatch = make.filter({ id: fresh('f'), input: vl, channels: [], type: vl.type,
-      pred: and(eq(col(vl.id, 'node'), candId), eq(col(vl.id, 'label'), nameId('labels', col(names.id, 'name'), fresh))) });
+      pred: eq(col(vl.id, 'label'), nameId('labels', col(names.id, 'name'), fresh)) });
     const labelProbe = make.project({ id: fresh('p'), input: vlMatch, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
     // A pair the candidate FAILS: a string property it lacks; a label name it does not carry. (A T.id
     // pair cannot reach here — the guard above refused any map holding one.) `allMatch` = neither.
@@ -5334,7 +5339,7 @@ export function mergeVFromMap(
   // one, the guard above proved it is onCreate's, and the map's own label write below lands it once.
   const labelRow = internNames('labels', createLabels.names, bind, fresh);
   if (labelRow) {
-    const labelTargetRows = make.scan({ id: fresh('t'), table: 'vertex_labels', alias: fresh('wt'), channels: [], type: typeOf(...VERTEX_LABEL_COLS) });
+    const labelTargetRows = ownedTarget('vertexLabels', fresh);
     const ownNames = make.filter({ id: fresh('f'), input: createdNames, channels: [], type: createdNames.type, pred: eq(col(createdNames.id, 'o'), col(createdMaps.id, 'id')) });
     const unnamed = make.filter({ id: fresh('f'), input: createdMaps, channels: [], type: createdMaps.type, pred: { kind: 'exists', negated: true, plan: ownNames } });
     const labelPairs = make.join({ id: fresh('j'), left: idsOf(unnamed, fresh), right: labelRow, join: 'cross', channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });

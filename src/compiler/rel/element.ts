@@ -7,7 +7,7 @@ import {
     byEncounter, coalesce, EDGE_COLS, EMPTY_ARRAY, EMPTY_OBJECT, eq, jsonOf, meta, NODE_COLS, typeOf, typedNode, typedNodeDetached,
     type Minter,
 } from './build.ts';
-import { nameOf, withNames } from './names.ts';
+import { labelOwners, nameOf, withNames } from './names.ts';
 
 /**
  * THE ELEMENT PAYLOAD — an id-relation projected to the tuple a vertex or an edge is ON THE WIRE.
@@ -81,8 +81,7 @@ function correlatedColumn(
  * a vertex may carry zero labels under `ZERO_OR_MORE` — so the `COALESCE` is the totality, not a defence.
  */
 export function vertexLabels(node: Expr, fresh: Minter): Expr {
-  const vl = make.scan({ id: fresh('wvl'), table: 'vertex_labels', alias: fresh('rwv'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
-  const joined = withNames('labels', vl, 'label', fresh, { on: () => eq(col(vl.id, 'node'), node) });
+  const joined = withNames('labels', labelOwners('vertex', fresh, node), 'label', fresh);
   const collected = make.aggregate({
     id: fresh('wlc'), input: joined, channels: [], type: typeOf(meta('labels', 'json', true)),
     groupBy: [],

@@ -11,8 +11,8 @@ import { CONSTANT } from './predicate.ts';
 import { valueIsKind } from './receiver.ts';
 import type { ValueEvidence } from './tag.ts';
 import { propertyRelation } from './property.ts';
-import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, meta, NODE_COLS, PROPERTIES, renumber, storedOrderKey, storedPayload, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
-import { nameIds, nameOf, withNames } from './names.ts';
+import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, LABEL_OWNERS, meta, NODE_COLS, PROPERTIES, renumber, storedOrderKey, storedPayload, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
+import { labelOwners, nameIds, nameOf, withNames } from './names.ts';
 
 // ---------- GraphSource: one traversal vocabulary over two physical graph shapes ----------
 //
@@ -564,17 +564,14 @@ export const BaseGraph: GraphSource = {
     // The edge's own label column, where the physical row is in scope (the source scan): a direct read
     // the covering index serves.
     if (kind === 'edge' && labelCol) return { kind: 'in-query', expr: labelCol, plan: ids, negated: false };
-    const owner = kind === 'edge' ? 'id' : 'node';
-    const side = make.scan({
-      id: fresh(kind === 'edge' ? 'el' : 'vl'), table: kind === 'edge' ? 'edges' : 'vertex_labels', alias: fresh(kind === 'edge' ? 'rel' : 'rvl'),
-      channels: [], type: typeOf(meta(owner, 'int'), meta('label', 'int')),
-    });
-    const labelled: Expr = { kind: 'in-query', expr: col(side.id, 'label'), plan: ids, negated: false };
+    const { owner } = LABEL_OWNERS[kind];
+    const labelled = (side: Rel): Rel =>
+      make.filter({ id: fresh('f'), input: side, channels: [], type: side.type, pred: { kind: 'in-query', expr: col(side.id, 'label'), plan: ids, negated: false } });
     // A VERTEX read off its own `nodes` scan (`V()`, a mid-traversal re-source): `id IN (SELECT node
     // FROM vertex_labels WHERE label IN …)`, evaluated once — the planner may drive the scan from
     // `vl_label(label, node)`, so a selective label reads only its own vertices.
     if (kind === 'vertex' && ownScan(row, id, 'nodes')) {
-      const matching = make.filter({ id: fresh('f'), input: side, channels: [], type: side.type, pred: labelled });
+      const matching = labelled(labelOwners(kind, fresh));
       const owners = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta(owner, 'int')), exprs: [[owner, col(matching.id, owner)]] });
       return { kind: 'in-query', expr: id, plan: owners, negated: false };
     }
@@ -584,7 +581,7 @@ export const BaseGraph: GraphSource = {
     // there the id is the trailing column of an adjacency index (`e_in(tgt, label, src)`, rowid after
     // `e_out`), and SQLite expands the whole label POPULATION into index probes PER OUTER ROW — measured
     // 66× for 8× the rows on `out('created').in('created').hasLabel('person')`. A probe costs one seek.
-    const mine = make.filter({ id: fresh('f'), input: side, channels: [], type: side.type, pred: and(eq(col(side.id, owner), id), labelled) });
+    const mine = labelled(labelOwners(kind, fresh, id));
     const probe = make.project({ id: fresh('p'), input: mine, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
     return { kind: 'exists', plan: probe, negated: false };
   },
@@ -653,19 +650,13 @@ export const BaseGraph: GraphSource = {
       const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
       return { kind: 'exists', plan: probe, negated: false };
     }
-    // `has(T.label, P)`: `P` is an arbitrary predicate over the decoded NAME, so it is a join condition on
-    // the owner's decoded label rows rather than a name → id lookup. `withNames` calls `on` once, before it
-    // returns, so `matches` says whether `P` lowered at all.
-    let matches: Expr | null = null;
-    const owner = kind === 'edge'
-      // An edge's label is a COLUMN, so the join is against the correlated edge row.
-      ? make.scan({ id: fresh('eg'), table: 'edges', alias: fresh('re'), channels: [], type: typeOf(meta('id', 'int'), meta('label', 'int')) })
-      : make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
-    const joined = withNames('labels', owner, 'label', fresh, {
-      on: (name) => and(eq(col(owner.id, kind === 'edge' ? 'id' : 'node'), id), (matches = valuePred(name)) ?? undefined),
-    });
+    // `has(T.label, P)`: `P` is an arbitrary predicate over the decoded NAME, so it tests the owner's
+    // decoded label rows rather than looking a name up.
+    const joined = withNames('labels', labelOwners(kind, fresh, id), 'label', fresh);
+    const matches = valuePred(col(joined.id, 'name'));
     if (!matches) return null;
-    const probe = make.project({ id: fresh('p'), input: joined, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+    const matching = make.filter({ id: fresh('f'), input: joined, channels: [], type: joined.type, pred: matches });
+    const probe = make.project({ id: fresh('p'), input: matching, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
     return { kind: 'exists', plan: probe, negated: false };
   },
 
@@ -674,36 +665,20 @@ export const BaseGraph: GraphSource = {
   externalId: (kind, id, fresh) => elementExternalId(id, kind, fresh),
 
   labelScalar: (kind, id, fresh) => {
-    // The first label in INTERNING order — the dictionary id, which is what makes it the payload's `labels[0]`.
-    if (kind === 'edge') {
-      const edges = make.scan({ id: fresh('eg'), table: 'edges', alias: fresh('re'), channels: [], type: typeOf(...EDGE_COLS) });
-      const joined = withNames('labels', edges, 'label', fresh, { on: () => eq(col(edges.id, 'id'), id) });
-      return firstOf(joined, col(joined.id, 'name'), col(joined.id, 'lid'), fresh);
-    }
-    const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
-    const joined = withNames('labels', vl, 'label', fresh, { on: () => eq(col(vl.id, 'node'), id) });
+    // The first label in INTERNING order — the owner's label id, which is what makes it the payload's `labels[0]`.
+    const joined = withNames('labels', labelOwners(kind, fresh, id), 'label', fresh);
     return firstOf(joined, col(joined.id, 'name'), col(joined.id, 'label'), fresh);
   },
 
   labelNames: (input, kind, fresh) => {
-    // A vertex holds its labels in the `vertex_labels` side table; an edge inlines the FK on the row.
-    const owned = kind === 'edge'
-      ? (() => {
-        const e = make.scan({ id: fresh('el'), table: 'edges', alias: fresh('re'), channels: [], type: typeOf(meta('id', 'int'), meta('label', 'int')) });
-        return make.join({
-          id: fresh('j'), left: input, right: e, join: 'inner', ordered: true, channels: input.channels,
-          type: typeOf(...elementCols(input.channels), meta('eid', 'int'), meta('label', 'int')),
-          on: eq(col(e.id, 'id'), col(input.id, 'id')),
-        });
-      })()
-      : (() => {
-        const vl = make.scan({ id: fresh('vl'), table: 'vertex_labels', alias: fresh('rvl'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
-        return make.join({
-          id: fresh('j'), left: input, right: vl, join: 'inner', ordered: true, channels: input.channels,
-          type: typeOf(...elementCols(input.channels), meta('node', 'int'), meta('label', 'int')),
-          on: eq(col(vl.id, 'node'), col(input.id, 'id')),
-        });
-      })();
+    // The owner column is declared under ONE name (`lowner`) whatever its physical name: a Join's
+    // declared names are positional, and the input's own `id` is already taken.
+    const labels = labelOwners(kind, fresh);
+    const owned = make.join({
+      id: fresh('j'), left: input, right: labels, join: 'inner', ordered: true, channels: input.channels,
+      type: typeOf(...elementCols(input.channels), meta('lowner', 'int'), meta('label', 'int')),
+      on: eq(col(labels.id, LABEL_OWNERS[kind].owner), col(input.id, 'id')),
+    });
     const named = withNames('labels', owned, 'label', fresh, { ordered: true });
     // `lord` is the label-dictionary id (`vertex_labels.label` / `edges.label`), the interning order the
     // element payload's `json_group_array(name ORDER BY lid)` and `by(T.label)`'s first-label pick use —
@@ -756,10 +731,9 @@ export const BaseGraph: GraphSource = {
     return make.filter({ id: fresh('ef'), input: scan, channels: [], type: scan.type, pred: eq(col(scan.id, 'id'), id) });
   },
 
-  hasAnyLabel: (_kind, id, fresh) => {
-    // vertex only in practice; mirror the old `labelled` EXISTS probe exactly so the gate stays cheap.
-    const vl = make.scan({ id: fresh('lx'), table: 'vertex_labels', alias: fresh('rlx'), channels: [], type: typeOf(meta('node', 'int'), meta('label', 'int')) });
-    const mine = make.filter({ id: fresh('lf'), input: vl, channels: [], type: vl.type, pred: eq(col(vl.id, 'node'), id) });
+  hasAnyLabel: (kind, id, fresh) => {
+    // A vertex in practice (an edge always carries one): one seek on the owner's own label rows.
+    const mine = labelOwners(kind, fresh, id);
     const probe = make.project({ id: fresh('lp'), input: mine, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
     return { kind: 'exists', plan: probe, negated: false };
   },
