@@ -258,9 +258,10 @@ Plan items, in order:
   `g.E().order().by(T.label)`): one rowid seek per row. It existed before this round and scales
   linearly (1.82 ms at 1k, 6.91 ms at 8k, 3.8×). Not a defect. **Recorded** in `docs/outstanding-work.md`
   under `label-probe-edge-col`, which has the same fix.
-- **F-d. Depth gaps (pre-existing, clean declines, no wrong answer).** **Recorded** in
-  `docs/outstanding-work.md` with the list above: `haslabel-predicate`, `token-regex` and
-  `label-arm-string-constant`.
+- **F-d. Depth gaps (pre-existing, clean declines, no wrong answer).** **LANDED as `b293d5c3`
+  (`CI passed`).** Recorded in `docs/outstanding-work.md` with the list above: `haslabel-predicate`,
+  `token-regex` and `label-arm-string-constant`; the F-c self-seek is under `label-probe-edge-col`.
+  Mechanism: docs-only rows; no code change. **Remains:** nothing for F-d.
 
 ### Next round — reuse proposals (before B1)
 
