@@ -322,6 +322,11 @@ byte-stable reuse.
     `write.ts:1403,3696,3858,4091,4215,6319`. A seedless `reduce` throws a bare `TypeError` on an empty
     array; `conjoin` returns `undefined` and the type checker makes the caller handle it. Check with
     `bun scripts/refs.ts conjoin`/`disjoin` and a grep for hand-written `op: 'and'|'or', left`.
+    ✅ **Items 10, 11 and 13 landed 2026-11-26 (`20a36e55`).** Every seedless AND/OR `reduce` uses
+    `conjoin`/`disjoin` (`src/rel/expr.ts`). Each caller handles `undefined`. `receiver.ts` and
+    `semijoin.ts` lose their private folds. `allNullGuard` (`src/compiler/rel/transform.ts`, beside
+    `VALUE_TX`) serves both `concat` sites. `test/rel-expr-folds.test.ts` fails on a new seedless
+    AND/OR `reduce`. Byte-stable. Remains: nothing.
 11. **Delete `receiver.ts`'s private `and`/`or`** (`src/compiler/rel/receiver.ts:79-80`). Import them
     from `src/rel/expr.ts`. `scoped.ts:1544` becomes `(step.name === 'or' ? disjoin : conjoin)(preds)!`.
 12. *(Cut by owner review — item 3 deletes both spellings.)*
