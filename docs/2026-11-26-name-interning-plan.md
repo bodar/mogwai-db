@@ -124,6 +124,11 @@ rows (2.5 MB). The key is stored three times per row (table and two indexes): ab
    `storage.ts` names `labels` in raw SQL. One L2 test: `hasLabel('nope')`, `out('nope')`,
    `has('nope','k',v)`, `E().hasLabel('nope')`, `dropLabel('nope')` give no rows or a no-op, never an
    error. After A2–A5.
+   **Landed (95f6651d), RelIR half only.** `scripts/arch-check.ts` fails the build when a file other than
+   `src/compiler/rel/names.ts` builds a RelIR scan of `labels`. `test/L2-sql/unknown-label.sql.test.ts`
+   tests the five unknown-label shapes. No baseline move. **Remains:** the raw-SQL half of the guard
+   (`\b(FROM|JOIN|INTO)\s+labels\b`) goes to B6. The raw sites do not go through `names.ts` yet. No
+   allowlist was added.
 
 **Gate A (owner review).** Report net production lines (expected negative), the `sql-hygiene` byte
 delta and the `sql-plan` diff. **Stop rule:** stop and report if the net change is above +40 lines or any
