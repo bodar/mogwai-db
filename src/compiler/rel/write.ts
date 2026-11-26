@@ -4162,8 +4162,9 @@ function mapDrivers(carrier: Rel, elem: Elem, bind: Binder, fresh: Minter): MapD
   };
 }
 
-/** The property seek of a map-valued driver's first STRING entry (`mapDrivers.with`) — `propertySeeks` with
- *  the key, value and vtype read off the pair's `{t,v}` nodes. */
+/** The property seek of a map-valued driver's PICKED entry (`mapDrivers.with`: the string entry its
+ *  per-driver selectivity pick chose, `SEEK_ORD`) — `propertySeeks` with the key, value and vtype read off
+ *  that pair's `{t,v}` nodes. */
 function mapEntrySeeks(elem: Elem, drivers: MapDrivers, fresh: Minter, narrow?: (driver: RelId) => Expr): readonly Rel[] {
   return propertySeeks(elem, (seek) => drivers.with((driver) => conjoin([narrow?.(driver), seek?.(driver)].filter((e) => e !== undefined))),
     (driver) => col(driver, SEEK_KEY), (driver) => col(driver, SEEK_VALUE), (driver) => col(driver, SEEK_VTYPE), fresh);

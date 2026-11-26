@@ -350,11 +350,6 @@ describe('a map-valued merge guard finds a later map an earlier creation contain
   });
 });
 
-// A mergeE SEARCH JOINS ITS OWN EDGE READ. The pairs meet the criteria read `E().hasLabel(…).has(…)` on
-// `(src, tgt)`, so each pair is one endpoint-index seek, with the label and properties as residuals on the
-// row it found (`edgeCriteria`/`pairedWith`, `src/compiler/rel/write.ts`). It once re-scanned `edges` and
-// tested `id IN (every edge of the label)`, which SQLite expanded into a `rowid=?` probe per (pair, label
-// member): 5.2 s at 8k traversers (65× the 1k time), and 18 ms for ONE `mergeE` against 100k `knows` edges.
 // WHICHEVER CRITERION A MAP DRIVER SEEKS BY, the residual checks every entry and every label member — the
 // label pick changes the access path, never the answer (modern graph: `name` is unique, `person` is four).
 describe('a map driver seeking by its label answers as by its name', () => {
@@ -380,6 +375,11 @@ describe('a map driver seeking by its label answers as by its name', () => {
   });
 });
 
+// A mergeE SEARCH JOINS ITS OWN EDGE READ. The pairs meet the criteria read `E().hasLabel(…).has(…)` on
+// `(src, tgt)`, so each pair is one endpoint-index seek, with the label and properties as residuals on the
+// row it found (`edgeCriteria`/`pairedWith`, `src/compiler/rel/write.ts`). It once re-scanned `edges` and
+// tested `id IN (every edge of the label)`, which SQLite expanded into a `rowid=?` probe per (pair, label
+// member): 5.2 s at 8k traversers (65× the 1k time), and 18 ms for ONE `mergeE` against 100k `knows` edges.
 describe('a mergeE search seeks the endpoint pair and tests the label on the row it found', () => {
   /** `n` persons, person i knows person i%n+1, plus `extra` more `knows` edges between other vertices. */
   const knowing = (n: number, extra = 0): GraphStore => {
