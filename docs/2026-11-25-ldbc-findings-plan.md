@@ -524,9 +524,140 @@ then byte-stable reuse.
     `NONDETERMINISTIC` copies `src/gremlin/frontend.ts:129` `dynamicLiteral` as a regex. Use the
     predicate for dynamic literals; keep the regex only for `sample`/`coin`/`shuffle`. No answer changes.
 
+Items 8–12 were not started in round 4. They move to round 5 unchanged (round-5 items 9–13).
+
+## Parked in round 4
+
+None. Items 1–5 and 7 landed. Item 6 had landed before the round. No round-4 branch is a resume point.
+
+## Follow-ups from review (round 4)
+
+Major first. Minor items are kept only when they are cheap and concrete.
+
+- **MAJOR — a label-operand ORDERING builds the label's history document 4 times per row**
+  (`e35f833a`, `src/compiler/rel/predicate.ts`). The `+value OP operand` VALUES and the `sameBucket`
+  guard VALUES each inline the whole `jsonb_array(jsonb_object('k',2,'v',…,'t',rp.vtype))` document.
+  The semijoin and its residual EXISTS each hold both copies (before: 2 copies). The tag is only
+  `rp.vtype`. Measured old / new, ms at 1k / 8k vertices:
+  - `g.V().has('age',3).values('age').as('e').V().has('age', gt(select('e'))).count()`:
+    11.9 / 78.7 → 20.6 / 125.3. SQL 2969 → 6386 bytes.
+  - The same with `.has('s', lt(select('e')))` added: 18.6 / 133 → 24.8 / 173. SQL 5299 → 9278.
+  - `g.V().values('age').as('e').V().has('age', gt(select('e'))).limit(1)`: 4.0 / 3.7 → 7.0 / 14.8.
+
+  Growth is linear and the slowdown (about 1.6×) is under the 2× bar. But the SQL doubles, and an
+  expression used N times must be computed once. The same commit adds `sharedNode`, a peephole that
+  finds the label's `.v`/`.t` pair again by string suffix and `JSON.stringify` equality. That is a second
+  recognizer of the read that `aliasEntryNode` (`src/compiler/rel/alias.ts:122`) already owns. Fix (one
+  item): let the producer `aliasOperandAt` (`alias.ts:111`) give `TypedOperand` its entry node and its
+  tag, as `ChildValue.node` does for a stored read. The guard then reads the tag column. Delete
+  `sharedNode`.
+- **MAJOR — two copies of the comparability bucket table** (`src/compiler/rel/predicate.ts`).
+  `sameBucket` lists `TEXT_VTYPES` and `OWN_BUCKET_VTYPES` by hand. `comparableTheta` (about l.717)
+  spells the same partition as a 7-arm CASE, which mirrors `kindOf` in `orderability.ts`. The two copies
+  already differ on duration: `comparableTheta` keys it through `wholeNumber`, the nested guard compares
+  the stored TEXT. That wrong answer is recorded as `duration-stored-comparable`, so it is not new. Fix:
+  one exported bucket table, read by both (see round-5 item 3).
+- **Pre-existing wrong answer — `P.not` around an ordering keeps incomparable rows**
+  (`src/compiler/rel/predicate.ts` `negated()`). Store `s` in {`'10'`, `10`, `10.00m`, `'x'`, `3`, `true`,
+  `1`}. `g.V().has('k','e').as('x').V().has('s', P.not(P.gt(select('x').values('s')))).values('k')`
+  returns `[a,d,e,f,h]`; the reference is `[e,h]`. The literal form `has('s', P.not(P.gt(3)))` is wrong
+  in the same way. SQL `NOT(cmp AND guard)` lets a cross-bucket row pass. The reference negates the
+  BiPredicate: `P.not` → `predicate.negate()`
+  (`vendor/tinkerpop/gremlin-core/src/main/java/org/apache/tinkerpop/gremlin/process/traversal/P.java`),
+  and `Compare.lte` is false on an incomparable pair (`…/process/traversal/Compare.java`). Fix: push the
+  negation into the operator (`gt` → `lte`) before the guard is added, for literal and nested operands.
+- **To `docs/outstanding-work.md`** (not recorded there yet):
+  - A meta-property long past 2^53 loses its tag when it is written. The meta JSON holds it as a bare
+    string. `g.V().properties('n').values('j')` after `property('n', 1L, 'j', 9007199254740993L)` returns
+    a String, not a Long (wrong number class). `order().by('m')` on such values sorts as text, and
+    `has('m', gt(150000000000000000000N))` finds nothing. The root cause is the meta write, not the
+    compare key (`src/compiler/rel/modulator.ts` reads it).
+  - `g.V().fold().local(unfold().order().by(K).values('k')).limit(1)` is quadratic for every key: 18.5 /
+    605 ms at 1k / 8k (32.7×), on trunk before and after round 4. `g.V().local(unfold().order().by('n'))
+    .count()` stays linear. It is probably the `fold-label-history-copy` family; check before a new row.
+  - `mergeE` depth gaps (clean declines, unchanged from before round 4): an endpoint from
+    `option(Merge.outV, __.identity())`, one endpoint per traverser
+    (`g.V().hasLabel('person').mergeE([(T.label):'knows',(Direction.from):Merge.outV]).option(Merge.outV,__.identity())`),
+    a search map with endpoints but no `T.label` (`g.mergeE([(Direction.from):1,(Direction.to):2])`), and
+    a list-valued property criterion.
+  - An injected exact-tail number stream declines at the source:
+    `g.inject(300000000000000000000N, 100000000000000000000N, 5L).order()`, `.max()`, `.dedup()`, and
+    `g.inject(1.5d, 9007199254740993L, 2L).order()`. The same values answer from stored properties.
+- **Cheap and concrete:**
+  - Stale comments after `8211161e`: the `storedValue` doc in `src/compiler/rel/build.ts` (about l.702)
+    names the deleted `storedCompare`; `src/compiler/rel/decorate.ts:100` names "`storedCompareOn`'s CAST".
+  - Rename `CAST_TO_INT` (`src/compiler/rel/predicate.ts:141`) to a name such as `WHOLE_NUMBER_TAGS`.
+    Those tags key through `wholeNumber` (CAST AS NUMERIC), not CAST AS INTEGER.
+  - The `edgeCriteria` doc (`src/compiler/rel/write.ts`) says the plan is "an `e_pair` seek per pair".
+    The measured plan seeks `e_in (tgt=? AND label=? AND src=?)`. Say "an endpoint-index seek".
+  - `insertSet` (`src/setwrite.ts`) projects a derived column's placeholder (`exact`) into the
+    `cells` MATERIALIZED CTE, and nothing reads it. Leave a derived column out of `cells` unless another
+    derive reads it. One `json_extract` per loaded property row; measured cost is noise.
+- **No action:** `Where.feature:268`'s body wrapped in `local()` declines cleanly. The same traversal
+  without `local()` also declines.
+
+## Next round (round 5)
+
+Order: wrong answer, then the SQL doubling, then cheap fixes, then byte-stable reuse.
+
+1. **`P.not` negates the operator, not the guarded compare** (follow-up above). Literal and nested
+   operands. Add the witness to `test/L4-addendum/nested-operand-comparability.feature`.
+2. **The label operand carries its node and its tag from the producer** (MAJOR follow-up above). Delete
+   `sharedNode`. Acceptance: the SQL for `has('age', gt(select('e')))` returns to about 3 KB, and the
+   1k / 8k timings return to the pre-`e35f833a` values.
+3. **One bucket table for ordering comparability.** Extract `bucketGuard(typeA, typeB)` from `sameBucket`.
+   Then `comparableTheta` = `bucketGuard(typeA, typeB)` AND `op(storedCompareOn(typeA)(valA),
+   storedCompareOn(typeB)(valB))`. `storedCompareOn` already keys datetime and duration through
+   `wholeNumber`, every Number tag by its class, and passes the other tags raw, so each arm computes what
+   it does today. A cross-bucket pair is false in both forms; a NULL stays NULL. About 12 fewer lines, and
+   `where('a', gt('b'))` emits one compare, not seven. Do it after item 2 (same file).
+4. **The cheap round-4 follow-ups** above: the two stale comments, the `CAST_TO_INT` rename, the
+   `edgeCriteria` doc, and the unread `cells` column.
+5. **`storedCompareOnce` is `overOperand` specialised — delete it.** `storedCompareOnce`
+   (`src/compiler/rel/predicate.ts` about l.688, one caller `modulator.ts:284`) binds `(subject, vtype)`
+   once in a VALUES row. `overOperand` (about l.883) does the same. Call `overOperand` directly. About 9
+   lines. Do it with item 2, because item 2 changes `overOperand`.
+6. **`storedForm.value` is `comparableOf`.** In `src/compiler/rel/build.ts`, `storedForm` builds `value`
+   with a `typeof(payload)='text'` guard; `comparableOf` builds the same CASE without it. The guard is
+   redundant: `CAST(x AS REAL)` of a REAL and `CAST(x AS NUMERIC)` of an INTEGER or REAL are no-ops
+   (measured on bun:sqlite 3.51: `CAST(3.0 AS NUMERIC)` and `CAST(9.3e18 AS NUMERIC)` stay REAL). Use
+   `value: comparableOf(payload, vtype)`; `exact` keeps its own arms. Removes one per-row `typeof` read
+   from every stored-value write. sql-hygiene only shrinks.
+7. **mergeV map-entry signature keys a Number by `typedValueKey`.** `searchKeying.entries`
+   (`src/compiler/rel/write.ts` about l.3716) uses half of `typedValueKey` and spells a third
+   `CAST(value AS REAL)` under its own numeric in-list. Use `typedValueKey` for both halves. The exact
+   key only admits fewer false candidates (two distinct longs past 2^53 no longer meet); `couldMatch`
+   stays the residual.
+8. **Elide `always` once, at the algebra boundary.** Make `conjoin` (`src/rel/expr.ts`) skip
+   `=== always`. Make the emitter (`src/rel/emit.ts`, `filter` and join `ON`) treat an `always`
+   predicate as absent. Then delete the hand filter at `write.ts:3522`. Sites that still emit a
+   tautology: `write.ts:3912`, `4041`/`4044` (the mergeV `CROSS JOIN … ON (1 = 1)`), `4196`, `4215`, the
+   NOT-EXISTS filters at `5037`/`5241`/`5570`/`5954`, and `src/rel/decorrelate.ts:112`/`145`. Optionally
+   retire `CONSTANT.true` (`predicate.ts:49`) for `always`. Answers do not change; sql-hygiene only falls.
+   Do it with item 10.
+
+### Reuse sweep (byte-stable unless said)
+
+9. **One AND/OR authority** (round-4 item 8, unchanged).
+10. **Name the contradiction once** (round-4 item 9, unchanged). Do it with item 8.
+11. **`isNull`/`isNotNull`/`binary` in `src/rel/expr.ts`** (round-4 item 10, unchanged).
+12. **Move `setMembers` into `list.ts`** (round-4 item 11, unchanged).
+13. **The census/L5 nondeterminism test asks `dynamicLiteral`** (round-4 item 12, unchanged).
+14. **One `tagIn(expr, names)` constructor.** `{ kind: 'in-list', expr: X, values: NAMES.map(compilerText) }`
+    is spelled 26 times, as local helpers named `inList`/`among`/`tagIn`/`numeric`/`bothIn` (predicate.ts,
+    build.ts, write.ts, reducer.ts, operator.ts, list.ts, boundgraph.ts). Export one `tagIn` beside
+    `eq`/`isNot`/`conjoin`. Identical Expr trees. Do it with item 10 (its text in-list constructor).
+15. **Fold `scanColumnOf` into the column-lineage authority** (`src/rel/lineage.ts`).
+    `scanColumnOf`/`ownScan` (`src/compiler/rel/source.ts`, new in `1d7beeaf`) and `edgeRowOf`
+    (`src/compiler/rel/write.ts`) repeat `columnPath`/`definingPath`/`rowidScan`/`columnAt`. First add
+    the one missing case to `definingPath`: a `window`'s pass-through columns (semijoin and leading gain
+    it too). Lineage picks a join side by position and refuses a LEFT join's null-padded side, so it is
+    the stricter rule. About 35 lines and one concept removed. Only the plan can change: keep the
+    sql-plan gate and the merge-scale `e_in`/no-`rowid=?` assertions green.
+
 ## Needs a human
 
-No new questions in round 3.
+No new questions in round 4. No new questions in round 3.
 
 **Answered by the owner review (2026-11-25):** take items 1–3 and 5–11, 13 and 14 in round 3, in the
 order above. Item 4, item 12 and the correlated form are cut. Items 8 and 9 land together, because a
