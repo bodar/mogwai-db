@@ -24,7 +24,7 @@ import {
   LABEL_ITEM_NAME, LABEL_MEMBER_NAME, LABEL_NAME, type NameRules, validateLabel, validatePropertyKey,
 } from '../../gremlin/validate.ts';
 import { ValueParseError } from '../../gremlin/coerce.ts';
-import { and, carriedCols, eq, explodeMembers, fenced, LABEL_OWNERS, existsOf, meta, PROPERTIES, storedForm, presenceFenced, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
+import { and, carriedCols, eq, explodeMembers, fenced, LABEL_OWNERS, existsOf, meta, PROPERTIES, propertyRows, propertyScan, storedForm, presenceFenced, or, renumber, rowNumberWindow, typeOf, type Minter } from './build.ts';
 import { substRelId } from '../../rel/walk.ts';
 import { aliasIdAt } from './alias.ts';
 import { scanColumnOf } from './source.ts';
@@ -194,11 +194,8 @@ function recordTombstones(elem: Elem, owners: Rel, fresh: Minter): Stmt {
 /** The FTS rows owned by a set of elements — `rowid IN (SELECT ±id FROM <property table> WHERE <owner> IN
  *  owners)`. Found THROUGH the property rows, so it must run before they are deleted. */
 function deleteFts(elem: Elem, owners: Rel, fresh: Minter): Stmt {
-  const spec = OWNED_BY[elem === 'edge' ? 'edgeProps' : 'vertexProps'];
-  const props = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
-  const owned = make.filter({
-    id: fresh('f'), input: props, channels: [], type: props.type,
-    pred: { kind: 'in-query', expr: col(props.id, spec.owner), plan: owners, negated: false },
+  const owned = propertyRows(elem, fresh, {
+    where: (rows) => ({ kind: 'in-query', expr: col(rows, PROPERTIES[elem].owner), plan: owners, negated: false }), hint: WRITE_ROWS,
   });
   return dropStaleIndex(elem, make.project({ id: fresh('w'), input: owned, channels: [], type: ID_TYPE, exprs: [['id', col(owned.id, 'id')]] }), fresh);
 }
@@ -500,8 +497,8 @@ const metaExpr = (meta: NonNullable<PropertySet['meta']>): Expr => ({
  * ones the insert skips; a row the insert adds carries its meta from the start.
  */
 function patchSetMeta(meta: readonly MetaPropSpec[], declared: VertexCardinality | null, matches: (target: Rel) => Expr, fresh: Minter): Stmt {
-  const spec = PROPERTY_TABLE.vertex;
-  const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+  const spec = PROPERTIES.vertex;
+  const target = propertyScan('vertex', fresh, WRITE_ROWS);
   const patched: Expr = { kind: 'call', fn: 'jsonb', args: [{
     kind: 'call', fn: 'json_patch', args: [{ kind: 'call', fn: 'coalesce', args: [col(target.id, 'meta'), compilerText('{}')] }, metaExpr(meta)],
   }] };
@@ -511,11 +508,8 @@ function patchSetMeta(meta: readonly MetaPropSpec[], declared: VertexCardinality
   });
 }
 
-/** The property side-table each element kind writes, as `Scan` must declare it. */
-const PROPERTY_TABLE = {
-  vertex: { table: 'vertex_properties' as Table, owner: 'node', cols: [meta('id', 'int'), meta('node', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('meta', 'blob', true), meta('exact', 'text', true)] },
-  edge: { table: 'edge_properties' as Table, owner: 'edge', cols: [meta('id', 'int'), meta('edge', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)] },
-} as const;
+/** The minted names of a property scan a write statement reads or targets (`propertyRows`). */
+const WRITE_ROWS = ['t', 'wt'] as const;
 
 /** A property row's `value`/`vtype`/`exact` cells from a value in its payload form and its tag (`storedForm`). */
 const storedCells = (payload: Expr, vtype: Expr): readonly (readonly [string, Expr])[] => {
@@ -612,9 +606,8 @@ function dropStaleIndex(elem: Elem, rows: Rel, fresh: Minter): Stmt {
  * predicate (`existingRows`); otherwise they are `rows`' ids.
  */
 function removeRows(elem: Elem, rows: Rel, bind: Binder, fresh: Minter, where?: (target: Rel) => Expr): void {
-  const spec = PROPERTY_TABLE[elem === 'edge' ? 'edge' : 'vertex'];
   bind(dropStaleIndex(elem, rows, fresh));
-  const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+  const target = propertyScan(elem, fresh, WRITE_ROWS);
   bind(remove({
     target, channels: [], type: typeOf(), returning: [],
     where: where ? where(target) : { kind: 'in-query', expr: col(target.id, 'id'), plan: rows, negated: false },
@@ -625,12 +618,12 @@ function removeRows(elem: Elem, rows: Rel, bind: Binder, fresh: Minter, where?: 
  *  single-cardinality guard). Projected to `id`, which is what both the FTS sweep and the row
  *  delete address them by. */
 function existingRows(elem: Elem, owners: Rel, key: Expr, guard: ((owner: Expr) => Expr) | undefined, fresh: Minter): { readonly ids: Rel; readonly pred: (target: Rel) => Expr } {
-  const spec = PROPERTY_TABLE[elem === 'edge' ? 'edge' : 'vertex'];
+  const spec = PROPERTIES[elem];
   const clause = (target: Rel): Expr => and(
     and({ kind: 'in-query', expr: col(target.id, spec.owner), plan: owners, negated: false }, eq(col(target.id, 'key'), key)),
     guard ? guard(col(target.id, spec.owner)) : undefined,
   );
-  const scan = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+  const scan = propertyScan(elem, fresh, WRITE_ROWS);
   const matching = make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: clause(scan) });
   return {
     ids: make.project({ id: fresh('p'), input: matching, channels: [], type: ID_TYPE, exprs: [['id', col(matching.id, 'id')]] }),
@@ -650,7 +643,7 @@ function propertyStatements(
   elem: Elem, owners: Rel, write: PropertyWrite, bind: Binder, fresh: Minter,
   child: ChildSeam, aliases: AliasMap, guard: Guarder, sequenced = false,
 ): boolean {
-  const spec = PROPERTY_TABLE[elem === 'edge' ? 'edge' : 'vertex'];
+  const spec = PROPERTIES[elem];
   // A MEMBERSHIP test is against one column, and the snapshot carries the traverser's channels too —
   // so the identity projection is taken once here rather than at each of the four predicates that
   // want it. (`IN (SELECT id, bulk, encounter …)` is what SQLite refuses, and it refused it.)
@@ -715,7 +708,7 @@ function propertyStatements(
     ), fresh));
   }
 
-  const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+  const target = propertyScan(elem, fresh, WRITE_ROWS);
   // ONE ROW PER ELEMENT unless the element keeps every value. Several traversers on one element are the
   // reference's loop run once each (`AddPropertyStep.sideEffect` per traverser), and every run writes
   // the SAME constant: a `single` run replaces the last one's value with an equal one, a `set` run finds
@@ -735,7 +728,7 @@ function propertyStatements(
   // rather than as a branch, because the cardinality is per element: two owners in one stream can
   // take different arms of it.
   const present = (): Expr => {
-    const scan = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+    const scan = propertyScan(elem, fresh, WRITE_ROWS);
     const matching = make.filter({
       id: fresh('f'), input: scan, channels: [], type: scan.type,
       pred: and(and(eq(col(scan.id, spec.owner), col(base.id, 'id')), eq(col(scan.id, 'key'), propertyKeyExpr(write.key, write.keyName))),
@@ -1877,7 +1870,7 @@ function runtimeWriteRows(
   // JSON (`transportableValues`) and every statement below reads it; a drawing one also computes each
   // shared draw once inside itself (`effectScope`'s `drawn`).
   const rows = once ? bind(transportableValues(keyed, fresh), true, [], once.drawn) : keyed;
-  const spec = PROPERTY_TABLE[elem === 'edge' ? 'edge' : 'vertex'];
+  const spec = PROPERTIES[elem];
   const card = (rel: Rel): Expr => cardinalityOf(col(rel.id, 'owner'), col(rel.id, 'k'), cardinality, fresh);
 
   // THE >1-UNDER-SINGLE RAISE, over the value rows counted per TRAVERSER — before anything is written.
@@ -1964,7 +1957,7 @@ function runtimeWriteRows(
   // A `set` value the element already holds is not re-written — unless its slot saw a null, whose removal
   // (after the insert) takes the held copy with it.
   const unheld = (): Expr => {
-    const scan = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+    const scan = propertyScan(elem, fresh, WRITE_ROWS);
     const matching = make.filter({
       id: fresh('f'), input: scan, channels: [], type: scan.type,
       pred: and(and(eq(col(scan.id, spec.owner), col(ranked.id, 'owner')), eq(col(scan.id, 'key'), col(ranked.id, 'k'))),
@@ -2002,7 +1995,7 @@ function runtimeWriteRows(
     bind(patchSetMeta(meta_, cardinality, (t) => ({ kind: 'in-query', expr: col(t.id, 'id'), plan: held, negated: false }), fresh));
   }
 
-  const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+  const target = propertyScan(elem, fresh, WRITE_ROWS);
   const withMeta = elem !== 'edge' && meta_ !== null;
   const source = make.project({
     id: fresh('p'), input: ordered, channels: [],
@@ -2048,8 +2041,8 @@ function runtimeWriteRows(
 function slotRows(
   elem: Elem, rows: Rel, keep: ((slot: (column: string) => Expr, row: (column: string) => Expr) => Expr) | undefined, fresh: Minter,
 ): Rel {
-  const spec = PROPERTY_TABLE[elem === 'edge' ? 'edge' : 'vertex'];
-  const scan = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+  const spec = PROPERTIES[elem];
+  const scan = propertyScan(elem, fresh, WRITE_ROWS);
   const slots = make.join({
     id: fresh('j'), left: rows, right: scan, join: 'inner', ordered: true, channels: [],
     type: typeOf(...rows.type.cols, ...scan.type.cols.map((column) => meta(`s_${column.name}`, column.type, column.nullable))),
@@ -2237,7 +2230,7 @@ function mergeArmValueWrite(
   target: Rel, driver: Rel, write: PropertyRuntimeSet, driverElem: Elem | undefined, bind: Binder, fresh: Minter,
   child: ChildSeam, aliases: AliasMap,
 ): boolean {
-  const spec = PROPERTY_TABLE.vertex;
+  const spec = PROPERTIES.vertex;
   // A merge map's keys are literal and its values carry no meta, so only the plain form arrives here.
   if (typeof write.key !== 'string' || !('body' in write.value) || write.meta !== null) return false;
   const key = propertyKeyExpr(write.key, write.keyName);
@@ -2269,7 +2262,7 @@ function mergeArmValueWrite(
   // A `set` write (declared, or the element default) does not re-insert a value already present.
   const skippable = write.cardinality !== 'single' && write.cardinality !== 'list';
   const present = (): Expr => {
-    const scan = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+    const scan = propertyScan('vertex', fresh, WRITE_ROWS);
     const matching = make.filter({
       id: fresh('f'), input: scan, channels: [], type: scan.type,
       pred: and(and(eq(col(scan.id, spec.owner), owner(ids)), eq(col(scan.id, 'key'), key)), eq(col(scan.id, 'value'), valueExpr)),
@@ -2280,7 +2273,7 @@ function mergeArmValueWrite(
     ? make.filter({ id: fresh('f'), input: ids, channels: ids.channels, type: ids.type,
         pred: { kind: 'binary', op: 'or', left: { kind: 'binary', op: '!=', left: cardinalityOf(owner(ids), key, write.cardinality, fresh), right: text('set') }, right: present() } })
     : ids;
-  const t = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+  const t = propertyScan('vertex', fresh, WRITE_ROWS);
   const source = make.project({
     id: fresh('p'), input: seed, channels: [], type: typeOf(meta(spec.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),
     exprs: [[spec.owner, owner(seed)], ['key', key], ['value', valueExpr], ['vtype', vtypeExpr], ['exact', exactExpr]],
@@ -2310,7 +2303,7 @@ function armValueWriteCorrelated(
   // `writeOf`, so this is only ever reached for a vertex merge). The VALUE body is rooted at the DRIVER
   // (`driverElem` — the incoming stream's kind), `?? 'vertex'` preserving the prior hardcode for a
   // cannot-say driver.
-  const spec = PROPERTY_TABLE.vertex;
+  const spec = PROPERTIES.vertex;
   if (typeof write.key !== 'string' || !('body' in write.value) || write.meta !== null) return false;
   const key = propertyKeyExpr(write.key, write.keyName);
   const host: ChildHost = { kind: 'element', id: col(incoming.id, 'id'), elem: driverElem ?? 'vertex', row: { rel: incoming, aliases } };
@@ -2342,7 +2335,7 @@ function armValueWriteCorrelated(
   const g = write.cardinality === 'single' ? undefined : (owner: Expr): Expr => eq(cardinalityOf(owner, key, null, fresh), text('single'));
   const stale = existingRows('vertex', ids, key, g, fresh);
   removeRows('vertex', stale.ids, bind, fresh, stale.pred);
-  const t = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+  const t = propertyScan('vertex', fresh, WRITE_ROWS);
   const source = make.project({
     id: fresh('p'), input: paired, channels: [], type: typeOf(meta(spec.owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),
     exprs: [[spec.owner, col(paired.id, 'id')], ['key', key], ...storedCells(col(paired.id, 'v'), col(paired.id, 'vtype'))],
@@ -3957,9 +3950,9 @@ function propertySeeks(
   elem: Elem, drivers: (narrow?: (driver: RelId) => Expr) => Rel,
   key: (driver: RelId) => Expr, value: (driver: RelId) => Expr, vtype: (driver: RelId) => Expr, fresh: Minter,
 ): readonly Rel[] {
-  const spec = PROPERTY_TABLE[elem];
+  const spec = PROPERTIES[elem];
   const exact = drivers();
-  const exactProps = make.scan({ id: fresh('sk'), table: spec.table, alias: fresh('rsk'), channels: [], type: typeOf(...spec.cols) });
+  const exactProps = propertyScan(elem, fresh, ['sk', 'rsk']);
   return [seekOwners(exact, exactProps, and(eq(col(exactProps.id, 'key'), key(exact.id)),
     eq(col(exactProps.id, 'value'), typedValueKey(value(exact.id), vtype(exact.id))[1])), spec.owner, fresh)];
 }
@@ -3980,8 +3973,7 @@ const SEEK_KEY = 'sk_key', SEEK_VTYPE = 'sk_vt', SEEK_VALUE = 'sk_x', SEEK_ORD =
 const SELECTIVITY_CAP = 64;
 /** The stored properties of `elem` holding `key` at `valueKey` (a `typedValueKey` compare form). */
 function propertyHits(elem: Elem, key: Expr, valueKey: Expr, fresh: Minter): Rel {
-  const spec = PROPERTY_TABLE[elem];
-  const scan = make.scan({ id: fresh('cc'), table: spec.table, alias: fresh('rcc'), channels: [], type: typeOf(...spec.cols) });
+  const scan = propertyScan(elem, fresh, ['cc', 'rcc']);
   return make.filter({ id: fresh('f'), input: scan, channels: [], type: scan.type, pred: and(eq(col(scan.id, 'key'), key), eq(col(scan.id, 'value'), valueKey)) });
 }
 /** The vertices carrying the label NAMED `name` — none for a name never interned (`nameId` reads NULL). */
@@ -4008,7 +4000,7 @@ function computedMatch(
   elem: Elem, carrier: Rel, candidates: () => Rel, cKeys: readonly string[],
   ppCol: (i: number) => string, cvCol: (i: number) => string, ptCol: (i: number) => string, hasOrd: boolean, bind: Binder, fresh: Minter,
 ): Rel {
-  const spec = PROPERTY_TABLE[elem];
+  const spec = PROPERTIES[elem];
   const productive = (rel: RelId, i: number, yes: boolean): Expr => eq(col(rel, ppCol(i)), compilerInt(yes ? 1 : 0));
   // Each productive key's capped count, projected ONCE per driver beside it (one key has no choice to make).
   const countCol = (i: number): string => `sc_${i}`;
@@ -4036,7 +4028,7 @@ function computedMatch(
       : or(productive(rel, j, false), { kind: 'binary', op: j < i ? '>' : '>=', left: col(rel, countCol(j)), right: col(rel, countCol(i)) })))!;
   // The residual: every key's `has(k, v)`, as a correlated EXISTS over the candidate's stored property.
   const residual = (driver: RelId, candidate: RelId): Expr => conjoin(cKeys.map((key, i) => {
-    const scan = make.scan({ id: fresh('vp'), table: spec.table, alias: fresh('rp'), channels: [], type: typeOf(...spec.cols) });
+    const scan = propertyScan(elem, fresh, ['vp', 'rp']);
     const found = make.filter({
       id: fresh('f'), input: scan, channels: [], type: scan.type,
       pred: and(and(eq(col(scan.id, spec.owner), col(candidate, 'id')), eq(col(scan.id, 'key'), compilerText(key))),
@@ -5227,8 +5219,8 @@ function mergeVComputed(
   // Write each PRESENT computed value onto its created vertex — FTS is the post-write refresh's (a created
   // vertex is born dirty), the same route every runtime value takes.
   for (let i = 0; i < cKeys.length; i++) {
-    const spec = PROPERTY_TABLE.vertex;
-    const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+    const spec = PROPERTIES.vertex;
+    const target = propertyScan('vertex', fresh, WRITE_ROWS);
     const present = make.filter({ id: fresh('f'), input: createdTuples, channels: [], type: createdTuples.type, pred: eq(col(createdTuples.id, ppCol(i)), compilerInt(1)) });
     const rows = make.project({
       id: fresh('p'), input: present, channels: [], type: typeOf(meta('node', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),
@@ -5332,7 +5324,7 @@ export function mergeVFromMap(
   const allMatch = (driver: RelId, candId: Expr): Expr => {
     const pairs = pairsOf(col(driver, MAP_COL), fresh);
     // A STRING property key satisfied by a stored property (vtype-aware compare).
-    const vp = make.scan({ id: fresh('vp'), table: PROPERTY_TABLE.vertex.table, alias: fresh('rp'), channels: [], type: typeOf(...PROPERTY_TABLE.vertex.cols) });
+    const vp = propertyScan('vertex', fresh, ['vp', 'rp']);
     const vpMatch = make.filter({
       id: fresh('f'), input: vp, channels: [], type: vp.type,
       pred: and(and(eq(col(vp.id, 'node'), candId), eq(col(vp.id, 'key'), keyV(pairs))),
@@ -5469,7 +5461,7 @@ function mapEntryProperties(elem: Elem, created: Rel, fresh: Minter): Stmt {
   const propPairs = make.filter({ id: fresh('f'), input: exploded, channels: [], type: exploded.type,
     pred: and(eq(pair('keys', '$.t'), compilerText('string')), { kind: 'binary', op: 'is not', left: pair('values', '$.v'), right: compilerNull() }) });
   const side = sideOf(propPairs.id);
-  const { table, owner, cols } = PROPERTY_TABLE[elem];
+  const { owner } = PROPERTIES[elem];
   const propRows = make.project({
     id: fresh('p'), input: propPairs, channels: [],
     type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('pv', 'any', true), meta('vtype', 'text', true)),
@@ -5481,7 +5473,7 @@ function mapEntryProperties(elem: Elem, created: Rel, fresh: Minter): Stmt {
     type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),
     exprs: [[owner, col(propRows.id, owner)], ['key', col(propRows.id, 'key')], ...storedCells(col(propRows.id, 'pv'), col(propRows.id, 'vtype'))],
   });
-  const target = make.scan({ id: fresh('t'), table, alias: fresh('wt'), channels: [], type: typeOf(...cols) });
+  const target = propertyScan(elem, fresh, WRITE_ROWS);
   return insert({ target, cols: [owner, 'key', 'value', 'vtype', 'exact'], source: stored, channels: [], type: WRITTEN_TYPE, returning: [['id', col(target.id, 'id')], ['owner', col(target.id, owner)]] });
 }
 
@@ -5646,8 +5638,8 @@ export function mergeEFromMap(
   const allMatch = (driver: RelId, cand: RelId): Expr => {
     const candId = col(cand, 'cid');
     const pairs = pairsOf(col(driver, MAP_COL), fresh);
-    const spec = PROPERTY_TABLE.edge;
-    const ep = make.scan({ id: fresh('ep'), table: spec.table, alias: fresh('rp'), channels: [], type: typeOf(...spec.cols) });
+    const spec = PROPERTIES.edge;
+    const ep = propertyScan('edge', fresh, ['ep', 'rp']);
     const epMatch = make.filter({
       id: fresh('f'), input: ep, channels: [], type: ep.type,
       pred: and(and(eq(col(ep.id, spec.owner), candId), eq(col(ep.id, 'key'), keyV(pairs))),
@@ -6163,8 +6155,8 @@ function mergeEComputed(
   // Write each PRESENT computed value onto its created edge (single-valued; FTS is the post-write
   // refresh's, a created edge is born dirty).
   for (let i = 0; i < cKeys.length; i++) {
-    const spec = PROPERTY_TABLE.edge;
-    const target = make.scan({ id: fresh('t'), table: spec.table, alias: fresh('wt'), channels: [], type: typeOf(...spec.cols) });
+    const spec = PROPERTIES.edge;
+    const target = propertyScan('edge', fresh, WRITE_ROWS);
     const present = make.filter({ id: fresh('f'), input: createdTuples, channels: [], type: createdTuples.type, pred: eq(col(createdTuples.id, ppCol(i)), compilerInt(1)) });
     const rowsP = make.project({
       id: fresh('p'), input: present, channels: [], type: typeOf(meta('edge', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),

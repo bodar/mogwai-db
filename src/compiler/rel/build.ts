@@ -5,7 +5,8 @@ import { CF_MAX_VALUE_BYTES, fitsUtf8 } from '../../do-limits.ts';
 import { SAFE_INT } from './reducer.ts';
 import { MERGED_VTYPE, perRowColumnOf, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import * as make from '../../rel/factory.ts';
-import type { Rel } from '../../rel/rel.ts';
+import type { Rel, Table } from '../../rel/rel.ts';
+import type { Elem } from '../elem.ts';
 import { relId, type ColMeta, type RelId, type RelType, type SortTerm, type SqlType, type WindowSpec } from '../../rel/types.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
 import type { RootedRead } from './child.ts';
@@ -275,12 +276,54 @@ export const minter = (): Minter => { let n = 0; return (hint) => relId(`${hint}
 export const existsOf = (matched: Rel, fresh: Minter, negated = false): Expr =>
   ({ kind: 'exists', negated, plan: make.project({ id: fresh('p'), input: matched, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] }) });
 
-/** The two element tables' property side-tables, and the column each keys its owner by. The
- *  asymmetry (`node` vs `edge`) is the physical schema's, so it lives beside the `Scan` tables. */
+/**
+ * The two element tables' property side-tables: the table, the column each keys its owner by, and the
+ * physical columns a `Scan` of it declares. The asymmetry (`node` vs `edge`) is the physical schema's, so
+ * it lives beside the `Scan` tables.
+ *
+ * ONE column order, and it is load-bearing: a `Join` emits its sides' columns POSITIONALLY, so every
+ * join over a property scan derives its type from the scan's (`propertyJoin`, `slotRows`). `value` is the
+ * COMPARABLE form and `exact` the digits only the output reads (`storedForm`). `meta` is VERTEX-ONLY and
+ * last — `edge_properties` has no such column, because an edge Property cannot have meta-properties
+ * (schema-storage: normalize where cardinality is 0..N, keep inline where it is exactly 1). It is stored
+ * JSONB, so a reader that hands it onward wraps it in `json()` (`jsonOf`).
+ */
 export const PROPERTIES = {
-  vertex: { table: 'vertex_properties', owner: 'node' },
-  edge: { table: 'edge_properties', owner: 'edge' },
-} as const;
+  vertex: {
+    table: 'vertex_properties', owner: 'node',
+    cols: [meta('id', 'int'), meta('node', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true), meta('meta', 'blob', true)],
+  },
+  edge: {
+    table: 'edge_properties', owner: 'edge',
+    cols: [meta('id', 'int'), meta('edge', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)],
+  },
+} as const satisfies Readonly<Record<Elem, { readonly table: Table; readonly owner: string; readonly cols: readonly ColMeta[] }>>;
+
+/** A property scan's minted names — the Scan's id, its SQL alias and (with a predicate) its Filter's id.
+ *  Each call site keeps its own, so a site's emitted SQL is its own to read. */
+export type PropertyRowsHint = readonly [scan: string, alias: string, filter?: string];
+
+/**
+ * THE PROPERTY TABLE of an element kind as a `Scan` — every physical column of `PROPERTIES[kind]`, declared
+ * in its one order. A write's target, or the right side of a join that derives its type from it.
+ */
+export const propertyScan = (kind: Elem, fresh: Minter, [scan, alias]: PropertyRowsHint = ['pr', 'rpr']): Extract<Rel, { readonly kind: 'scan' }> =>
+  make.scan({ id: fresh(scan), table: PROPERTIES[kind].table, alias: fresh(alias), channels: [], type: typeOf(...PROPERTIES[kind].cols) });
+
+/**
+ * THE PROPERTY ROWS of an element kind — `propertyScan`, and with `of` only that owner's own rows (a seek
+ * on `vp_node_key(node, key)` / the edge twin); `where` narrows further, conjoined after the owner test.
+ * Shaped like `labelOwners` (`names.ts`). With neither, the bare Scan.
+ */
+export function propertyRows(
+  kind: Elem, fresh: Minter,
+  { of, where, hint }: { readonly of?: Expr; readonly where?: (rows: RelId) => Expr | undefined; readonly hint?: PropertyRowsHint } = {},
+): Rel {
+  const scan = propertyScan(kind, fresh, hint);
+  const narrowed = where?.(scan.id);
+  const pred = of === undefined ? narrowed : and(eq(col(scan.id, PROPERTIES[kind].owner), of), narrowed);
+  return pred === undefined ? scan : make.filter({ id: fresh(hint?.[2] ?? 'f'), input: scan, channels: [], type: scan.type, pred });
+}
 
 /** The two element kinds' `(owner, label)` rows, and the column each keys its owner by. A vertex holds
  *  its labels in a side table; an edge's one label is a column on its own row, so its rowid is the owner. */

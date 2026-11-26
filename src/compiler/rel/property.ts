@@ -2,7 +2,7 @@ import { col, compilerNull, compilerText, type Expr } from '../../rel/expr.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, RelId } from '../../rel/types.ts';
-import { and, byEncounter, carriedCols, eq, jsonExtract, jsonOf, keyMembership, meta, PROPERTIES, storedOrderKey, storedValueOn, typeOf, type Minter } from './build.ts';
+import { and, byEncounter, carriedCols, eq, jsonExtract, jsonOf, keyMembership, meta, PROPERTIES, propertyRows, propertyScan, storedOrderKey, storedValueOn, typeOf, type Minter } from './build.ts';
 import { PER_ROW, STATIC } from '../../sql/kernel/render.ts';
 import { valueSet } from './predicate.ts';
 import type { Arg } from '../../gremlin/frontend.ts';
@@ -24,24 +24,14 @@ import { inferredVtype } from './tag.ts';
 // turns them into the columns `execute.ts` frames. Merging the two is what would force the payload's
 // correlated subqueries to be computed for rows a later filter throws away.
 
-/** The physical property columns a `propertyRelation` carries, beside the input's channels. `meta` is
- *  VERTEX-ONLY — `edge_properties` has no such column, because an edge Property cannot have
- *  meta-properties in the first place (schema-storage: normalize where cardinality is 0..N, keep
- *  inline where it is exactly 1). The edge arm therefore projects a NULL rather than reading one.
- *  `value` is the COMPARABLE form and `exact` the digits only the output reads (`storedForm`): a sort
- *  reads `value`, everything that hands the value onward reads `propertyValueOf`. */
-const propCols = (owner: string, hasMeta: boolean): readonly ColMeta[] => [
-  meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'),
-  meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true),
-  ...(hasMeta ? [meta('meta', 'json', true)] : []),
-];
-
 /** The property columns are PREFIXED in the join's output type, for the reason `elementPayload`'s
  *  `w_` prefix exists: an element relation already carries `id`, and so does a property row, so an
  *  unprefixed join would declare the name twice — which the factory rejects outright rather than
  *  letting one silently shadow the other. The SCAN keeps the real column names (it reads the table);
  *  only the join's declared outputs are renamed. */
 const PROP = (name: string): string => `p_${name}`;
+/** The property scan's columns under their `PROP` names — what a property STREAM declares. */
+const prefixed = (cols: readonly ColMeta[]): readonly ColMeta[] => cols.map((c) => meta(PROP(c.name), c.type, c.nullable));
 
 /** `storedValueOn` of a property relation's prefixed columns — its payload, a collection as JSON. */
 const propertyValueOf = (rel: RelId): Expr => storedValueOn(col(rel, PROP('value')), col(rel, PROP('vtype')), col(rel, PROP('exact')));
@@ -67,18 +57,14 @@ const propertyValueOf = (rel: RelId): Expr => storedValueOn(col(rel, PROP('value
  * would be answering a different question.
  */
 export function propertyJoin(input: Rel, elem: Elem, on: (props: RelId) => Expr, fresh: Minter): Rel {
-  const { table, owner } = PROPERTIES[elem];
-  const cols = propCols(owner, elem === 'vertex');
-  const props = make.scan({
-    id: fresh('pr'), table, alias: fresh('rpr'), channels: [], type: typeOf(...cols),
-  });
+  const props = propertyScan(elem, fresh);
   // `ordered`: the input stream drives and the property table is PROBED. Both producers want that —
   // an element relation probes `vp_node_key(node,key)`, an FTS hit list probes the property rowid —
   // and neither wants the planner leading with a `key=?` scan of every property in the graph, which
   // is what it picks on a graph with no `sqlite_stat1` (see `joinText` in `src/rel/emit.ts`).
   return make.join({
     id: fresh('pj'), left: input, right: props, join: 'inner', ordered: true, channels: input.channels,
-    type: typeOf(...input.type.cols, ...cols.map((c) => meta(PROP(c.name), c.type, c.nullable))),
+    type: typeOf(...input.type.cols, ...prefixed(props.type.cols)),
     on: on(props.id),
   });
 }
@@ -128,10 +114,9 @@ export function boundPropertyRelation(input: Rel, cte: Rel, elem: Elem, keys: re
     type: typeOf(...wanted.type.cols, meta(B.node, 'any', true)),
   });
   const node = elem === 'edge' ? col(wanted.id, B.value) : col(nodes.id, B.node);
-  const cols = propCols(owner, elem === 'vertex');
   return make.project({
     id: fresh('bpr'), input: nodes, channels: input.channels,
-    type: typeOf(...cols.map((c) => meta(PROP(c.name), c.type, c.nullable)), ...carriedCols(input.channels)),
+    type: typeOf(...prefixed(PROPERTIES[elem].cols), ...carriedCols(input.channels)),
     exprs: [
       // vpid/meta ride on the landed node (the detached compile emits `{t,v,vpid,meta}`); a lossy
       // landing without them extracts NULL — the framer then synthesises `owner:pk`, the old behaviour.
@@ -384,10 +369,8 @@ export function propertyElement(input: Rel, elem: Elem, fresh: Minter): { rel: R
 /** The property row, filtered to ONE rowid — the correlated reads below all start here, so the column
  *  contract is stated once. */
 function propertyRow(rowid: Expr, ownerElem: Elem, fresh: Minter): { readonly rel: Rel; readonly owner: string } {
-  const { table, owner } = PROPERTIES[ownerElem];
-  const cols = propCols(owner, ownerElem === 'vertex');
-  const scan = make.scan({ id: fresh('pn'), table, alias: fresh('rpn'), channels: [], type: typeOf(...cols) });
-  return { rel: make.filter({ id: fresh('pnf'), input: scan, channels: [], type: scan.type, pred: eq(col(scan.id, 'id'), rowid) }), owner };
+  const rel = propertyRows(ownerElem, fresh, { where: (rows) => eq(col(rows, 'id'), rowid), hint: ['pn', 'rpn', 'pnf'] });
+  return { rel, owner: PROPERTIES[ownerElem].owner };
 }
 
 /**
@@ -427,7 +410,7 @@ export function propertyNode(rowid: Expr, ownerElem: Elem, fresh: Minter): Expr 
 
 /** WHICH single column of the stored property row a child body asks for. Named rather than passed as a
  *  raw string so a caller cannot spell a column this module does not carry. `meta` is VERTEX-ONLY (an
- *  edge `Property` has no meta-properties; `propCols`). `order` is the value's SORT KEY (`storedOrderKey`),
+ *  edge `Property` has no meta-properties; `PROPERTIES`). `order` is the value's SORT KEY (`storedOrderKey`),
  *  not a payload: what an ordering reads where `value` is what a stream hands onward. */
 export type PropertyRead = 'key' | 'value' | 'order' | 'vtype' | 'owner' | 'meta';
 

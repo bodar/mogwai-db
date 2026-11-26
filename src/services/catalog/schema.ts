@@ -1,7 +1,8 @@
 import * as make from '../../rel/factory.ts';
 import { col, compilerText, type Expr } from '../../rel/expr.ts';
-import { jsonMember, LABEL_OWNERS, meta, typeOf, type Minter } from '../../compiler/rel/build.ts';
-import { labelOwners, withNames } from '../../compiler/rel/names.ts';
+import { jsonMember, LABEL_OWNERS, meta, propertyScan, typeOf, type Minter } from '../../compiler/rel/build.ts';
+import type { Elem } from '../../compiler/elem.ts';
+import { labelOwners, ownedNames, withNames } from '../../compiler/rel/names.ts';
 import type { Service, RelCallSite, RelContribution } from '../spi/types.ts';
 import type { Rel, Table } from '../../rel/rel.ts';
 
@@ -76,15 +77,16 @@ const asMapRows = (input: Rel, map: Expr, fresh: Minter): Rel =>
  * appends `lid`/`name` to its input. `cols` maps `physical → output` name; the scan reads the physical
  * columns and the projection emits the output ones.
  */
-const scanAs = (
-  table: Table, cols: readonly (readonly [physical: string, out: string, type: 'int' | 'text'])[], fresh: Minter,
-): Rel => {
-  const s = make.scan({ id: fresh('ssc'), table, alias: fresh('rsc'), channels: [], type: typeOf(...cols.map(([p, , t]) => meta(p, t, t === 'text'))) });
-  return make.project({
-    id: fresh('ssp'), input: s, channels: [], type: typeOf(...cols.map(([, o, t]) => meta(o, t, t === 'text'))),
-    exprs: cols.map(([p, o]) => [o, col(s.id, p)] as const),
-  });
-};
+type Renames = readonly (readonly [physical: string, out: string, type: 'int' | 'text'])[];
+const renamed = (input: Rel, cols: Renames, fresh: Minter): Rel => make.project({
+  id: fresh('ssp'), input, channels: [], type: typeOf(...cols.map(([, o, t]) => meta(o, t, t === 'text'))),
+  exprs: cols.map(([p, o]) => [o, col(input.id, p)] as const),
+});
+const scanAs = (table: Table, cols: Renames, fresh: Minter): Rel =>
+  renamed(make.scan({ id: fresh('ssc'), table, alias: fresh('rsc'), channels: [], type: typeOf(...cols.map(([p, , t]) => meta(p, t, t === 'text'))) }), cols, fresh);
+/** A property table's rows (`propertyScan`, the one authority for its columns), renamed. */
+const propertiesAs = (kind: Elem, cols: Renames, fresh: Minter): Rel =>
+  renamed(propertyScan(kind, fresh, ['ssc', 'rsc']), cols, fresh);
 
 /** An inner join over two collision-free relations, carrying both sides' columns. */
 const innerJoin = (left: Rel, right: Rel, on: Expr, fresh: Minter): Rel =>
@@ -123,7 +125,7 @@ function vertexLabels(fresh: Minter): Rel {
  *  value's Gremlin type is its stored `vtype`; a NULL vtype (a raw/legacy insert) reports `'unknown'`,
  *  the honest answer for a value whose type the storage class alone decides. */
 function properties(fresh: Minter): Rel {
-  const vp = scanAs('vertex_properties', [['node', 'vpNode', 'int'], ['key', 'vpKey', 'text'], ['vtype', 'vpType', 'text']], fresh);
+  const vp = propertiesAs('vertex', [['node', 'vpNode', 'int'], ['key', 'vpKey', 'text'], ['vtype', 'vpType', 'text']], fresh);
   const vl = labelOwners('vertex', fresh);
   // vp → vl, FLATTENED so the next join reads one relation's columns (the file's discipline — see
   // `edgeTriples`), then → labels for the label name. A parent reads a join's OUTPUT columns through the
@@ -162,7 +164,7 @@ function edgeTriples(fresh: Minter): Rel {
   // ON reads the immediate input's OWN columns, so no reference reaches through an intermediate that the
   // emitter may have closed into a subquery.
   const endpoint = (nodeOut: string, nameOut: string): Rel => {
-    const j = withNames('labels', labelOwners('vertex', fresh), 'label', fresh);
+    const j = ownedNames('vertex', fresh);
     return make.project({
       id: fresh('ep'), input: j, channels: [], type: typeOf(meta(nodeOut, 'int'), meta(nameOut, 'text')),
       exprs: [[nodeOut, col(j.id, VERTEX_OWNER)], [nameOut, col(j.id, 'name')]],
@@ -206,7 +208,7 @@ function edgeTriples(fresh: Minter): Rel {
  *  name). This is what completes the reflected schema for edge fields — the `edge_properties → edge-field
  *  argument/payload types` the plan's §4 names — so a later increment can expose an edge's own fields. */
 function edgeProperties(fresh: Minter): Rel {
-  const ep = scanAs('edge_properties', [['edge', 'epEdge', 'int'], ['key', 'epKey', 'text'], ['vtype', 'epType', 'text']], fresh);
+  const ep = propertiesAs('edge', [['edge', 'epEdge', 'int'], ['key', 'epKey', 'text'], ['vtype', 'epType', 'text']], fresh);
   const e = labelOwners('edge', fresh);
   const epE = innerJoin(ep, e, eqExpr(col(ep.id, 'epEdge'), col(e.id, LABEL_OWNERS.edge.owner)), fresh);
   const onE = make.project({

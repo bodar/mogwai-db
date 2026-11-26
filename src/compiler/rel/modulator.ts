@@ -8,7 +8,7 @@ import { PER_ROW, STATIC, staticTypeOf, UNKNOWN, type ScalarType } from '../../s
 import type { IRStep } from '../ir/step.ts';
 import { ALWAYS_PRODUCTIVE, caseWhen, freshTraverserRow, hostPresence, hostTag, mayBeAbsent, statedPresence, type ChildHost, type ChildSeam, type ChildValue, type Presence } from './child.ts';
 import { fieldCol, fieldNamed, framingCols, type RelFraming } from './framing.ts';
-import { and, eq, firstOf, jsonField, jsonOf, mapNode, meta, PROPERTIES, storedPayload, storedValueOn, typedNode, typedNodeOnce, onceTyped, typeOf, familyKey, type Minter } from './build.ts';
+import { and, eq, firstOf, jsonField, jsonOf, mapNode, meta, propertyRows, storedPayload, storedValueOn, typedNode, typedNodeOnce, onceTyped, typeOf, familyKey, type Minter } from './build.ts';
 import type { GraphSource } from './source.ts';
 import { storedCompareOn, storedCompareOnce } from './predicate.ts';
 import { aliasGuard, aliasMemberOf, aliasProjection, liveAliases, readFraming, type Pop } from './alias.ts';
@@ -969,15 +969,7 @@ export function byField(
  *  spelling of the column contract would open (`propertyRow` in `property.ts` is the sibling keyed by
  *  ROWID rather than `(owner, key)`). */
 function propertyRowFor(host: Extract<ChildHost, { kind: 'element' }>, key: string, fresh: Minter): Rel {
-  const { table, owner } = PROPERTIES[host.elem];
-  const scan = make.scan({
-    id: fresh('vp'), table, alias: fresh('rp'), channels: [],
-    type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),
-  });
-  const mine = make.filter({
-    id: fresh('f'), input: scan, channels: [], type: scan.type,
-    pred: and(eq(col(scan.id, owner), host.id), eq(col(scan.id, 'key'), compilerText(key))),
-  });
+  const mine = propertyRows(host.elem, fresh, { of: host.id, where: (rows) => eq(col(rows, 'key'), compilerText(key)), hint: ['vp', 'rp'] });
   // Every reader here hands the value onward (a `by()` value, a `values(k).is(…)` survivor), so `value` is
   // the row's PAYLOAD (`storedPayload`) — a BigDecimal's own digits, as `values(k)` reads them. `stored` and
   // `exact` are its two columns, for a `{t,v}` node that reads the digits in one arm (`typedNode`).

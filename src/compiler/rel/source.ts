@@ -11,7 +11,7 @@ import { CONSTANT } from './predicate.ts';
 import { valueIsKind } from './receiver.ts';
 import type { ValueEvidence } from './tag.ts';
 import { propertyRelation } from './property.ts';
-import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, LABEL_OWNERS, existsOf, meta, NODE_COLS, PROPERTIES, renumber, storedOrderKey, storedPayload, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
+import { and, carriedCols, EDGE_COLS, elementCols, eq, firstOf, jsonEachSet, JSON_NUMERIC_TYPES, JSON_TEXT_TYPES, jsonOf, keyMembership, LABEL_OWNERS, existsOf, meta, NODE_COLS, PROPERTIES, propertyRows, propertyScan, renumber, storedOrderKey, storedPayload, storedValue, typedNode, typeOf, VALUEMAP_PAIR, type Minter } from './build.ts';
 import { labelOwners, nameIds, nameOf, ownedNames, withNames } from './names.ts';
 
 // ---------- GraphSource: one traversal vocabulary over two physical graph shapes ----------
@@ -460,15 +460,7 @@ export function scanColumnOf(
 /** The FIRST stored property row at `key` of the element at `id` — a vertex key may hold several values and
  *  INSERTION ORDER (the rowid) names the first (`PropertyValueStep`) — read as `pick` of the row's columns. */
 function firstPropertyRow(kind: Elem, id: Expr, key: string, fresh: Minter, pick: (value: Expr, vtype: Expr, exact: Expr) => Expr): Expr {
-  const { table, owner } = PROPERTIES[kind];
-  const scan = make.scan({
-    id: fresh('vp'), table, alias: fresh('rp'), channels: [],
-    type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),
-  });
-  const mine = make.filter({
-    id: fresh('f'), input: scan, channels: [], type: scan.type,
-    pred: and(eq(col(scan.id, owner), id), eq(col(scan.id, 'key'), compilerText(key))),
-  });
+  const mine = propertyRows(kind, fresh, { of: id, where: (rows) => eq(col(rows, 'key'), compilerText(key)), hint: ['vp', 'rp'] });
   return firstOf(mine, pick(col(mine.id, 'value'), col(mine.id, 'vtype'), col(mine.id, 'exact')), col(mine.id, 'id'), fresh);
 }
 
@@ -490,23 +482,21 @@ export const BaseGraph: GraphSource = {
     ({ kind: 'in-query', expr: labelCol, plan: nameIds('labels', labels, fresh), negated: false }),
 
   propertyValues: (input, kind, keys, fresh) => {
-    const { table, owner } = PROPERTIES[kind];
+    const { owner } = PROPERTIES[kind];
     // The property ROW id (`vertex_properties.id` — an INTEGER PRIMARY KEY assigned at write time) is
     // the multi-valued FAN-OUT's insertion order, which is the order a Vertex `PropertyValueStep`
     // iterates (TinkerPop stores a key's values in an insertion-ordered set). Carried as `pord` so the
     // `values` step can refine the arriving `encounter` by it — see `lower.ts`. When no encounter is
     // arriving the assembler fuses this projection away, so an ordinary `values()` is byte-unchanged.
-    const props = make.scan({
-      id: fresh('vp'), table, alias: fresh('rp'), channels: [],
-      type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true), meta('id', 'int')),
-    });
+    const props = propertyScan(kind, fresh, ['vp', 'rp']);
     // A JOIN, not an EXISTS: `values()` emits one traverser PER matching property, so multiplying the
     // row is the answer. `ordered` so the stream drives and `vp_node_key(node,key)` is probed rather
-    // than the planner leading with a whole-graph `key=?` scan. `pord` maps positionally to the props
-    // scan's last column (`id`) — the emitter's join select is `[left…, right…]` by position.
+    // than the planner leading with a whole-graph `key=?` scan. The join's type is DERIVED from both
+    // sides' (the emitter's join select is `[left…, right…]` by position), with the scan's `id` renamed
+    // `pord` by name — an element relation already carries an `id`.
     const joined = make.join({
       id: fresh('j'), left: input, right: props, join: 'inner', ordered: true, channels: input.channels,
-      type: typeOf(...elementCols(input.channels), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true), meta('pord', 'int')),
+      type: typeOf(...input.type.cols, ...props.type.cols.map((c) => (c.name === 'id' ? meta('pord', c.type, c.nullable) : c))),
       on: and(eq(col(props.id, owner), col(input.id, 'id')), keyMembership(col(props.id, 'key'), keys)),
     });
     const base = make.project({
@@ -586,11 +576,8 @@ export const BaseGraph: GraphSource = {
   },
 
   hasPropertyPredicate: (kind, id, key, valuePred, fresh) => {
-    const { table, owner } = PROPERTIES[kind];
-    const props = make.scan({
-      id: fresh('vp'), table, alias: fresh('rp'), channels: [],
-      type: typeOf(meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true)),
-    });
+    const { owner } = PROPERTIES[kind];
+    const props = propertyScan(kind, fresh, ['vp', 'rp']);
     // The property row's own `vtype` is in scope here, so an ordering comparison gets the vtype-aware
     // key — the whole reason the value predicate is a callback the caller supplies.
     const matches = valuePred ? valuePred(col(props.id, 'value'), col(props.id, 'vtype'), true) : undefined;
@@ -693,15 +680,7 @@ export const BaseGraph: GraphSource = {
     firstPropertyRow(kind, id, key, fresh, (value, vtype, exact) => ordering ? storedOrderKey(value, vtype) : storedPayload(value, exact)),
 
   valueMapPairs: (kind, id, keys, fresh) => {
-    const { table, owner } = PROPERTIES[kind];
-    const props = make.scan({
-      id: fresh('vm'), table, alias: fresh('rvm'), channels: [],
-      type: typeOf(meta('id', 'int'), meta(owner, 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),
-    });
-    const mine = make.filter({
-      id: fresh('vf'), input: props, channels: [], type: props.type,
-      pred: and(eq(col(props.id, owner), id), keyMembership(col(props.id, 'key'), keys)),
-    });
+    const mine = propertyRows(kind, fresh, { of: id, where: (rows) => keyMembership(col(rows, 'key'), keys), hint: ['vm', 'rvm', 'vf'] });
     // The key's values as an ordered array of `{t,v}` nodes (insertion order = rowid), and the key's
     // ordinal as the earliest rowid — the shape `elementValueMap` turns into a list value or takes the
     // last of for a flat map.

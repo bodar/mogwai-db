@@ -4,7 +4,7 @@ import type { Rel } from '../../rel/rel.ts';
 import type { ColMeta, RelId, SqlType } from '../../rel/types.ts';
 import type { Elem } from '../elem.ts';
 import {
-    byEncounter, coalesce, EDGE_COLS, EMPTY_ARRAY, EMPTY_OBJECT, eq, jsonOf, meta, NODE_COLS, typeOf, typedNode, typedNodeDetached,
+    byEncounter, coalesce, EDGE_COLS, EMPTY_ARRAY, EMPTY_OBJECT, eq, jsonOf, meta, NODE_COLS, propertyRows, typeOf, typedNode, typedNodeDetached,
     type Minter,
 } from './build.ts';
 import { nameOf, ownedNames } from './names.ts';
@@ -133,11 +133,7 @@ function nodeExternalId(rowid: Expr, fresh: Minter): Expr {
  * is stated (see the module note).
  */
 function vertexProps(node: Expr, fresh: Minter, detached = false): Expr {
-  const vp = make.scan({
-    id: fresh('wvp'), table: 'vertex_properties', alias: fresh('rwp'), channels: [],
-    type: typeOf(meta('id', 'int'), meta('node', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('meta', 'blob', true), meta('exact', 'text', true)),
-  });
-  const mine = make.filter({ id: fresh('wpf'), input: vp, channels: [], type: vp.type, pred: eq(col(vp.id, 'node'), node) });
+  const mine = propertyRows('vertex', fresh, { of: node, hint: ['wvp', 'rwp', 'wpf'] });
   const exact = col(mine.id, 'exact');
   // The DETACHED path emits `{t,v,vpid,meta}` so a landed subgraph reconstructs a full
   // `DetachedVertexProperty` (its id + meta-properties); an ordinary read stays `{t,v}`.
@@ -176,11 +172,7 @@ function vertexProps(node: Expr, fresh: Minter, detached = false): Expr {
  * single by spec, which is the same rule that gave `edge_properties` no `meta` column.
  */
 function edgeProps(edge: Expr, fresh: Minter): Expr {
-  const ep = make.scan({
-    id: fresh('wep'), table: 'edge_properties', alias: fresh('rwe'), channels: [],
-    type: typeOf(meta('id', 'int'), meta('edge', 'int'), meta('key', 'text'), meta('value', 'any', true), meta('vtype', 'text', true), meta('exact', 'text', true)),
-  });
-  const mine = make.filter({ id: fresh('wef'), input: ep, channels: [], type: ep.type, pred: eq(col(ep.id, 'edge'), edge) });
+  const mine = propertyRows('edge', fresh, { of: edge, hint: ['wep', 'rwe', 'wef'] });
   const bag = make.aggregate({
     id: fresh('web'), input: mine, channels: [], type: typeOf(meta('props', 'json', true)),
     groupBy: [],

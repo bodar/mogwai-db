@@ -2087,7 +2087,7 @@ Each item is measured from N≈1k to N≈8k (linear is about 8×), or it exceeds
 #### Six property-table insert builders (`propertyRowsInsert`)
 - **Area:** compiler
 - **Reach:** rare
-- **Problem:** `rel/write.ts` has six builders for PROPERTY_TABLE inserts.
+- **Problem:** `rel/write.ts` has six builders for property-table inserts.
 - **Fix:** Use one builder that emits byte-identical SQL. It also absorbs the `json_extract` helper from nr-fu-mapentry-props.
 - **Where:** `src/compiler/rel/write.ts`
 
