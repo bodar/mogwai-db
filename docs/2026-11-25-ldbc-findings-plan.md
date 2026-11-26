@@ -547,10 +547,8 @@ Major first. Minor items are kept only when they are cheap and concrete.
   Growth is linear and the slowdown (about 1.6×) is under the 2× bar. But the SQL doubles, and an
   expression used N times must be computed once. The same commit adds `sharedNode`, a peephole that
   finds the label's `.v`/`.t` pair again by string suffix and `JSON.stringify` equality. That is a second
-  recognizer of the read that `aliasEntryNode` (`src/compiler/rel/alias.ts:122`) already owns. Fix (one
-  item): let the producer `aliasOperandAt` (`alias.ts:111`) give `TypedOperand` its entry node and its
-  tag, as `ChildValue.node` does for a stored read. The guard then reads the tag column. Delete
-  `sharedNode`.
+  recognizer of the label's history read. ✅ Fixed by round-5 item 2 (`2479f03e`): both recognizers
+  are deleted, and `aliasEntryAt` (`src/compiler/rel/alias.ts`) is the one reader of the entry.
 - **MAJOR — two copies of the comparability bucket table** (`src/compiler/rel/predicate.ts`).
   `sameBucket` lists `TEXT_VTYPES` and `OWN_BUCKET_VTYPES` by hand. `comparableTheta` (about l.717)
   spells the same partition as a 7-arm CASE, which mirrors `kindOf` in `orderability.ts`. The two copies
@@ -608,9 +606,20 @@ Order: wrong answer, then the SQL doubling, then cheap fixes, then byte-stable r
    `aliasPred` (`src/compiler/rel/lower.ts`) folds each leaf as `{ cmp, guard }`, conjoins the guards
    outside, and negates a two-valued compare. `NEGATED_CMP` is deleted. Witnesses are in
    `test/L4-addendum/nested-operand-comparability.feature`. Remains: nothing.
-2. **The label operand carries its node and its tag from the producer** (MAJOR follow-up above). Delete
-   `sharedNode`. Acceptance: the SQL for `has('age', gt(select('e')))` returns to about 3 KB, and the
-   1k / 8k timings return to the pre-`e35f833a` values.
+2. ✅ **LANDED (`2479f03e`, round-5 item 2), except the SQL size target.** The label's history entry is
+   read in one place, `aliasEntryAt` (`src/compiler/rel/alias.ts`). The producers that know the column
+   hand it on: `aliasOperandAt` puts it on `TypedOperand.node`, and a bare `select(label)` yields it as
+   `ChildValue.labelEntry`. `overOperand` binds the node once. `sharedNode` and the `aliasEntryNode`
+   path match are deleted. The same commit fixes a wrong answer: an untagged label value (an untyped
+   literal injected beside a typed one) made the guard read a NULL tag and drop every row. The operand
+   now infers the tag, as `aliasOperandAt` does. Witnesses: `test/compiler/label-operand-entry.exec.test.ts`
+   and one scenario in `test/L4-addendum/nested-operand-comparability.feature`. Remains:
+   - The inferred tag makes the guard SQL about 330 B larger per per-row label site (6386 → 7050 B).
+     Item 3 can win it back: a bucket lookup that reads the tag once drops the inferred-tag arm.
+   - The SQL is not back to about 3 KB. That needs the label history document to stop being inlined in
+     both the semijoin and the residual EXISTS. This is outside the item. The emit spike was not tried.
+   - `local(V().has(gt(select(…))).limit(1))` is cubic, also on the base. Recorded as
+     `reresource-label-operand-limit`.
 3. **One bucket table for ordering comparability.** Extract `bucketGuard(typeA, typeB)` from `sameBucket`.
    Then `comparableTheta` = `bucketGuard(typeA, typeB)` AND `op(storedCompareOn(typeA)(valA),
    storedCompareOn(typeB)(valB))`. `storedCompareOn` already keys datetime and duration through
