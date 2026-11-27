@@ -45,7 +45,7 @@ import { CoercionDeferral, foldConstantCoercions, injectValueTypes, isDateDiffCo
 import {
     and, byEncounter, carriedCols, elementCols, eq, fenced, fencedWhereSelfContained, jsonEachSet, jsonField, jsonOf,
     keptBy, labelSetArgs,
-    meta, minter,
+    meta, minter, ones,
     payloadCols, propertyKeyArgs, renumber, rowNumberWindow,
     typedNode, typeOf, withPayload, originOf, presenceFenced,
     type Minter, withSubqueryColumns,
@@ -1375,7 +1375,7 @@ function drainRaisingSite(step: IRStep, collections: Collections, fresh: Minter)
   const never = disjoin(rel.type.cols
     .map((column): Expr => ({ kind: 'binary', op: '=', left: { kind: 'call', fn: 'typeof', args: [col(rel.id, column.name)] }, right: compilerText('-') })))!;
   const read = make.filter({ id: fresh('drf'), input: rel, channels: rel.channels, type: rel.type, pred: never });
-  const one = make.project({ id: fresh('drp'), input: read, channels: [], type: typeOf(meta('one', 'int')), exprs: [['one', compilerInt(1)]] });
+  const one = ones(read, fresh);
   const node = make.limit({ id: fresh('drl'), input: one, channels: [], type: one.type, count: compilerInt(1) });
   return { name: `${fresh('dr')}`, node, guard: { message: 'internal: a side-effect drain matched a row', raiseWhen: 'rows' } };
 }
@@ -2848,10 +2848,6 @@ const unionStarter = (ordered: boolean, fresh: Minter): FramedRel => ({
   rel: literalSource(fresh('ust'), [[compilerNull()]], [meta('v', 'any', true)], ordered),
   framing: { kind: 'scalar', type: UNKNOWN },
 });
-
-/** The one-row input a SOURCE write (`addV`/`addE`/`mergeV`/`mergeE`) multiplies: one row means one write. */
-const oneRow = (fresh: Minter): Rel =>
-  make.values({ id: fresh('one'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
 
 function injectSource(steps: readonly IRStep[], ordered: boolean, fresh: Minter): { rel: Rel; framing: RelFraming; at: number } | null {
   const step = steps[0]!;
@@ -5226,7 +5222,7 @@ function lowerChainFrom(steps: readonly IRStep[], opts: Lowering, fresh: Minter,
   // `addE` at the SOURCE is one edge with both ends named — the input is a one-row `Values` and the
   // endpoints carry the whole answer, so the mid-chain lowering runs unchanged.
   if (first.name === 'addE') {
-    const one = oneRow(fresh);
+    const one = make.oneRow(fresh('one'));
     const added = addedEdges(one, 'vertex', steps, 0, NO_ALIASES, ctx, fresh);
     if (!added) return null;
     return afterWrite(ctx.writes, one, steps, 0, added.at, added.effects.bindings, ctx.params, fresh,
@@ -5234,7 +5230,7 @@ function lowerChainFrom(steps: readonly IRStep[], opts: Lowering, fresh: Minter,
   }
 
   if (first.name === 'addV') {
-    const one = oneRow(fresh);
+    const one = make.oneRow(fresh('one'));
     const added = addedVertices(one, steps, 0, ctx, fresh);
     if (!added) return null;
     return afterWrite(ctx.writes, one, steps, 0, added.at, added.effects.bindings, ctx.params, fresh,
@@ -5244,7 +5240,7 @@ function lowerChainFrom(steps: readonly IRStep[], opts: Lowering, fresh: Minter,
   // `mergeV` AT THE SOURCE takes the same one-row input the two creations do, and for the same reason:
   // the input is a MULTIPLIER, so one row means the search's answer is emitted once.
   if (first.name === 'mergeV' || first.name === 'mergeE') {
-    const one = oneRow(fresh);
+    const one = make.oneRow(fresh('one'));
     // A start step has no incoming traverser at all — nothing a `select(k)` could read a Map entry from.
     const merged = mergedElements(one, steps, 0, NO_ALIASES, ctx, fresh);
     if (!merged) return null;

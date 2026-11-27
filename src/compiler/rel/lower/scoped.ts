@@ -118,7 +118,7 @@ function seedRow(rel: Rel, scoped: Rel, fresh: Minter, positioned: boolean): Rel
   const channels = positioned ? withChannel(own, ENCOUNTER) : own;
   const named = (name: string): ColMeta => rel.type.cols.find((column) => column.name === name)!;
   const cols = [...payloadCols(rel), ...channels.map((channel) => (channel === ENCOUNTER ? meta(ENCOUNTER.col, 'int') : named(channel.col)))];
-  const unit = make.values({ id: fresh('su'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
+  const unit = make.oneRow(fresh('su'));
   return make.project({
     id: fresh('ss'), input: unit, channels, type: typeOf(...cols),
     exprs: cols.map((column) => [column.name, column.name === ENCOUNTER.col ? compilerInt(0) : col(scoped.id, column.name)] as const),

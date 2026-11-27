@@ -1,4 +1,4 @@
-import type { Expr } from './expr.ts';
+import { compilerInt, type Expr } from './expr.ts';
 import { brandRel, type Rel, type RelInit, type RelKind, type RelNode, type Table } from './rel.ts';
 import type { RelId, SortTerm } from './types.ts';
 import { checkAggregateShape, checkJoinShape, checkRecursiveHeader, checkValuesShape } from './structure.ts';
@@ -33,6 +33,11 @@ export const values = (init: WithId<'values'>): Node<'values'> => {
   checkValuesShape(init);
   return node('values', { ...init, rows: freeze(init.rows.map((row) => freeze([...row]))) });
 };
+/** THE ONE-ROW RELATION — `(VALUES (1))`, one column `n`. It is the unit a constant row is projected
+ * over (a seeded child root, a per-row LET, a guarded scalar) and the multiplier of a SOURCE write (one row
+ * means one write). Every such site builds it here, so its shape has one authority; SQLite folds it. */
+export const oneRow = (id: RelId): Node<'values'> =>
+  values({ id, channels: [], type: { cols: [{ name: 'n', type: 'int', nullable: false }] }, rows: [[compilerInt(1)]] });
 /** A reference to a `Plan` binding (§3.0) — a named CTE when the binding is a `Rel`, an earlier
  * statement's retained `RETURNING` rows when it is a `Stmt`. The one naming mechanism, so it
  * replaces both `PriorResult` and the `Naming` side-table. */

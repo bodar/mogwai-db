@@ -1034,7 +1034,7 @@ function hostSelfRow(
   // scalar's value may be — a productive null is a value.
   const cols = framingCols(framing)?.map((column) => (framing.kind === 'elements' ? { ...column, nullable: false } : column));
   if (!cols?.length) return null;
-  const unit = make.values({ id: fresh('u'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
+  const unit = make.oneRow(fresh('u'));
   const selfRow = make.project({
     id: fresh('slf'), input: unit, channels: [], type: typeOf(...cols),
     exprs: cols.map((column) => [column.name, self.col(column.name)] as const),
@@ -2088,7 +2088,7 @@ function scalarChildValue(body: readonly IRStep[], host: ChildHost, given: Chain
 }
 
 function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind: 'scalar' }> & { readonly entry: NonNullable<Extract<ChildHost, { kind: 'scalar' }>['entry']> }, ctx: ChainCtx, fresh: Minter): ChildValue | null {
-  const unit = make.values({ id: fresh('eu'), channels: [], type: typeOf(meta('one', 'int')), rows: [[compilerInt(1)]] });
+  const unit = make.oneRow(fresh('eu'));
   const seeded = make.project({
     id: fresh('es'), input: unit, channels: [], type: typeOf(meta('mk', 'json', true), meta('mv', 'json', true)),
     exprs: [['mk', host.entry.key], ['mv', host.entry.val]],
@@ -2172,7 +2172,7 @@ function mapEntryChild(body: readonly IRStep[], host: Extract<ChildHost, { kind:
  * still at most one row; the `Limit` says so to `atMostOneRow`.
  */
 function perRowCollectionChild(body: readonly IRStep[], host: Extract<ChildHost, { kind: 'scalar' }> & { readonly vtype: Expr }, ctx: ChainCtx, fresh: Minter): ChildValue | null {
-  const unit = make.values({ id: fresh('pu'), channels: [], type: typeOf(meta('one', 'int')), rows: [[compilerInt(1)]] });
+  const unit = make.oneRow(fresh('pu'));
   const seeded = make.project({
     id: fresh('ps'), input: unit, channels: [], type: typeOf(meta('v', 'any', true), meta('vtype', 'text', true)),
     exprs: [['v', host.value], ['vtype', host.vtype]],

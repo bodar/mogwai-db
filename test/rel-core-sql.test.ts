@@ -5,7 +5,7 @@ import { emitQuery } from '../src/rel/emit.ts';
 import { planOf } from '../src/rel/plan.ts';
 import { col, compilerInt, compilerNull, compilerText, lit } from '../src/rel/expr.ts';
 import type { Expr } from '../src/rel/expr.ts';
-import { aggregate, distinct, filter, join, limit, project, recursive, scan as scanRel, sort, union, values, window } from '../src/rel/factory.ts';
+import { aggregate, distinct, filter, join, limit, oneRow, project, recursive, scan as scanRel, sort, union, values, window } from '../src/rel/factory.ts';
 import type { Channels } from '../src/channels.ts';
 import type { Rel } from '../src/rel/rel.ts';
 import { relId } from '../src/rel/types.ts';
@@ -46,6 +46,14 @@ describe('RelIR relational-core SQL', () => {
     expect(emitted.sql).toBe('SELECT v.column1 AS id, v.column2 AS name FROM (VALUES (1, NULL), (?, ?)) v');
     expect(emitted.binds).toEqual([1, null]);
     expect(() => compilerInt(1.5)).toThrow('safe integer');
+  });
+
+  test('oneRow is the one-row, one-column constant relation, and it spends no bind', () => {
+    const one = oneRow(relId('u'));
+    expect(one.type.cols).toEqual([{ name: 'n', type: 'int', nullable: false }]);
+    const emitted = emitQuery(planOf(one));
+    expect(emitted.binds).toEqual([]);
+    expect(new Database(':memory:').query(emitted.sql).all()).toEqual([{ n: 1 }]);
   });
 
   test('pins the rendering of every relational node kind', () => {

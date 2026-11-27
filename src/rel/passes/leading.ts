@@ -108,7 +108,7 @@ const meta = (name: string, type: ColMeta['type'], nullable = false): ColMeta =>
 function leadingProbe(read: LeadingRead, mint: Minter): Rel {
   const first = make.limit({ id: mint.id('spl'), input: read.kept, channels: read.kept.channels, type: read.kept.type, count: compilerInt(1) });
   const any: Expr = read.guarded({ kind: 'scalar', plan: make.project({ id: mint.id('spk'), input: first, channels: [], type: typeOf(meta('k', 'int', true)), exprs: [['k', col(first.id, read.key)]] }) }, meta('k', 'int', true));
-  const unit = make.values({ id: mint.id('spu'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
+  const unit = make.oneRow(mint.id('spu'));
   const hit = make.filter({ id: mint.id('spf'), input: unit, channels: [], type: unit.type, pred: isNot(any, compilerNull()) });
   return make.project({ id: mint.id('sp'), input: hit, channels: [], type: typeOf(meta('one', 'any', true)), exprs: [['one', col(hit.id, 'n')]] });
 }
@@ -220,7 +220,7 @@ function leadingRead(base: Rel, mint: Minter): LeadingRead | null {
   const guard = conjoin(guards);
   const guarded = (value: Expr, type: ColMeta): Expr => {
     if (!guard) return value;
-    const unit = make.values({ id: mint.id('clu'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
+    const unit = make.oneRow(mint.id('clu'));
     const held = make.filter({ id: mint.id('clg'), input: unit, channels: [], type: unit.type, pred: guard });
     return { kind: 'scalar', plan: make.project({ id: mint.id('clq'), input: held, channels: [], type: typeOf({ ...type, nullable: true }), exprs: [[type.name, value]] }) };
   };

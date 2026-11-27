@@ -1408,7 +1408,7 @@ export function withPreChecks<T extends { readonly effects?: readonly Binding[] 
       });
       return { kind: 'exists', plan: found, negated: true };
     });
-    const row = make.values({ id: fresh('pv'), channels: [], type: typeOf(meta('n', 'int')), rows: [[compilerInt(1)]] });
+    const row = make.oneRow(fresh('pv'));
     const node = make.filter({
       id: fresh('pf'), input: row, channels: [], type: row.type,
       // Non-empty: both `freshIdsAtStart` callers register only a non-empty id set.
