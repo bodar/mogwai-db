@@ -17,7 +17,7 @@ import { gremlinTypeOf, propertyValueBind, type CanonicalType, type TypeNode } f
 import { propertyFtsText } from '../../services/fts-index.ts';
 import { constFromNested, Deferral, onCreateOverrideMessage, parseProperty, readCardinality, type MergeMaps, type MergeSpec, type MetaPropSpec, type ParsedProperty, type PropSpec } from '../ir/write-args.ts';
 import { correlatedMapKey, MAP_COL, PAIR, pairsOf, pairSide } from './map.ts';
-import { nodeIsNull } from './tag.ts';
+import { nodeIsNull, STORAGE, totalTag, type ValueEvidence } from './tag.ts';
 import type { MapOf } from '../../sql/kernel/render.ts';
 import {
   ADD_LABEL_ITEM_NAME, ADD_LABEL_MEMBER_NAME, ADD_LABEL_NAME, collectionMembers, constantName, DROP_LABEL_ITEM_NAME, DROP_LABEL_MEMBER_NAME, DROP_LABEL_NAME, KEY_NAME,
@@ -803,37 +803,51 @@ interface RuntimeSite {
 
 /** The columns every runtime value relation is normalized to, so the statements below read ONE shape
  *  whichever child arm produced it: the traverser (`o`), its value and type, and the child's own order
- *  (`sq`) — which is what "the FIRST result" and the per-traverser insertion order are relative to. */
+ *  (`sq`) — which is what "the FIRST result" and the per-traverser insertion order are relative to.
+ *  Its `vt` is a TOTAL tag (`totalTag`): NULL only for a NULL value. The writer stores it as the row's
+ *  `vtype`, and a range `has(k, gt(x))` compares by that tag, so a NULL tag on a present value would make
+ *  the row invisible to it. */
 const VALUE_ROW_COLS: readonly ColMeta[] = [meta('o', 'int'), meta('v', 'any', true), meta('vt', 'text', true), meta('sq', 'int', true)];
 
 /**
- * The Gremlin type a scalar framing STATES for every row, as the `vtype` to store beside the value — or
- * NULL, which stores the value untyped so it frames by its storage class.
+ * The EVIDENCE a scalar framing gives for a value row's `vt` — the type to store beside the value.
  *
- * Only where that statement and the stored form agree by construction: a NATIVE (non-`text`) numeric or
- * string, whose SQLite storage class is already that type's — `count()` is a Long however small it is,
- * and storing it untyped would read back as an Int. Any other static tag (a datetime, an exact decimal
- * tail) names an encoding a computed value is not promised to be in, so it is left to inference rather
- * than asserted.
+ * A stated static tag is used only where that statement and the stored form agree by construction: a
+ * NATIVE (non-`text`) numeric or string, whose SQLite storage class is already that type's. `count()` is a
+ * Long however small it is, and storing it as inferred would read back as an Int. A framing that states
+ * NO type is STORAGE evidence: `framedTag` completes the tag from the value's storage class
+ * (`inferredVtype`), the same inference the wire applies to an untagged value, so the read-back answer
+ * does not change.
  */
 const STATED_VTYPES: ReadonlySet<string> = new Set(['byte', 'short', 'int', 'long', 'bigint', 'double', 'float', 'string']);
 /** The classes whose decimal-TEXT carrier IS their stored form — a wide `long`/`BigInteger` literal
  *  stores exactly that text beside its tag (`storedScalar`, `gremlin/types.ts`). */
 const STATED_TEXT_VTYPES: ReadonlySet<string> = new Set(['long', 'bigint']);
 /**
- * ...and `null` — DECLINE — for any other static tag. Storing such a value untyped did not leave it to
- * inference; it RETYPED it: a NULL `vtype` reads back by storage class, so a computed `Byte`/`Short`, a
+ * ...and `null` — DECLINE — for any other static tag. Storing such a value with its storage-class tag
+ * would RETYPE it: the storage class reads back, so a computed `Byte`/`Short`, a
  * `Date` (epoch millis) or a `Boolean` (0/1) came back an `Integer`, and a wide `long` carried as decimal
  * TEXT came back a `String` (`property('n', __.values('age').asNumber(GType.BYTE))`). The source's type
  * is carried until something naturally changes it (§6·7), and a write is not such a thing. A runtime KEY
- * or LABEL (`asKey`) is never stored as a value — its type check reads the framing itself (`runtimeNameRows`) — so
- * it takes no tag rather than declining.
+ * or LABEL (`asKey`) is never stored as a value — its type check reads the framing itself
+ * (`runtimeNameRows`) — so it takes storage evidence rather than declining.
  */
-const scalarVtype = (framing: RelFraming, asKey = false): Expr | null => {
-  if (framing.kind !== 'scalar' || framing.type.kind !== 'static') return compilerNull('text');
+const scalarVtype = (framing: RelFraming, asKey = false): ValueEvidence | null => {
+  if (framing.kind !== 'scalar' || framing.type.kind !== 'static') return STORAGE;
   const { type, text } = framing.type;
-  if ((text ? STATED_TEXT_VTYPES : STATED_VTYPES).has(type)) return compilerText(type);
-  return asKey ? compilerNull('text') : null;
+  if ((text ? STATED_TEXT_VTYPES : STATED_VTYPES).has(type)) return { kind: 'static', tag: type };
+  return asKey ? STORAGE : null;
+};
+
+/**
+ * A framing's value-row `vt` over `value`: the TOTAL tag of `scalarVtype`'s evidence (`totalTag`), so a
+ * stated tag stays a literal and storage evidence is the value's storage class. `null` declines. A runtime
+ * KEY's `vt` is never stored — its check reads the framing — so there storage evidence stays untagged.
+ */
+const framedTag = (framing: RelFraming, value: Expr, asKey = false): Expr | null => {
+  const evidence = scalarVtype(framing, asKey);
+  if (!evidence) return null;
+  return asKey && evidence.kind === 'storage' ? compilerNull('text') : totalTag(evidence, value);
 };
 
 /** The site of an ORDINARY `property()` step over `owners` — the body reads the element it writes. The
@@ -1597,7 +1611,7 @@ function resolveValueRows(
     const typed = rows.rel.type.cols.some((column) => column.name === 'vtype');
     const reduced = rows.framing.result === 'number' && rows.rel.type.cols.some((column) => column.name === 'vt');
     const encounter = rows.rel.channels.find((channel) => channel.role === 'encounter');
-    const vt = typed ? col(rows.rel.id, 'vtype') : reduced ? col(rows.rel.id, 'vt') : scalarVtype(rows.framing, asKey);
+    const vt = typed ? col(rows.rel.id, 'vtype') : reduced ? col(rows.rel.id, 'vt') : framedTag(rows.framing, col(rows.rel.id, 'v'), asKey);
     if (!vt) return null;
     return {
       rel: make.project({
@@ -1614,9 +1628,10 @@ function resolveValueRows(
   const produced = child.scalar(body, host);
   if (!produced || produced.framing.kind !== 'scalar' || produced.yields !== 'one' || produced.present === 'unknown') return null;
   // A NUMERIC reducer's `vt` is a Gremlin type name like any other tag (`REDUCED_TYPE`).
-  const vt = produced.vtype
-    ?? scalarVtype(produced.framing, asKey);
-  if (!vt) return null;
+  // Without a per-row tag the framing's tag is completed over the KEPT value column below, so a
+  // correlated value is not spelled again inside its own type test.
+  if (!produced.vtype && !scalarVtype(produced.framing, asKey)) return null;
+  const vt = produced.vtype ?? compilerNull('text');
   // A STATED presence (`{ when }`) is a host-scope predicate: projected beside the value and filtered on,
   // so a NULL that survives it is a real null the writer applies as a removal, never a silent skip.
   const stated = typeof produced.present === 'object' ? produced.present : undefined;
@@ -1629,7 +1644,11 @@ function resolveValueRows(
     : make.filter({ id: fresh('rf'), input: valued, channels: [], type: valued.type,
       pred: stated ? statedPresence({ ...stated, when: col(valued.id, 'pw') }, col(valued.id, 'v')) : presenceOf('value-nullness', col(valued.id, 'v'))! });
   return {
-    rel: make.project({ id: fresh('rv'), input: kept, channels: [], type: typeOf(...VALUE_ROW_COLS), exprs: VALUE_ROW_COLS.map((column) => [column.name, col(kept.id, column.name)] as const) }),
+    rel: make.project({
+      id: fresh('rv'), input: kept, channels: [], type: typeOf(...VALUE_ROW_COLS),
+      exprs: VALUE_ROW_COLS.map((column) => [column.name, column.name === 'vt' && !produced.vtype
+        ? framedTag(produced.framing, col(kept.id, 'v'), asKey)! : col(kept.id, column.name)] as const),
+    }),
     mayBeMulti: false,
     framing: produced.framing,
     // A value-nullness body's NULL was filtered as absent, so no NULL row is left to refuse.
@@ -2173,7 +2192,7 @@ function mapFormStatements(
     const typeCol = cols.find((column) => column.name !== 'v');
     const value = col(rel.id, fieldCol(field.prefix, 'v'));
     const vt = typeCol && typeCol.name === 'vtype' ? col(rel.id, fieldCol(field.prefix, 'vtype'))
-      : typeCol && typeCol.name === 'vt' ? col(rel.id, fieldCol(field.prefix, 'vt')) : scalarVtype(field.framing);
+      : typeCol && typeCol.name === 'vt' ? col(rel.id, fieldCol(field.prefix, 'vt')) : framedTag(field.framing, value);
     if (!vt) return false;
     const entry = make.project({
       id: fresh('mf'), input: rel, channels: [], type: typeOf(...VALUE_ROW_COLS, meta('k', 'text')),
@@ -2311,6 +2330,7 @@ function armValueWriteCorrelated(
   // A STATED presence (`{ when }`, a re-sourced `__.V()…` value) may carry a productive null, which the
   // value-nullness filter below would skip where the reference removes the key — declined.
   if (!produced || produced.framing.kind !== 'scalar' || produced.present === 'unknown' || typeof produced.present === 'object') return false;
+  if (!produced.vtype && !scalarVtype(produced.framing)) return false;
   // The value AT the driver, carrying the driver's `ord` so it lands on the right merged element. An
   // unproductive driver (a NULL value) is filtered out (the reference's 0-result skip).
   const projectedVals = make.project({
@@ -2328,7 +2348,10 @@ function armValueWriteCorrelated(
   });
   const paired = bind(make.project({
     id: fresh('p'), input: joined, channels: [], type: typeOf(meta('id', 'int'), meta('v', 'any', true), meta('vtype', 'text', true)),
-    exprs: [['id', col(joined.id, 'id')], ['v', col(joined.id, 'v')], ['vtype', col(joined.id, 'vtype')]],
+    // A body with no per-row tag takes its framing's TOTAL tag here, over the value column, so a correlated
+    // value is not spelled again inside its own type test.
+    exprs: [['id', col(joined.id, 'id')], ['v', col(joined.id, 'v')],
+      ['vtype', produced.vtype ? col(joined.id, 'vtype') : framedTag(produced.framing, col(joined.id, 'v'))!]],
   }), true);
   const ids = idsOf(paired, fresh);
   // REPLACE the key on the merged vertices (single, declared or the element default) before the insert.

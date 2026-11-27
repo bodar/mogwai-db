@@ -3,6 +3,7 @@ import { col, compilerInt, compilerNull, compilerText, lit, param, type Expr } f
 import { jsonChunks, jsonTextChunks, type JsonChunk } from '../../json-chunks.ts';
 import { CF_MAX_VALUE_BYTES, fitsUtf8 } from '../../do-limits.ts';
 import { SAFE_INT } from './reducer.ts';
+import { inferredVtype } from './tag.ts';
 import { MERGED_VTYPE, perRowColumnOf, staticTypeOf, type ScalarType } from '../../sql/kernel/render.ts';
 import * as make from '../../rel/factory.ts';
 import type { Rel, Table } from '../../rel/rel.ts';
@@ -954,12 +955,16 @@ export const typedNodeDetached = (value: Expr, vtype: Expr, vpid: Expr, metaJson
 });
 
 /** The per-row tag ONE contributor writes into a met type's `MERGED_VTYPE` column — its own per-row
- *  column, its static tag as a literal, or NULL ("infer this one"). `withMergedVtype`'s cell, shared
- *  with a variant's scalar arm (`variantArm`), which re-projects onto a wider payload than `v` alone. */
+ *  column, its static tag as a literal, or, for a contributor that states no type, the tag its storage
+ *  class infers (`inferredVtype`, the wire's own rule — so the framed answer does not change). The
+ *  inferred tag, not NULL: a write stores this column as the row's `vtype`, and a NULL there hid the
+ *  value from a range `has()` (`property('w', coalesce(values('age'), id()))`). `withMergedVtype`'s cell,
+ *  shared with a variant's scalar arm (`variantArm`), which re-projects onto a wider payload than `v`. */
 export const mergedVtypeOf = (rel: Rel, type: ScalarType): Expr => {
   const existing = perRowColumnOf(type);
   const tag = staticTypeOf(type);
-  return existing ? col(rel.id, existing) : tag ? compilerText(tag) : compilerNull('text');
+  return existing ? col(rel.id, existing) : tag ? compilerText(tag)
+    : type.kind === 'unknown' ? inferredVtype(col(rel.id, 'v')) : compilerNull('text');
 };
 
 /**

@@ -21,7 +21,7 @@ export type ValueEvidence =
   | { readonly kind: 'tag'; readonly tag: Expr; readonly nullOnlyForNull?: boolean }
   | { readonly kind: 'storage' };
 
-const STORAGE: ValueEvidence = { kind: 'storage' };
+export const STORAGE: ValueEvidence = { kind: 'storage' };
 
 /** The evidence a value's FRAMING type plus an optional per-row type expression give. A per-row tag
  *  that is a compiler literal (a host that carries its static tag as text) IS a static tag. */

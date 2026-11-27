@@ -346,9 +346,10 @@ export function unionArms(
  * The lattice, and one deliberate refinement of the plan's version. `static ∧ static(same)` stays
  * static, because agreement costs no column. `static ∧ static(differ)` goes per-row, each side
  * projecting its tag as a literal. `perRow ∧ anything` goes per-row. The plan says
- * `unknown ∧ x → unknown`; here an UNKNOWN arm instead contributes a NULL tag to the per-row column,
- * which is not a different answer — a null `vtype` IS "infer this member from its value", which is
- * exactly what `unknown` means — and it is strictly more capable, because it lets an arm that CAN
+ * `unknown ∧ x → unknown`; here an UNKNOWN arm instead contributes the tag its value's storage class
+ * infers (`mergedVtypeOf`) — the wire's own inference, which is exactly what `unknown` means, so the
+ * answer does not change, and a write that stores the column keeps a tag a range `has()` reads —
+ * and it is strictly more capable, because it lets an arm that CAN
  * say keep its tag instead of the whole merge losing it to the one that cannot. Collapsing to
  * `unknown` would discard a `datetime` because its sibling was untagged, which is the discard §6·7
  * exists to end.

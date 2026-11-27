@@ -54,7 +54,7 @@ An item marked "verify" may have landed already. Check it against the code befor
 
 1. [Wrong answers](#1-wrong-answers) — 33 items
 2. [Performance](#2-performance) — 58 items
-3. [Queries we decline](#3-queries-we-decline) — 91 items
+3. [Queries we decline](#3-queries-we-decline) — 92 items
 4. [Shared substrate](#4-shared-substrate) — 19 items
 5. [Product capabilities](#5-product-capabilities) — 7 items
 6. [Internal debt](#6-internal-debt) — 91 items
@@ -807,6 +807,13 @@ Sensible queries that fail with `UnsupportedTraversal` today. Each one is a feat
 - **Problem:** `g.inject([a:1]).mergeV([name:'q'])` declines. So does a side-effect `select(k)` that no Map holds. Each is a plain multiplier that `mergedFromMap` does not route yet.
 - **Fix:** Route these through `mergedFromMap`.
 - **Where:** `src/compiler/rel/lower.ts` (`mergedFromMap`)
+
+#### A computed merge key with no type declines (`merge-computed-untyped-key`)
+- **Area:** writes / `mergeV` / `mergeE`
+- **Reach:** rare
+- **Problem:** `g.V().hasLabel('person').mergeV(__.project('k').by(__.id()))` declines. The computed-match carrier takes a key's type from a `vtype` column, a static tag or a literal, and declines when none applies. This is a third copy of the tag decision that `scalarVtype` and `totalTag` make for a property write.
+- **Fix:** Take the type from `totalTag` over the key's evidence. Compute the value once in the carrier, then infer its tag from that column, so the correlated value is not spelled again. A computed write now stores the same inferred tag, so the match and the stored row agree.
+- **Where:** `src/compiler/rel/write.ts` (`mergeVComputed`, `mergeEComputed`, `litVtype`)
 
 #### Map driver with a token key (`nr-fu-token-keys`)
 - **Area:** writes

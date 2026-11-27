@@ -189,8 +189,8 @@ export const SUBJECT_UNKNOWN: SubjectType = { kind: 'unknown' };
 /**
  * A PER-ROW subject: the row's own tag where it names a Gremlin type, and the value's own inference
  * (`inferredVtype`) where the tag is NULL. A NULL tag means "read the value" in EVERY per-row column —
- * a mixed `inject`'s undeclared argument (`inject(1.0, 2)` tags only the Double), a merged branch arm
- * that could not say (`withMergedVtype`) — and the framer already reads it that way; a predicate that
+ * a mixed `inject`'s undeclared argument (`inject(1.0, 2)` tags only the Double) — and the framer
+ * already reads it that way; a predicate that
  * compared the bare NULL put an `int` in no number class, so `inject(1.0, 2).union(identity(),
  * identity()).is(gt(0))` dropped the 2s and `choose(is(gt(0)), …)` routed them to the false arm. The
  * inference is the framer's own (an INTEGER is an `int` inside int32, else a `long`), so
