@@ -437,6 +437,12 @@ was built, so there is no resume branch.
   `vtype` `'int'`. The fault is the `vtype` that the `id()`-valued write infers
   (`src/compiler/rel/write.ts`), not `has()`. Add a row to `docs/outstanding-work.md` and fix it before
   Stage C, which touches the same write cells.
+- **F2 + F3 landed (f6830e51).** `boundPropertyRelation` (`src/compiler/rel/property.ts`) types the
+  projected `p_meta` column `'json'`. The property-table rule comment in `scripts/arch-check.ts` says it
+  checks RelIR literals only; B5 owns raw q-kernel strings. **Remains:** the retype does not cover JSONB
+  meta that comes from a table scan and reaches `inputRows`. That needs a `'jsonb'` SqlType, and the
+  reviewer said it is not worth one without real reach. If R9 lands, it rewrites the arch-check property
+  paragraph again.
 - **F2. `p_meta` type label.** `PROPERTIES.vertex.cols` types `meta` as `'blob'` (physical). In
   `src/compiler/rel/property.ts` `boundPropertyRelation`, `p_meta` holds `json_extract(node,'$.meta')`,
   which is TEXT JSON. Nothing reads the label today. A consumer that branches on `type === 'json'`
