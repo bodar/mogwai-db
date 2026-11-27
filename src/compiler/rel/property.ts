@@ -116,7 +116,9 @@ export function boundPropertyRelation(input: Rel, cte: Rel, elem: Elem, keys: re
   const node = elem === 'edge' ? col(wanted.id, B.value) : col(nodes.id, B.node);
   return make.project({
     id: fresh('bpr'), input: nodes, channels: input.channels,
-    type: typeOf(...prefixed(PROPERTIES[elem].cols), ...carriedCols(input.channels)),
+    // `meta` is READ here as TEXT JSON (`json_extract` of the landed node), not the table's stored
+    // JSONB `blob`, so this projection declares it `json`.
+    type: typeOf(...prefixed(PROPERTIES[elem].cols.map((c) => c.name === 'meta' ? meta(c.name, 'json', true) : c)), ...carriedCols(input.channels)),
     exprs: [
       // vpid/meta ride on the landed node (the detached compile emits `{t,v,vpid,meta}`); a lossy
       // landing without them extracts NULL — the framer then synthesises `owner:pk`, the old behaviour.
