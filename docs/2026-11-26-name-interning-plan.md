@@ -393,6 +393,9 @@ Plan items, in order:
   allMatch `vlMatch` (about line 5344) build the same "vertices with the label named x" relation. Give
   `labelHits` the optional owner `of`, like `labelOwners`, and use it in both. The "`nameId` is NULL
   for an unknown name" rule is then in one place. SQL the same apart from relation ids.
+  **LANDED as `498dcfac` with R4 (`CI passed`, plans byte-identical, no baseline moves).** Mechanism:
+  `labelHits(name, fresh, of?)` in `write.ts` passes `of` to `labelOwners`; the mergeV `vlMatch` is
+  `labelHits(…, candId)`. **Remains:** nothing.
 - **R3. The catalog edge-triple endpoint is `ownedNames('vertex')`.** `src/services/catalog/schema.ts`
   `endpoint` (about line 165) is `withNames('labels', labelOwners('vertex', fresh), 'label', fresh)`, the
   body of `ownedNames`. Use it. SQL unchanged. Do it with P1.
@@ -402,6 +405,8 @@ Plan items, in order:
   3992) builds the same `SELECT 1` projection as `build.ts` `existsOf`. Export `ones` and use it in
   both. Do NOT extend it to the bare-plan `{kind:'exists', plan}` sites or `lower/exists.ts`
   (about lines 99 and 153): they project the tail's own column on purpose.
+  **LANDED as `498dcfac` with R2 (`CI passed`, no baseline moves).** Mechanism: `ones(rel, fresh)` is
+  exported from `build.ts`; `existsOf` and `cappedCount` use it. **Remains:** nothing.
 
 **Needs-human questions from the reuse round:** none.
 
