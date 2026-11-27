@@ -460,6 +460,10 @@ was built, so there is no resume branch.
     `by()` over a Map or record row (the gap is generic: `g.inject([kind:'a']).order().by(select('kind'))`,
     `g.V().project('n').by('name').groupCount().by(select('n'))`). Drop `catalog/schema.ts` from Where.
   - The Contents counts (§1–§4) are stale (one more §3 row). Recount at the next compaction.
+- **F5 + R7 landed (d5e30ad8).** `make.oneRow(id)` in `src/rel/factory.ts` is the one authority for the
+  one-row `(VALUES (1))` relation. All eight sites use it, the two `leading.ts` units included (`src/rel`
+  imports its own factory, so no layer exception). The `lower.ts` drain probe uses `build.ts` `ones()`.
+  SQL changes only in alias names; no baseline moved. **Remains:** nothing.
 - **F5. `lower.ts` drain probe hand-rolls `ones`.** `src/compiler/rel/lower.ts` (about line 1378, hint
   `drp`) builds the same SELECT-1 projection as `ones(rel, fresh)`. Fold it in with R7 below.
 
