@@ -410,6 +410,86 @@ Plan items, in order:
 
 **Needs-human questions from the reuse round:** none.
 
+### Next round — Stage B start (from the 2026-11-27 round)
+
+P1–P4 and R1–R4 landed this round (`cc95f59c`, `767bf29c`, `268089db`, `498dcfac`). Stage B was not built.
+
+**Parked: all of Stage B (B1–B6). One root cause.** Stage B's wrappers (`keyIs`/`keyEq`/`keyNameOf`/
+`keyCell`) are identity while keys are TEXT. They pay off only if Stage C lands. C0 is a cheap spike whose
+stop rule can cancel Stage C. After this round, `keyMembership` and `propertyKeyExpr` correctly stay (they
+serve JSON-name keys and write cells), so B1+B2 delete nothing and have no standalone value. No branch
+was built, so there is no resume branch.
+- **C0 (prerequisite, before B1–B6).** Run the C0 spike from Stage C now: on a copy of the LDBC store,
+  rebuild the property tables by hand with a `keys` table, integer `key` columns, the indexes and `pk`.
+  Compare `dbstat` by name. No landing. If the saving is under 30 MB, stop Stage B and Stage C and
+  record the measurement here.
+- **B1+B2 `key-authority-filters` (after C0).** Needs the owner's answer below.
+- **B3 `key-authority-outputs`, B4 `key-authority-writes` (after B1+B2).** `internKeys` lands with C2,
+  not as a no-op.
+- **B5 `store-name-fragments` (after C0).** Includes the A5 raw-SQL residue.
+- **B6 `name-authority-guard` (after B1–B5).** Includes the raw half of A6.
+
+**Follow-ups from review (all minor; no answer changes from this round's commits).**
+- **F1. Range `has()` misses a property written from `id()` (pre-existing wrong answer).** On modern,
+  `g.V().property('i2', id()).iterate()` stores `vtype` NULL. Then `g.V().has('i2',gt(3)).count()`
+  gives 0 (reference 3) and `has('i2',gte(1)).count()` gives 0 (reference 6).
+  `g.V().where(values('i2').is(gt(3))).count()` is correct, and `property('a2', values('age'))` keeps
+  `vtype` `'int'`. The fault is the `vtype` that the `id()`-valued write infers
+  (`src/compiler/rel/write.ts`), not `has()`. Add a row to `docs/outstanding-work.md` and fix it before
+  Stage C, which touches the same write cells.
+- **F2. `p_meta` type label.** `PROPERTIES.vertex.cols` types `meta` as `'blob'` (physical). In
+  `src/compiler/rel/property.ts` `boundPropertyRelation`, `p_meta` holds `json_extract(node,'$.meta')`,
+  which is TEXT JSON. Nothing reads the label today. A consumer that branches on `type === 'json'`
+  (`write.ts` `inputRows`) would send a raw JSONB blob that `program.ts` rejects. Type the projected
+  stream column `'json'`, or say on `PROPERTIES` that `'blob'` is the physical type only.
+- **F3. Scope of the property-table arch rule.** `scripts/arch-check.ts` matches RelIR literals only.
+  `src/services/catalog/olap/kernel.ts:107` names `edge_properties` in a raw `q` template. Say in the rule
+  comment that q-kernel strings are out of scope (B5 owns them).
+- **F4. `docs/outstanding-work.md` row fixes (docs only).**
+  - `R8-res`: the kept Problem sentence says record-framed `project('name').by('name').mergeV()`
+    declines with `MapScopeDeferral` `'merge-own-entry'`. The user sees "no lowering covers". Reconcile
+    the two sentences.
+  - `schema-map-by-key`: add the witnesses `g.call('schema').dedup().by(select('kind'))` and
+    `g.call('schema').groupCount().by('kind')` (both "no lowering covers"). Rename the row to a keyed
+    `by()` over a Map or record row (the gap is generic: `g.inject([kind:'a']).order().by(select('kind'))`,
+    `g.V().project('n').by('name').groupCount().by(select('n'))`). Drop `catalog/schema.ts` from Where.
+  - The Contents counts (§1–§4) are stale (one more §3 row). Recount at the next compaction.
+- **F5. `lower.ts` drain probe hand-rolls `ones`.** `src/compiler/rel/lower.ts` (about line 1378, hint
+  `drp`) builds the same SELECT-1 projection as `ones(rel, fresh)`. Fold it in with R7 below.
+
+**Reuse proposals (next round, before B1; none depends on C0).**
+- **R5. `ELEMENTS` authority beside `PROPERTIES`.** `write.ts` `NODES_COLS` (about line 2794) and
+  `EDGE_ROW_COLS` (about 4547) copy `build.ts` `NODE_COLS`/`EDGE_COLS`. About 25 hand-written
+  `make.scan({table:'nodes'|'edges', …})` sites are in `write.ts`, `element.ts` and `source.ts`, plus 9
+  `elem === 'edge' ? 'edges' : 'nodes'` ternaries. Add `ELEMENTS = {vertex:{table:'nodes',cols},
+  edge:{table:'edges',cols}}` with `elementScan(kind, fresh, hint)` and `elementRows(kind, fresh,
+  {of, where, hint})`, shaped like `propertyScan`/`propertyRows`. Add an arch-check SEAMS row for
+  `nodes`/`edges` literals (`build.ts` only, in `src/compiler`). Narrow write targets (incidentEdges,
+  markDirty, recordTombstones) and `BaseGraph.adjacencyEdges` keep their own columns. Expect about
+  30–40 lines less; no answer change.
+- **R6. One `elementWithId(elem, uid, fresh)` (after R5).** `write.ts` `withPreChecks` (about 1404),
+  `elementIdGuard` (about 2981) and `endpointRowid` (about 6542) each repeat the number-or-uid filter.
+  Build it on `elementRows` with `where`. About 15 lines less; SQL identical apart from ids.
+- **R7. `oneRow` moves to `build.ts` beside `ones`.** `lower.ts` `oneRow` (about 2853) is private; the
+  same one-row `make.values` is hand-rolled at `lower/scoped.ts:121`, `lower/reduction.ts` (1037, 2091,
+  2175) and `write.ts:1411`. Do F5 in the same commit. Leave the `src/rel/passes/leading.ts` copies
+  (layer boundary).
+- **R8. One `barrierCells(run, round, channel, fresh, {cval, where, hint})` reader.** `shortestpath.ts`
+  `distAt`/`reconstructSources`, `decorate.ts` `decorateBinding` and `lower.ts` `lowerPairResume` each
+  declare the same six-column `barrier_state` scan and `run/round/channel` filter. About 25 lines less;
+  SQL and plan identical. Optional SEAMS row for `barrier_state`.
+- **R9. One `PROPERTY_TABLES` fact in `src/rel`.** `semijoin.ts` `SEEK_PROPERTIES` and `PROPERTY_OWNER`
+  state the same pairs twice; `build.ts` `PROPERTIES` states them a third time. Put one
+  `PROPERTY_TABLES` in `src/rel` (beside `Table` in `rel.ts`); semijoin derives both maps; `PROPERTIES`
+  spreads it and adds `cols`. The compiler may import `src/rel`. The arch-check exemption for
+  `semijoin.ts` then goes. No SQL change.
+
+**Needs-human questions from this round (verbatim):**
+- "Stage B's identity wrappers (keyIs/keyEq/keyNameOf/keyCell) pay off only if Stage C lands, and C0 is a
+  cheap no-landing spike whose stop rule can cancel Stage C. Run C0 before B1-B4? Once keyMembership and
+  propertyKeyExpr correctly stay (they serve JSON-name keys and write cells), B1+B2 delete nothing, so
+  they have no standalone value."
+
 **Gate A (owner review) — PASSED 2026-11-26.** Evidence: the A1–A6 refactors are net −20 production
 lines (A1 +26, A2+A3 −6, A4 −7, A5 −31, A6 −2); A4 is −1,873 SQL bytes over the corpus; `sql-plan`
 unchanged. The separate answer fix `7b71ba45` is +116 lines. Stage A is worth landing alone.
